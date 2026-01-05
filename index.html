@@ -6,7 +6,6 @@
 <title>简易登记系统 v6.4.2（重构稳定版）</title>
 
 <style>
-/* ===== 基础样式（原版保留） ===== */
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto}
 button{cursor:pointer}
 .hidden{display:none!important}
@@ -21,6 +20,8 @@ th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
 .topbar{padding:16px;border-bottom:1px solid #eee}
 .container{padding:16px}
 .actions button{margin-right:6px}
+h3{margin:12px 0}
+input,select{padding:6px 8px}
 </style>
 </head>
 
@@ -56,8 +57,19 @@ th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
 
   <!-- 卖家 -->
   <div id="tab-sellers" class="hidden">
+    <h3>卖家管理</h3>
+    <div class="actions">
+      <button onclick="exportSellerCSV()">导出卖家 CSV</button>
+      <button onclick="downloadSellerTemplate()">下载导入模板 CSV</button>
+      <button onclick="importSellerCSV()">导入卖家 CSV</button>
+    </div>
     <table>
-      <thead><tr><th>ID</th><th>名称</th><th>操作</th></tr></thead>
+      <thead>
+        <tr>
+          <th>卖家ID</th><th>卖家名称</th><th>联系人</th><th>备注</th>
+          <th>FX</th><th>佣金</th>
+        </tr>
+      </thead>
       <tbody id="seller-table"></tbody>
     </table>
   </div>
@@ -83,18 +95,13 @@ th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
   <!-- 订单 -->
   <div id="tab-orders" class="hidden">
     <h3>订单列表</h3>
-
-    <!-- 筛选 -->
     <div style="display:flex;gap:8px;margin-bottom:8px">
       <input id="sellerSearch" placeholder="搜索卖家（仅过滤下拉）"/>
       <select id="sellerSelect"></select>
     </div>
-
     <table>
       <thead>
-        <tr>
-          <th>订单号</th><th>卖家</th><th>状态</th>
-        </tr>
+        <tr><th>订单号</th><th>卖家</th><th>状态</th></tr>
       </thead>
       <tbody id="order-table"></tbody>
     </table>
@@ -102,238 +109,183 @@ th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
 </div>
 
 <script>
-/* =========================================================
-   IndexedDB + 全局状态
-========================================================= */
-const DB_NAME = "ops_v6_4_2_db";
-const STORE = "kv";
-let S = {
-  sellers: [],
-  products: [],
-  orders: []
-};
-let selectedSellerId = "";
+/* ===================== IndexedDB & State ===================== */
+const DB_NAME="ops_v6_4_2_db", STORE="kv";
+let S={ sellers:[], products:[], orders:[] };
+let selectedSellerId="";
 
-function openDB(){
-  return new Promise((res,rej)=>{
-    const req = indexedDB.open(DB_NAME,1);
-    req.onupgradeneeded=e=>{
-      const db=e.target.result;
-      if(!db.objectStoreNames.contains(STORE)){
-        db.createObjectStore(STORE);
-      }
-    };
-    req.onsuccess=e=>res(e.target.result);
-    req.onerror=e=>rej(e);
-  });
-}
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);
+  r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains(STORE))db.createObjectStore(STORE);};
+  r.onsuccess=e=>res(e.target.result); r.onerror=e=>rej(e);});}
 
-async function loadState(){
-  const db = await openDB();
-  return new Promise(res=>{
-    const tx=db.transaction(STORE,"readonly");
-    const st=tx.objectStore(STORE);
-    const r=st.get("state");
-    r.onsuccess=()=>{
-      if(r.result){S=r.result}
-      res();
-    };
-  });
-}
+async function loadState(){const db=await openDB();return new Promise(res=>{
+  const tx=db.transaction(STORE,"readonly"), st=tx.objectStore(STORE), g=st.get("state");
+  g.onsuccess=()=>{if(g.result)S=g.result;res();};});}
 
-async function saveState(){
-  const db = await openDB();
-  const tx=db.transaction(STORE,"readwrite");
-  tx.objectStore(STORE).put(S,"state");
-}
+async function saveState(){const db=await openDB();const tx=db.transaction(STORE,"readwrite");
+  tx.objectStore(STORE).put(S,"state");}
 
-/* =========================================================
-   Tabs
-========================================================= */
+/* ===================== Tabs ===================== */
 document.querySelectorAll(".tab-btn").forEach(b=>{
   b.onclick=()=>{
     document.querySelectorAll(".tab-btn").forEach(x=>x.classList.remove("active"));
     b.classList.add("active");
-    ["dashboard","sellers","products","orders"].forEach(id=>{
-      document.getElementById("tab-"+id).classList.add("hidden");
-    });
+    ["dashboard","sellers","products","orders"].forEach(id=>document.getElementById("tab-"+id).classList.add("hidden"));
     document.getElementById("tab-"+b.dataset.tab).classList.remove("hidden");
   };
 });
 
-/* =========================================================
-   渲染
-========================================================= */
-function renderAll(){
-  renderKPI();
-  renderSellers();
-  renderProducts();
-  renderOrders();
-}
-
+/* ===================== Render ===================== */
+function renderAll(){renderKPI();renderSellers();renderProducts();renderOrders();}
 function renderKPI(){
-  document.getElementById("kpi-sellers").textContent=S.sellers.length;
-  document.getElementById("kpi-products").textContent=S.products.length;
-  document.getElementById("kpi-orders").textContent=S.orders.length;
+  kpi("sellers",S.sellers.length);kpi("products",S.products.length);kpi("orders",S.orders.length);
 }
+function kpi(k,v){document.getElementById("kpi-"+k).textContent=v;}
 
 function renderSellers(){
-  const tb=document.getElementById("seller-table");
-  tb.innerHTML="";
+  const tb=document.getElementById("seller-table");tb.innerHTML="";
   S.sellers.forEach(s=>{
-    const tr=document.createElement("tr");
-    tr.innerHTML=`<td>${s.id}</td><td>${s.name}</td><td>-</td>`;
-    tb.appendChild(tr);
+    const fx=`USD:${s.fx?.usd??""} EUR:${s.fx?.eur??""} GBP:${s.fx?.gbp??""} CAD:${s.fx?.cad??""} JPY:${s.fx?.jpy??""}`;
+    const cm=`文:${s.commission?.text??""} 图:${s.commission?.image??""} 视:${s.commission?.video??""} 免:${s.commission?.waived??""} FB:${s.commission?.waived_fb??""} 点:${s.commission?.waived_star??""}`;
+    tb.insertAdjacentHTML("beforeend",`<tr>
+      <td>${s.seller_id}</td><td>${s.seller_name||""}</td><td>${s.contact||""}</td><td>${s.remark||""}</td>
+      <td>${fx}</td><td>${cm}</td></tr>`);
   });
-
   const sel=document.getElementById("sellerSelect");
   sel.innerHTML=`<option value="">全部卖家</option>`;
-  S.sellers.forEach(s=>{
-    const o=document.createElement("option");
-    o.value=s.id;o.textContent=s.name;
-    sel.appendChild(o);
-  });
+  S.sellers.forEach(s=>sel.insertAdjacentHTML("beforeend",`<option value="${s.seller_id}">${s.seller_name||s.seller_id}</option>`));
 }
 
 function renderProducts(){
-  const tb=document.getElementById("product-table");
-  tb.innerHTML="";
-  S.products.forEach(p=>{
-    const tr=document.createElement("tr");
-    tr.innerHTML=`<td>${p.product_name}</td><td>${p.asin}</td><td>${p.market}</td><td>${p.seller_id}</td><td>${p.review_type}</td>`;
-    tb.appendChild(tr);
-  });
+  const tb=document.getElementById("product-table");tb.innerHTML="";
+  S.products.forEach(p=>tb.insertAdjacentHTML("beforeend",
+    `<tr><td>${p.product_name||""}</td><td>${p.asin}</td><td>${p.market}</td><td>${p.seller_id||""}</td><td>${p.review_type||""}</td></tr>`));
 }
 
-function getFilteredOrders(){
-  if(!selectedSellerId) return S.orders;
-  return S.orders.filter(o=>o.seller_id===selectedSellerId);
-}
-
+function getFilteredOrders(){return selectedSellerId?S.orders.filter(o=>o.seller_id===selectedSellerId):S.orders;}
 function renderOrders(){
-  const tb=document.getElementById("order-table");
-  tb.innerHTML="";
-  getFilteredOrders().forEach(o=>{
-    const tr=document.createElement("tr");
-    tr.innerHTML=`<td>${o.order_id}</td><td>${o.seller_id}</td><td><span class="badge gray">待处理</span></td>`;
-    tb.appendChild(tr);
-  });
+  const tb=document.getElementById("order-table");tb.innerHTML="";
+  getFilteredOrders().forEach(o=>tb.insertAdjacentHTML("beforeend",
+    `<tr><td>${o.order_id}</td><td>${o.seller_id}</td><td><span class="badge gray">待处理</span></td></tr>`));
 }
 
-/* =========================================================
-   筛选逻辑（已重构）
-========================================================= */
-document.getElementById("sellerSelect").onchange=e=>{
-  selectedSellerId=e.target.value;
-  renderOrders();
-};
-
-document.getElementById("sellerSearch").oninput=e=>{
+/* ===================== 订单筛选（已封板） ===================== */
+sellerSelect.onchange=e=>{selectedSellerId=e.target.value;renderOrders();};
+sellerSearch.oninput=e=>{
   const kw=e.target.value.toLowerCase();
-  const sel=document.getElementById("sellerSelect");
-  Array.from(sel.options).forEach((o,i)=>{
-    if(i===0) return;
-    o.hidden=!o.textContent.toLowerCase().includes(kw);
-  });
+  [...sellerSelect.options].forEach((o,i)=>{if(i===0)return;o.hidden=!o.textContent.toLowerCase().includes(kw);});
 };
 
-/* =========================================================
-   CSV（产品）
-========================================================= */
+/* ===================== 产品 CSV ===================== */
 function exportProductCSV(){
-  const rows=[
-    ["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"]
-  ];
-  S.products.forEach(p=>{
-    rows.push([p.product_name,p.asin,p.market,p.currency,p.seller_id,p.review_type,p.discount_origin||"",p.buyer_commission_origin||"",p.remark||""]);
-  });
+  const rows=[["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"]];
+  S.products.forEach(p=>rows.push([p.product_name,p.asin,p.market,p.currency||"",p.seller_id||"",p.review_type||"",p.discount_origin||"",p.buyer_commission_origin||"",p.remark||""]));
   downloadCSV(rows,"products.csv");
 }
-
 function downloadProductTemplate(){
-  const rows=[
-    ["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"],
-    ["示例产品","B0XXXX","US","USD","seller1","文字评","0","0",""]
-  ];
+  const rows=[["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"],
+              ["示例产品","B0XXXX","US","USD","seller_demo","文字评","0","0",""]];
   downloadCSV(rows,"product_import_template.csv");
 }
-
 function importProductCSV(){
-  const inp=document.createElement("input");
-  inp.type="file";
-  inp.accept=".csv";
-  inp.onchange=()=>{
-    const f=inp.files[0];
-    const r=new FileReader();
-    r.onload=()=>{
-      const lines=r.result.split(/\r?\n/).filter(l=>l.trim());
-      const head=lines.shift().split(",");
-      let add=0,skip=0;
-      lines.forEach(l=>{
-        const c=l.split(",");
-        const row={};
-        head.forEach((h,i)=>row[h]=c[i]||"");
-        if(!row.asin||!row.market) return;
-        const exist=S.products.find(p=>p.asin===row.asin&&p.market===row.market);
-        if(exist){skip++;return;}
-        S.products.push(row);add++;
-      });
-      saveState();renderProducts();
-      alert(`新增 ${add}，跳过 ${skip}`);
-    };
-    r.readAsText(f);
-  };
-  inp.click();
+  filePick(".csv",txt=>{
+    const lines=txt.split(/\r?\n/).filter(x=>x.trim()); if(!lines.length) return;
+    const head=lines.shift().split(",");
+    let add=0,skip=0;
+    lines.forEach(l=>{
+      const c=l.split(","), row={}; head.forEach((h,i)=>row[h]=c[i]||"");
+      if(!row.asin||!row.market) return;
+      if(S.products.find(p=>p.asin===row.asin&&p.market===row.market)){skip++;return;}
+      S.products.push(row); add++;
+    });
+    saveState(); renderProducts(); alert(`新增 ${add}，跳过 ${skip}`);
+  });
 }
 
+/* ===================== 卖家 CSV（中文表头） ===================== */
+const SELLER_HEADERS_CN=[
+  "卖家ID","卖家名称","联系人","备注",
+  "FX_USD","FX_EUR","FX_GBP","FX_CAD","FX_JPY",
+  "佣金_文字评","佣金_图片评","佣金_视频评","佣金_免评","佣金_免评FB","佣金_免评点星"
+];
+
+function exportSellerCSV(){
+  const rows=[SELLER_HEADERS_CN];
+  S.sellers.forEach(s=>{
+    rows.push([
+      s.seller_id, s.seller_name||"", s.contact||"", s.remark||"",
+      s.fx?.usd??"", s.fx?.eur??"", s.fx?.gbp??"", s.fx?.cad??"", s.fx?.jpy??"",
+      s.commission?.text??"", s.commission?.image??"", s.commission?.video??"",
+      s.commission?.waived??"", s.commission?.waived_fb??"", s.commission?.waived_star??""
+    ]);
+  });
+  downloadCSV(rows,"sellers.csv");
+}
+
+function downloadSellerTemplate(){
+  const rows=[SELLER_HEADERS_CN,
+    ["seller_anne_us","Anne服务商","Anne","美国团队","7.2","8.4","9.6","5.0","0.05","30","50","70","10","10","10"]
+  ];
+  downloadCSV(rows,"seller_import_template.csv");
+}
+
+function importSellerCSV(){
+  filePick(".csv",txt=>{
+    const lines=txt.split(/\r?\n/).filter(x=>x.trim()); if(lines.length<2) return;
+    const head=lines.shift();
+    if(head!==SELLER_HEADERS_CN.join(",")){alert("表头不匹配，请使用模板"); return;}
+    let add=0,upd=0,fail=0;
+    lines.forEach(l=>{
+      const c=l.split(","), m={}; SELLER_HEADERS_CN.forEach((h,i)=>m[h]=c[i]||"");
+      if(!m["卖家ID"]){fail++; return;}
+      let s=S.sellers.find(x=>x.seller_id===m["卖家ID"]);
+      if(!s){
+        s={seller_id:m["卖家ID"], fx:{}, commission:{}};
+        S.sellers.push(s); add++;
+      }else upd++;
+      // 非空字段才更新
+      if(m["卖家名称"]) s.seller_name=m["卖家名称"];
+      if(m["联系人"]) s.contact=m["联系人"];
+      if(m["备注"]) s.remark=m["备注"];
+      s.fx=s.fx||{}; s.commission=s.commission||{};
+      [["FX_USD","usd"],["FX_EUR","eur"],["FX_GBP","gbp"],["FX_CAD","cad"],["FX_JPY","jpy"]]
+        .forEach(([k,f])=>{ if(m[k]!=="") s.fx[f]=num(m[k]); });
+      [["佣金_文字评","text"],["佣金_图片评","image"],["佣金_视频评","video"],["佣金_免评","waived"],["佣金_免评FB","waived_fb"],["佣金_免评点星","waived_star"]]
+        .forEach(([k,f])=>{ if(m[k]!=="") s.commission[f]=num(m[k]); });
+    });
+    saveState(); renderSellers(); alert(`新增 ${add}，更新 ${upd}，失败 ${fail}`);
+  });
+}
+
+/* ===================== 工具 ===================== */
+function num(v){const n=Number(v); if(Number.isNaN(n)) throw new Error("数值非法"); return n;}
+function filePick(acc,cb){const i=document.createElement("input"); i.type="file"; i.accept=acc;
+  i.onchange=()=>{const r=new FileReader(); r.onload=()=>cb(r.result); r.readAsText(i.files[0]);}; i.click();}
 function downloadCSV(rows,name){
   const csv=rows.map(r=>r.join(",")).join("\n");
   const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-  a.download=name;a.click();
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download=name; a.click();
 }
 
-/* =========================================================
-   JSON & 示例
-========================================================= */
-function exportJSON(){
-  downloadCSV([[JSON.stringify(S)]],"data.json");
-}
-function importJSON(){
-  const inp=document.createElement("input");
-  inp.type="file";
-  inp.onchange=()=>{
-    const r=new FileReader();
-    r.onload=()=>{S=JSON.parse(r.result);saveState();renderAll();};
-    r.readAsText(inp.files[0]);
-  };
-  inp.click();
-}
+/* ===================== JSON & 示例 ===================== */
+function exportJSON(){downloadCSV([[JSON.stringify(S)]],"data.json");}
+function importJSON(){filePick("",txt=>{S=JSON.parse(txt);saveState();renderAll();});}
 function loadSample(){
   S={
-    sellers:[{id:"s1",name:"小龙"},{id:"s2",name:"Anne服务商"}],
+    sellers:[
+      {seller_id:"seller_xl",seller_name:"小龙",fx:{usd:7.2,eur:8.4,gbp:9.6,cad:5,jpy:0.05},
+       commission:{text:30,image:50,video:70,waived:10,waived_fb:10,waived_star:10}},
+      {seller_id:"seller_anne",seller_name:"Anne服务商"}
+    ],
     products:[],
-    orders:[
-      {order_id:"111-xxx",seller_id:"s1"},
-      {order_id:"222-yyy",seller_id:"s2"}
-    ]
+    orders:[{order_id:"111-xxx",seller_id:"seller_xl"},{order_id:"222-yyy",seller_id:"seller_anne"}]
   };
-  saveState();renderAll();
+  saveState(); renderAll();
 }
-function clearAll(){
-  if(confirm("确定清空？")){
-    S={sellers:[],products:[],orders:[]};
-    saveState();renderAll();
-  }
-}
+function clearAll(){ if(confirm("确定清空？")){S={sellers:[],products:[],orders:[]}; saveState(); renderAll();}}
 
-/* =========================================================
-   Init
-========================================================= */
-(async()=>{
-  await loadState();
-  renderAll();
-})();
+/* ===================== Init ===================== */
+(async()=>{ await loadState(); renderAll(); })();
 </script>
 
 </body>
