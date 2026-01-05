@@ -1065,6 +1065,94 @@ const U = {
 function blankState(){
   return {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
 }
+
+/* ===================== IndexedDB Main Store (Replace localStorage main state) ===================== */
+const MAIN_DB_NAME = "ops_v642_main";
+const MAIN_DB_VERSION = 1;
+const MAIN_STORE = "kv";
+const MAIN_STATE_KEY = "main_state_v1";
+
+let __mainDbPromise = null;
+function openMainDB(){
+  if(__mainDbPromise) return __mainDbPromise;
+  __mainDbPromise = new Promise((resolve, reject)=>{
+    try{
+      const req = indexedDB.open(MAIN_DB_NAME, MAIN_DB_VERSION);
+      req.onupgradeneeded = (e)=>{
+        const db = req.result;
+        if(!db.objectStoreNames.contains(MAIN_STORE)){
+          db.createObjectStore(MAIN_STORE, { keyPath: "key" });
+        }
+      };
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error || new Error("IndexedDB open failed"));
+    }catch(err){ reject(err); }
+  });
+  return __mainDbPromise;
+}
+async function idbGet(key){
+  const db = await openMainDB();
+  return await new Promise((resolve, reject)=>{
+    const tx = db.transaction(MAIN_STORE, "readonly");
+    const st = tx.objectStore(MAIN_STORE);
+    const req = st.get(key);
+    req.onsuccess = ()=> resolve(req.result ? req.result.value : undefined);
+    req.onerror = ()=> reject(req.error || new Error("IndexedDB get failed"));
+  });
+}
+async function idbSet(key, value){
+  const db = await openMainDB();
+  return await new Promise((resolve, reject)=>{
+    const tx = db.transaction(MAIN_STORE, "readwrite");
+    const st = tx.objectStore(MAIN_STORE);
+    st.put({ key, value });
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> reject(tx.error || new Error("IndexedDB set failed"));
+    tx.onabort = ()=> reject(tx.error || new Error("IndexedDB set aborted"));
+  });
+}
+async function idbDel(key){
+  const db = await openMainDB();
+  return await new Promise((resolve, reject)=>{
+    const tx = db.transaction(MAIN_STORE, "readwrite");
+    const st = tx.objectStore(MAIN_STORE);
+    st.delete(key);
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> reject(tx.error || new Error("IndexedDB delete failed"));
+  });
+}
+async function clearMainState(){
+  try{ await idbDel(MAIN_STATE_KEY); }catch(e){}
+  try{ localStorage.removeItem(STORAGE_KEY); }catch(e){} // 清理旧主库（迁移后不再使用）
+}
+
+/* ---- Save queue: avoid too many IDB transactions ---- */
+let __saveTimer = null;
+let __saveInFlight = false;
+let __savePending = false;
+
+function _queueSave(){
+  __savePending = true;
+  if(__saveTimer) return;
+  __saveTimer = setTimeout(async ()=>{
+    __saveTimer = null;
+    if(__saveInFlight) { __savePending = true; return; }
+    __saveInFlight = true;
+    try{
+      // 只保存当前内存态（主库）
+      await idbSet(MAIN_STATE_KEY, S);
+      __savePending = false;
+    }catch(e){
+      console.error(e);
+      // IndexedDB 失败时，尽量回退到 localStorage（最后兜底）
+      try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(S)); }catch(_e){}
+      alert("保存失败：IndexedDB 写入失败。\n\n建议：\n1) 关闭无痕模式；\n2) 检查浏览器是否禁止站点存储；\n3) 换 Chrome 正常模式重试。\n\n注意：已尝试回退保存到 localStorage，但容量仍可能不足。");
+    }finally{
+      __saveInFlight = false;
+      if(__savePending) _queueSave();
+    }
+  }, 180);
+}
 function cleanupOldKeys(){
   try{
     const keep = STORAGE_KEY;
@@ -1087,28 +1175,7 @@ function _safeSetItem(key, value){
     throw e;
   }
 }
-function save(){
-  try{
-    const json = JSON.stringify(S);
-    if(_safeSetItem(STORAGE_KEY, json)) return;
-    // file:// 下多个版本共用同一个 localStorage，很容易挤爆；先清理旧 key 再重试
-    cleanupOldKeys();
-    if(_safeSetItem(STORAGE_KEY, json)) return;
-
-    // 仍然超额：尝试瘦身保存（保留核心数据，裁剪历史/草稿）
-    const slim = JSON.parse(json);
-    if(Array.isArray(slim.drafts) && slim.drafts.length>20) slim.drafts = slim.drafts.slice(-20);
-    if(Array.isArray(slim.settlementBatches) && slim.settlementBatches.length>200) slim.settlementBatches = slim.settlementBatches.slice(-200);
-    if(Array.isArray(slim.batches) && slim.batches.length>200) slim.batches = slim.batches.slice(-200);
-    const json2 = JSON.stringify(slim);
-    if(_safeSetItem(STORAGE_KEY, json2)) return;
-
-    alert("保存失败：浏览器本地存储空间已满。\n\n建议：\n1) 点击右上角『清空数据』后再『导入 JSON』；或\n2) 在浏览器设置里清理站点数据（file:// 也会共用）。\n\n本次操作已在内存中完成，但刷新页面可能会丢失。");
-  }catch(e){
-    console.error(e);
-    alert("保存失败: " + (e && e.message ? e.message : String(e)));
-  }
-}
+function save(){ _queueSave(); }
 function computeSeq(){
   const max = {seller:0, product:0, order:0, batch:0};
   S.sellers.forEach(x=>{ const m=String(x.id||"").match(/^S(\d+)$/); if(m) max.seller=Math.max(max.seller, Number(m[1])); });
@@ -1238,15 +1305,35 @@ function normalizeImported(obj){
 
   return out;
 }
-function load(){
+async function load(){
+  // 1) 先读 IndexedDB 主库
+  try{
+    const v = await idbGet(MAIN_STATE_KEY);
+    if(v){
+      S = normalizeImported(v);
+      computeSeq();
+      return;
+    }
+  }catch(e){
+    // 如果 IDB 故障，后面会尝试 localStorage 兜底
+    console.warn("IDB load failed, fallback to localStorage:", e);
+  }
+
+  // 2) 迁移：若 localStorage 有旧数据，则导入到 IDB，并清掉旧 key
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw){ S = blankState(); return; }
-    S = normalizeImported(JSON.parse(raw));
-    computeSeq();
-  }catch(e){
-    S = blankState();
-  }
+    if(raw){
+      const obj = normalizeImported(JSON.parse(raw));
+      S = obj;
+      computeSeq();
+      try{ await idbSet(MAIN_STATE_KEY, S); }catch(_e){}
+      try{ localStorage.removeItem(STORAGE_KEY); }catch(_e){}
+      return;
+    }
+  }catch(e){}
+
+  // 3) 全新空库
+  S = blankState();
 }
 
 /* ===================== Business Logic ===================== */
@@ -2590,16 +2677,17 @@ function bind(){
 
   $("btnReset").onclick = ()=>{
     if(!confirm("确定清空所有数据？")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    S = blankState();
-    save();
-    UI.selected.clear();
-    UI.page = 1;
-    Actions.cancelSellerEdit();
-    Actions.cancelProductEdit();
-    Actions.cancelOrderEdit();
-    renderAll();
-    alert("已清空。");
+    clearMainState().finally(()=>{
+      S = blankState();
+      save();
+      UI.selected.clear();
+      UI.page = 1;
+      Actions.cancelSellerEdit();
+      Actions.cancelProductEdit();
+      Actions.cancelOrderEdit();
+      renderAll();
+      alert("已清空。");
+    });
   };
 
   // seller
@@ -2903,13 +2991,19 @@ function initCollapseMemory(){
 
 
 /* ===================== Init ===================== */
-load();
+const __loadPromise = load();
 document.addEventListener("DOMContentLoaded", ()=>{
-  bind();
-  renderTabs();
-  renderAll();
-  initCollapseMemory();
-  initSearchableSelects();
+  __loadPromise.then(()=>{
+    bind();
+    renderTabs();
+    renderAll();
+    initCollapseMemory();
+    initSearchableSelects();
+  }).catch((e)=>{
+    console.error(e);
+    // 即使加载失败，也允许进入页面（内存态可用）
+    try{ bind(); renderTabs(); renderAll(); initCollapseMemory(); initSearchableSelects(); }catch(_e){}
+  });
 });
 </script>
 
