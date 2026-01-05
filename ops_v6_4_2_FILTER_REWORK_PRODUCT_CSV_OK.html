@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>简易登记系统 v6.4.2（重构稳定版）</title>
+
+<style>
+/* ===== 基础样式（原版保留） ===== */
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto}
+button{cursor:pointer}
+.hidden{display:none!important}
+.tab-btn{padding:8px 14px;border-radius:16px;border:1px solid #ddd;background:#fff}
+.tab-btn.active{background:#2563eb;color:#fff;border-color:#2563eb}
+table{border-collapse:collapse;width:100%}
+th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
+.badge{padding:2px 6px;border-radius:8px;font-size:12px}
+.badge.red{background:#fee2e2;color:#b91c1c}
+.badge.green{background:#dcfce7;color:#166534}
+.badge.gray{background:#f3f4f6;color:#374151}
+.topbar{padding:16px;border-bottom:1px solid #eee}
+.container{padding:16px}
+.actions button{margin-right:6px}
+</style>
+</head>
+
+<body>
+
+<div class="topbar">
+  <h2>简易登记系统 v6.4.2（重构稳定版）</h2>
+  <div class="actions">
+    <button onclick="exportJSON()">导出 JSON</button>
+    <button onclick="importJSON()">导入 JSON</button>
+    <button onclick="loadSample()">加载示例数据</button>
+    <button style="color:#b91c1c" onclick="clearAll()">清空数据</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Tabs -->
+  <div style="margin-bottom:12px">
+    <button class="tab-btn active" data-tab="dashboard">看板</button>
+    <button class="tab-btn" data-tab="sellers">卖家</button>
+    <button class="tab-btn" data-tab="products">产品</button>
+    <button class="tab-btn" data-tab="orders">订单</button>
+  </div>
+
+  <!-- 看板 -->
+  <div id="tab-dashboard">
+    <div style="display:flex;gap:16px">
+      <div>卖家数：<b id="kpi-sellers">0</b></div>
+      <div>产品数：<b id="kpi-products">0</b></div>
+      <div>订单数：<b id="kpi-orders">0</b></div>
+    </div>
+  </div>
+
+  <!-- 卖家 -->
+  <div id="tab-sellers" class="hidden">
+    <table>
+      <thead><tr><th>ID</th><th>名称</th><th>操作</th></tr></thead>
+      <tbody id="seller-table"></tbody>
+    </table>
+  </div>
+
+  <!-- 产品 -->
+  <div id="tab-products" class="hidden">
+    <h3>产品</h3>
+    <div class="actions">
+      <button onclick="exportProductCSV()">导出产品 CSV</button>
+      <button onclick="downloadProductTemplate()">下载导入模板 CSV</button>
+      <button onclick="importProductCSV()">导入产品 CSV</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>产品名</th><th>ASIN</th><th>Market</th><th>Seller</th><th>回评类型</th>
+        </tr>
+      </thead>
+      <tbody id="product-table"></tbody>
+    </table>
+  </div>
+
+  <!-- 订单 -->
+  <div id="tab-orders" class="hidden">
+    <h3>订单列表</h3>
+
+    <!-- 筛选 -->
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="sellerSearch" placeholder="搜索卖家（仅过滤下拉）"/>
+      <select id="sellerSelect"></select>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>订单号</th><th>卖家</th><th>状态</th>
+        </tr>
+      </thead>
+      <tbody id="order-table"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+/* =========================================================
+   IndexedDB + 全局状态
+========================================================= */
+const DB_NAME = "ops_v6_4_2_db";
+const STORE = "kv";
+let S = {
+  sellers: [],
+  products: [],
+  orders: []
+};
+let selectedSellerId = "";
+
+function openDB(){
+  return new Promise((res,rej)=>{
+    const req = indexedDB.open(DB_NAME,1);
+    req.onupgradeneeded=e=>{
+      const db=e.target.result;
+      if(!db.objectStoreNames.contains(STORE)){
+        db.createObjectStore(STORE);
+      }
+    };
+    req.onsuccess=e=>res(e.target.result);
+    req.onerror=e=>rej(e);
+  });
+}
+
+async function loadState(){
+  const db = await openDB();
+  return new Promise(res=>{
+    const tx=db.transaction(STORE,"readonly");
+    const st=tx.objectStore(STORE);
+    const r=st.get("state");
+    r.onsuccess=()=>{
+      if(r.result){S=r.result}
+      res();
+    };
+  });
+}
+
+async function saveState(){
+  const db = await openDB();
+  const tx=db.transaction(STORE,"readwrite");
+  tx.objectStore(STORE).put(S,"state");
+}
+
+/* =========================================================
+   Tabs
+========================================================= */
+document.querySelectorAll(".tab-btn").forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll(".tab-btn").forEach(x=>x.classList.remove("active"));
+    b.classList.add("active");
+    ["dashboard","sellers","products","orders"].forEach(id=>{
+      document.getElementById("tab-"+id).classList.add("hidden");
+    });
+    document.getElementById("tab-"+b.dataset.tab).classList.remove("hidden");
+  };
+});
+
+/* =========================================================
+   渲染
+========================================================= */
+function renderAll(){
+  renderKPI();
+  renderSellers();
+  renderProducts();
+  renderOrders();
+}
+
+function renderKPI(){
+  document.getElementById("kpi-sellers").textContent=S.sellers.length;
+  document.getElementById("kpi-products").textContent=S.products.length;
+  document.getElementById("kpi-orders").textContent=S.orders.length;
+}
+
+function renderSellers(){
+  const tb=document.getElementById("seller-table");
+  tb.innerHTML="";
+  S.sellers.forEach(s=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${s.id}</td><td>${s.name}</td><td>-</td>`;
+    tb.appendChild(tr);
+  });
+
+  const sel=document.getElementById("sellerSelect");
+  sel.innerHTML=`<option value="">全部卖家</option>`;
+  S.sellers.forEach(s=>{
+    const o=document.createElement("option");
+    o.value=s.id;o.textContent=s.name;
+    sel.appendChild(o);
+  });
+}
+
+function renderProducts(){
+  const tb=document.getElementById("product-table");
+  tb.innerHTML="";
+  S.products.forEach(p=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${p.product_name}</td><td>${p.asin}</td><td>${p.market}</td><td>${p.seller_id}</td><td>${p.review_type}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+function getFilteredOrders(){
+  if(!selectedSellerId) return S.orders;
+  return S.orders.filter(o=>o.seller_id===selectedSellerId);
+}
+
+function renderOrders(){
+  const tb=document.getElementById("order-table");
+  tb.innerHTML="";
+  getFilteredOrders().forEach(o=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${o.order_id}</td><td>${o.seller_id}</td><td><span class="badge gray">待处理</span></td>`;
+    tb.appendChild(tr);
+  });
+}
+
+/* =========================================================
+   筛选逻辑（已重构）
+========================================================= */
+document.getElementById("sellerSelect").onchange=e=>{
+  selectedSellerId=e.target.value;
+  renderOrders();
+};
+
+document.getElementById("sellerSearch").oninput=e=>{
+  const kw=e.target.value.toLowerCase();
+  const sel=document.getElementById("sellerSelect");
+  Array.from(sel.options).forEach((o,i)=>{
+    if(i===0) return;
+    o.hidden=!o.textContent.toLowerCase().includes(kw);
+  });
+};
+
+/* =========================================================
+   CSV（产品）
+========================================================= */
+function exportProductCSV(){
+  const rows=[
+    ["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"]
+  ];
+  S.products.forEach(p=>{
+    rows.push([p.product_name,p.asin,p.market,p.currency,p.seller_id,p.review_type,p.discount_origin||"",p.buyer_commission_origin||"",p.remark||""]);
+  });
+  downloadCSV(rows,"products.csv");
+}
+
+function downloadProductTemplate(){
+  const rows=[
+    ["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"],
+    ["示例产品","B0XXXX","US","USD","seller1","文字评","0","0",""]
+  ];
+  downloadCSV(rows,"product_import_template.csv");
+}
+
+function importProductCSV(){
+  const inp=document.createElement("input");
+  inp.type="file";
+  inp.accept=".csv";
+  inp.onchange=()=>{
+    const f=inp.files[0];
+    const r=new FileReader();
+    r.onload=()=>{
+      const lines=r.result.split(/\r?\n/).filter(l=>l.trim());
+      const head=lines.shift().split(",");
+      let add=0,skip=0;
+      lines.forEach(l=>{
+        const c=l.split(",");
+        const row={};
+        head.forEach((h,i)=>row[h]=c[i]||"");
+        if(!row.asin||!row.market) return;
+        const exist=S.products.find(p=>p.asin===row.asin&&p.market===row.market);
+        if(exist){skip++;return;}
+        S.products.push(row);add++;
+      });
+      saveState();renderProducts();
+      alert(`新增 ${add}，跳过 ${skip}`);
+    };
+    r.readAsText(f);
+  };
+  inp.click();
+}
+
+function downloadCSV(rows,name){
+  const csv=rows.map(r=>r.join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download=name;a.click();
+}
+
+/* =========================================================
+   JSON & 示例
+========================================================= */
+function exportJSON(){
+  downloadCSV([[JSON.stringify(S)]],"data.json");
+}
+function importJSON(){
+  const inp=document.createElement("input");
+  inp.type="file";
+  inp.onchange=()=>{
+    const r=new FileReader();
+    r.onload=()=>{S=JSON.parse(r.result);saveState();renderAll();};
+    r.readAsText(inp.files[0]);
+  };
+  inp.click();
+}
+function loadSample(){
+  S={
+    sellers:[{id:"s1",name:"小龙"},{id:"s2",name:"Anne服务商"}],
+    products:[],
+    orders:[
+      {order_id:"111-xxx",seller_id:"s1"},
+      {order_id:"222-yyy",seller_id:"s2"}
+    ]
+  };
+  saveState();renderAll();
+}
+function clearAll(){
+  if(confirm("确定清空？")){
+    S={sellers:[],products:[],orders:[]};
+    saveState();renderAll();
+  }
+}
+
+/* =========================================================
+   Init
+========================================================= */
+(async()=>{
+  await loadState();
+  renderAll();
+})();
+</script>
+
+</body>
+</html>
