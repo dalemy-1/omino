@@ -171,6 +171,13 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
   .btncol{display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;}
   .btncol .btn{min-width:92px;}
 
+
+/* === Payout modal enhancements (v1+2) === */
+#payoutPrecheckCard{margin-top:10px}
+#payoutPrecheckList{max-height:160px; overflow:auto; border:1px solid var(--border); border-radius:10px; padding:8px; background:var(--soft)}
+#payoutStickyBar{position:sticky; bottom:0; background:rgba(255,255,255,0.92); backdrop-filter:saturate(180%) blur(8px); border-top:1px solid var(--border); padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:10px; z-index:5}
+#payoutStickyBar .right{font-weight:900; font-size:16px}
+
 </style>
 <style>
 /* --- Settle drafts modal: ensure action buttons fully visible --- */
@@ -213,6 +220,7 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
     <button class="tab" data-tab="sellers">卖家</button>
     <button class="tab" data-tab="products">产品</button>
     <button class="tab" data-tab="orders">订单</button>
+    <button class="tab" data-tab="payout">返款</button>
   </div>
 
   <section id="tab-dashboard" class="card">
@@ -500,6 +508,200 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
       </table>
     </div>
   </section>
+
+  <section id="tab-payout" class="card" style="display:none">
+    <h3>返款（打款给买手）</h3>
+    <div class="help">
+      规则：返款合计(CNY) = (金额(原币) - 折扣(原币) + 买手佣金(原币)) × FX + 佣金(CNY)。<br/>
+      当前阶段：仅要求回评状态 = DONE 可返款；返款截图/链接后续前端对接再补。
+    </div>
+
+    <div class="card" style="padding:12px; margin-top:10px">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <div style="font-weight:700">返款默认设置（用于弹窗默认值）</div>
+        <button class="btn sm" id="payoutCfgToggle">隐藏</button>
+      </div>
+      <div id="payoutCfgBox" style="margin-top:10px">
+        <div class="grid cols-6">
+          <div><label>USD→CNY</label><input id="payoutFxUsd" type="number" step="0.0001" placeholder="例如 7.30"/></div>
+          <div><label>GBP→CNY</label><input id="payoutFxGbp" type="number" step="0.0001" placeholder="例如 9.80"/></div>
+          <div><label>EUR→CNY</label><input id="payoutFxEur" type="number" step="0.0001" placeholder="例如 8.50"/></div>
+          <div><label>CAD→CNY</label><input id="payoutFxCad" type="number" step="0.0001" placeholder="例如 5.30"/></div>
+          <div><label>JPY→CNY</label><input id="payoutFxJpy" type="number" step="0.000001" placeholder="例如 0.053"/></div>
+          <div><label>佣金(CNY)默认</label><input id="payoutCommDefault" type="number" step="0.01" placeholder="留空=按卖家回评类型佣金"/></div>
+        </div>
+        <div class="row" style="gap:10px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn" id="payoutCfgSave">保存为默认</button>
+          <button class="btn" id="payoutCfgReset">恢复默认</button>
+          <span class="help" id="payoutCfgHint"></span>
+        </div>
+      </div>
+    </div>
+
+    <hr/>
+
+    <div class="grid cols-4">
+      <div>
+        <label>卖家筛选</label>
+        <select id="payoutSellerFilter"><option value="">全部卖家</option></select>
+      </div>
+      <div>
+        <label>返款状态</label>
+        <select id="payoutStatusFilter">
+          <option value="payout_pending">已回评待打款</option>
+          <option value="paid">已返款</option>
+          <option value="">全部</option>
+        </select>
+      </div>
+      <div>
+        <label>Market</label>
+        <select id="payoutMarketFilter">
+          <option value="">全部</option>
+          <option value="US">US</option><option value="UK">UK</option><option value="DE">DE</option><option value="FR">FR</option>
+          <option value="IT">IT</option><option value="ES">ES</option><option value="CA">CA</option><option value="JP">JP</option>
+        </select>
+      </div>
+      <div>
+        <label>搜索（订单号/ASIN/产品名）</label>
+        <input id="payoutSearch" placeholder="输入前 19 位可快速匹配" />
+      </div>
+    </div>
+
+    <div class="row" style="gap:10px; margin-top:10px; flex-wrap:wrap">
+      <button class="btn" id="payoutSelectAll">全选本页</button>
+      <button class="btn" id="payoutClearSel">清空选择</button>
+      <button class="btn primary" id="payoutOpenModal">返款（生成批次并标记已返款）</button>
+      <span class="help" id="payoutSelHint"></span>
+    </div>
+
+    <div class="card" style="padding:12px;margin-top:10px">
+      <div style="font-weight:700;margin-bottom:8px">粘贴订单号：自动勾选（每行一单）</div>
+      <textarea id="payoutPaste" rows="4" class="mono" placeholder="每行一个订单号，或包含订单号的整行文本"></textarea>
+      <div class="row" style="gap:10px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" id="payoutParseSelect">解析并勾选</button>
+        <button class="btn" id="payoutParseMarkDone">解析并批量标记回评 DONE</button>
+        <span class="help" id="payoutPasteHint"></span>
+      </div>
+    </div>
+
+    <div style="overflow:auto; margin-top:10px">
+      <table class="table" id="payoutTable">
+        <thead>
+          <tr>
+            <th style="width:42px"></th>
+            <th>订单号</th>
+            <th>Market</th>
+            <th>币种</th>
+            <th>金额(原币)</th>
+            <th>折扣(原币)</th>
+            <th>买手佣金(原币)</th>
+            <th>佣金(CNY)</th>
+            <th>返款状态</th>
+            <th>回评</th>
+          </tr>
+        </thead>
+        <tbody id="payoutRows"></tbody>
+      </table>
+    </div>
+
+    <div class="pager" style="margin-top:10px">
+      <button class="btn sm" id="payoutPrev">上一页</button>
+      <button class="btn sm" id="payoutNext">下一页</button>
+      <span class="help" id="payoutPageInfo"></span>
+    </div>
+
+    <hr/>
+    <h4>返款批次列表</h4>
+    <div class="help">支持导出 CSV、删除回滚（会把本批次订单返款状态回滚为“待打款”）。</div>
+    <div style="overflow:auto;margin-top:8px">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>批次ID</th><th>日期</th><th>方式</th><th>订单数</th><th>合计(CNY)</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="payoutBatchRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 返款弹窗（布局参考收款结算） -->
+  <div class="modal" id="payoutModal" style="display:none">
+    <div class="modal-content" style="max-width:1100px">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">批量返款（确认后生成批次并标记已返款）</div>
+          <div class="help">合计 = 本金本次返款(CNY) + 佣金本次返款(CNY)。本次 FX 可改，仅影响本批次。</div>
+        </div>
+        <button class="btn sm" id="payoutModalClose">关闭</button>
+      </div>
+
+      <div class="card" style="padding:12px; margin-top:10px" id="payoutModalTop">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div style="font-weight:700">批次信息与 FX</div>
+          <button class="btn sm" id="payoutModalTopToggle">隐藏</button>
+        </div>
+        <div id="payoutModalTopBox" style="margin-top:10px">
+          <div class="grid cols-4">
+            <div><label>批次ID *</label><input id="payoutBatchId" class="mono" placeholder="例如 PB20260105-001"/></div>
+            <div><label>结算日期 *</label><input id="payoutBatchDate" type="date"/></div>
+            <div><label>方式（可选）</label><input id="payoutBatchMethod" placeholder="支付宝/微信/银行/USDT..."/></div>
+            <div><label>备注（可选）</label><input id="payoutBatchNote" placeholder="备注"/></div>
+          </div>
+          <hr/>
+          <div style="font-weight:700;margin-bottom:6px">本批次 FX（可改，仅影响本批次）</div>
+          <div class="grid cols-5">
+            <div><label>USD→CNY</label><input id="payoutBatchFxUsd" type="number" step="0.0001"/></div>
+            <div><label>EUR→CNY</label><input id="payoutBatchFxEur" type="number" step="0.0001"/></div>
+            <div><label>GBP→CNY</label><input id="payoutBatchFxGbp" type="number" step="0.0001"/></div>
+            <div><label>CAD→CNY</label><input id="payoutBatchFxCad" type="number" step="0.0001"/></div>
+            <div><label>JPY→CNY</label><input id="payoutBatchFxJpy" type="number" step="0.000001"/></div>
+          </div>
+          <div class="help" style="margin-top:6px">提示：可在表内修改金额/折扣/买手佣金(原币)/佣金(CNY)；点击下方确认返款将回写订单。</div>
+        </div>
+      </div>
+
+
+      <div class="card" id="payoutPrecheckCard" style="padding:12px">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div style="font-weight:800">预检（必须通过才能确认返款）</div>
+          <div class="mini" id="payoutPrecheckSummary">—</div>
+        </div>
+        <div class="help" style="margin-top:6px">会检查：FX缺失/金额异常/非DONE/已返款等。存在问题会标红，并禁止确认。</div>
+        <div id="payoutPrecheckList" class="mono" style="margin-top:8px"></div>
+      </div>
+
+      <div id="payoutStickyBar">
+        <div class="mini" id="payoutStickyHint">提示：可在表内修改金额/折扣/买手佣金(原币)/佣金(CNY)。</div>
+        <div class="right">合计：<span id="payoutModalTotal">0.00</span> CNY</div>
+      </div>
+
+      <div class="row" style="justify-content:flex-end;align-items:center;margin-top:6px">
+        <div style="font-weight:800;font-size:16px">合计：<span id="payoutModalTotal">0</span> CNY</div>
+      </div>
+
+      <div style="overflow:auto; margin-top:8px">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>订单号</th><th>Market</th><th>金额(原币)</th><th>折扣(原币)</th><th>买手佣金(原币)</th>
+              <th>本金(原币)</th><th>FX</th><th>本金应付(CNY)</th><th>本金本次返款(CNY)</th>
+              <th>佣金应付(CNY)</th><th>佣金本次返款(CNY)</th>
+            </tr>
+          </thead>
+          <tbody id="payoutModalRows"></tbody>
+        </table>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn" id="payoutModalCancel">取消</button>
+        <button class="btn" id="payoutModalExport">导出本批次 CSV</button>
+        <button class="btn primary" id="payoutModalConfirm">确认返款</button>
+      </div>
+    </div>
+  </div>
+
+
 </div>
 
 <!-- Settlement Modal -->
@@ -661,6 +863,7 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
 </div>
 
 <script>
+
 
 // ---- HTML escape helper (global) ----
 function escHtml(s){
@@ -961,7 +1164,7 @@ let S = {
   products: [],    // {id,name,asin,market,sellerId,reviewType,discount,remark}
   orders: [],      // {id,orderId,date,sellerId,productId,market,currency,amount,discount,asin,note,reviewReq, review:{status,date,link,note,doneType}, principal:{settled,batchId,fx,amountCny}, commission:{settled,batchId,amountCny}}
   batches: [],     // {id,type(PRINCIPAL|COMMISSION|BOTH), date, method,note, fx:{usd,eur,gbp,cad,jpy}, sellerLabel, lines:[{orderId,market,amount,discount,fx,principalShould,principalSettle,commissionShould,commissionSettle}], total}
-  seq: {seller:1, product:1, order:1, batch:1}
+  seq: {seller:1, product:1, order:1, batch:1, payoutBatch:1}
 };
 
 const UI = {
@@ -972,6 +1175,9 @@ const UI = {
   selected:new Set(), // selected orderId
   page:1,
   pageSize:100,
+  payoutSelected:new Set(),
+  payoutPage:1,
+  payoutPageSize:100,
   settle:null, // {mode, orderIds[], fx, batchId, date, method, note, edits:{[orderId]:{p,c}} }
   reviewOrderId:null
 };
@@ -991,6 +1197,193 @@ function clearSearchInputForSelect(selectId){
     if(inp) inp.value="";
   }catch(e){}
 }
+
+
+/* ===================== Preview Modal (Editable) ===================== */
+function showTablePreviewModal(cfg){
+  const title = cfg.title || "预览";
+  const subtitle = cfg.subtitle || "";
+  const columns = cfg.columns || [];
+  const rows = cfg.rows || [];
+  const applyText = cfg.applyText || "确认执行";
+  const onApply = cfg.onApply || null;
+
+  const overlay = document.createElement("div");
+  overlay.style.position="fixed";
+  overlay.style.inset="0";
+  overlay.style.background="rgba(17,24,39,.62)";
+  overlay.style.display="flex";
+  overlay.style.alignItems="center";
+  overlay.style.justifyContent="center";
+  overlay.style.padding="16px";
+  overlay.style.zIndex="100000";
+
+  const card = document.createElement("div");
+  card.style.width="min(1200px, 96vw)";
+  card.style.maxHeight="86vh";
+  card.style.background="#fff";
+  card.style.borderRadius="14px";
+  card.style.boxShadow="0 22px 70px rgba(0,0,0,.25)";
+  card.style.overflow="hidden";
+  card.style.display="flex";
+  card.style.flexDirection="column";
+
+  const head = document.createElement("div");
+  head.style.padding="14px 16px";
+  head.style.borderBottom="1px solid #e5e7eb";
+  head.innerHTML =
+    '<div style="font-size:16px;font-weight:900;color:#111827;">' + U.esc(title) + '</div>' +
+    (subtitle ? ('<div style="margin-top:4px;color:#6b7280;font-size:12px;white-space:pre-wrap;">' + U.esc(subtitle) + '</div>') : "");
+  card.appendChild(head);
+
+  const body = document.createElement("div");
+  body.style.padding="12px";
+  body.style.overflow="auto";
+  body.style.flex="1";
+
+  const table = document.createElement("table");
+  table.style.width="100%";
+  table.style.borderCollapse="separate";
+  table.style.borderSpacing="0";
+  table.style.fontSize="12px";
+  table.style.tableLayout="fixed";
+
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+
+  const thInc = document.createElement("th");
+  thInc.textContent="纳入";
+  thInc.style.position="sticky"; thInc.style.top="0";
+  thInc.style.background="#f9fafb";
+  thInc.style.padding="10px 8px";
+  thInc.style.borderBottom="1px solid #e5e7eb";
+  thInc.style.width="58px";
+  trh.appendChild(thInc);
+
+  for(const col of columns){
+    const th = document.createElement("th");
+    th.textContent = col.label || col.key;
+    th.style.position="sticky"; th.style.top="0";
+    th.style.background="#f9fafb";
+    th.style.padding="10px 8px";
+    th.style.borderBottom="1px solid #e5e7eb";
+    th.style.textAlign="left";
+    th.style.width = col.width || "160px";
+    trh.appendChild(th);
+  }
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+
+  const stateRows = rows.map((r, idx)=>({__idx:idx, __include:true, data: JSON.parse(JSON.stringify(r))}));
+
+  function mkInput(col, v){
+    const t = col.type || "text";
+    if(t==="select"){
+      const sel=document.createElement("select");
+      sel.style.width="100%";
+      sel.style.padding="8px 8px";
+      sel.style.border="1px solid #e5e7eb";
+      sel.style.borderRadius="10px";
+      sel.style.background="#fff";
+      const opts = (typeof col.options==="function") ? col.options() : (col.options||[]);
+      for(const o of opts){
+        const opt=document.createElement("option");
+        opt.value=o.v; opt.textContent=o.t;
+        sel.appendChild(opt);
+      }
+      sel.value = (v==null? "" : String(v));
+      return sel;
+    }
+    const inp=document.createElement("input");
+    inp.type = (t==="date") ? "date" : "text";
+    inp.value = (v==null? "" : String(v));
+    inp.placeholder = col.placeholder || "";
+    inp.style.width="100%";
+    inp.style.padding="8px 8px";
+    inp.style.border="1px solid #e5e7eb";
+    inp.style.borderRadius="10px";
+    return inp;
+  }
+
+  stateRows.forEach((rowState, idx)=>{
+    const tr=document.createElement("tr");
+    tr.style.borderBottom="1px solid #f3f4f6";
+
+    const tdInc=document.createElement("td");
+    tdInc.style.padding="8px";
+    tdInc.style.borderBottom="1px solid #f3f4f6";
+    const ck=document.createElement("input");
+    ck.type="checkbox"; ck.checked=true;
+    ck.onchange=()=>{ rowState.__include = !!ck.checked; };
+    tdInc.appendChild(ck);
+    tr.appendChild(tdInc);
+
+    for(const col of columns){
+      const td=document.createElement("td");
+      td.style.padding="8px";
+      td.style.borderBottom="1px solid #f3f4f6";
+      const el=mkInput(col, rowState.data[col.key]);
+      el.oninput = ()=>{ rowState.data[col.key]=el.value; };
+      td.appendChild(el);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  body.appendChild(table);
+  card.appendChild(body);
+
+  const foot=document.createElement("div");
+  foot.style.padding="12px 16px";
+  foot.style.borderTop="1px solid #e5e7eb";
+  foot.style.display="flex";
+  foot.style.justifyContent="space-between";
+  foot.style.alignItems="center";
+  foot.style.gap="10px";
+
+  const left=document.createElement("div");
+  left.style.fontSize="12px";
+  left.style.color="#6b7280";
+  left.textContent="提示：先核对/修改，再点击确认执行。可取消勾选不处理的行。";
+
+  const right=document.createElement("div");
+  right.style.display="flex";
+  right.style.gap="10px";
+
+  const btnCancel=document.createElement("button");
+  btnCancel.className="btn";
+  btnCancel.textContent="取消";
+  btnCancel.onclick=()=>{ document.body.removeChild(overlay); };
+
+  const btnApply=document.createElement("button");
+  btnApply.className="btn primary";
+  btnApply.textContent=applyText;
+  btnApply.onclick=()=>{
+    try{
+      if(typeof onApply==="function"){
+        const finalRows = stateRows.filter(r=>r.__include).map(r=>r.data);
+        onApply(finalRows, ()=>{ try{ document.body.removeChild(overlay);}catch(e){} });
+      }else{
+        document.body.removeChild(overlay);
+      }
+    }catch(e){
+      showNotice("脚本错误", (e&&e.message)?e.message:String(e));
+    }
+  };
+
+  right.appendChild(btnCancel);
+  right.appendChild(btnApply);
+  foot.appendChild(left);
+  foot.appendChild(right);
+  card.appendChild(foot);
+
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}
+
 
 
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
@@ -1063,7 +1456,7 @@ const U = {
 
 /* ===================== Persistence ===================== */
 function blankState(){
-  return {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+  return {sellers:[],products:[],orders:[],batches:[],payoutBatches:[],settings:{payoutFxDefault:{usd:0,eur:0,gbp:0,cad:0,jpy:0}, payoutCommDefault:null},seq:{seller:1,product:1,order:1,batch:1,payoutBatch:1}};
 }
 
 /* ===================== IndexedDB Main Store (Replace localStorage main state) ===================== */
@@ -1177,13 +1570,15 @@ function _safeSetItem(key, value){
 }
 function save(){ _queueSave(); }
 function computeSeq(){
-  const max = {seller:0, product:0, order:0, batch:0};
-  S.sellers.forEach(x=>{ const m=String(x.id||"").match(/^S(\d+)$/); if(m) max.seller=Math.max(max.seller, Number(m[1])); });
-  S.products.forEach(x=>{ const m=String(x.id||"").match(/^P(\d+)$/); if(m) max.product=Math.max(max.product, Number(m[1])); });
-  S.orders.forEach(x=>{ const m=String(x.id||"").match(/^O(\d+)$/); if(m) max.order=Math.max(max.order, Number(m[1])); });
-  S.batches.forEach(x=>{ const m=String(x.id||"").match(/^B(\d+)$/); if(m) max.batch=Math.max(max.batch, Number(m[1])); });
-  S.seq = {seller:max.seller+1, product:max.product+1, order:max.order+1, batch:max.batch+1};
+  const max = {seller:0, product:0, order:0, batch:0, payoutBatch:0};
+  (S.sellers||[]).forEach(x=>{ const m=String(x.id||"").match(/^S(\d+)$/); if(m) max.seller=Math.max(max.seller, Number(m[1])); });
+  (S.products||[]).forEach(x=>{ const m=String(x.id||"").match(/^P(\d+)$/); if(m) max.product=Math.max(max.product, Number(m[1])); });
+  (S.orders||[]).forEach(x=>{ const m=String(x.id||"").match(/^O(\d+)$/); if(m) max.order=Math.max(max.order, Number(m[1])); });
+  (S.batches||[]).forEach(x=>{ const m=String(x.id||"").match(/^B(\d+)$/); if(m) max.batch=Math.max(max.batch, Number(m[1])); });
+  (S.payoutBatches||[]).forEach(x=>{ const m=String(x.id||"").match(/^PB(\d+)$/); if(m) max.payoutBatch=Math.max(max.payoutBatch, Number(m[1])); });
+  S.seq = {seller:max.seller+1, product:max.product+1, order:max.order+1, batch:max.batch+1, payoutBatch:max.payoutBatch+1};
 }
+
 function normalizeImported(obj){
   // 接受旧结构：兼容 v6.2/6.4 的 sellers/products/orders/batches
   const out = blankState();
@@ -1213,6 +1608,10 @@ function normalizeImported(obj){
     return x;
   });
   out.batches = Array.isArray(obj.batches) ? obj.batches : (Array.isArray(obj.batch)? obj.batch: []);
+  out.payoutBatches = Array.isArray(obj.payoutBatches) ? obj.payoutBatches : (Array.isArray(obj.payout_batches)? obj.payout_batches : []);
+  out.settings = (obj.settings && typeof obj.settings==="object") ? obj.settings : {};
+  out.settings.payoutFxDefault = out.settings.payoutFxDefault || {usd:0,eur:0,gbp:0,cad:0,jpy:0};
+  out.settings.payoutCommDefault = (out.settings.payoutCommDefault===0 || out.settings.payoutCommDefault) ? out.settings.payoutCommDefault : null;
 
   out.sellers = out.sellers.map(s=>{
     const fx = s.fx || s.fxs || {};
@@ -2167,65 +2566,124 @@ function batchHandle(commit){
   const text = $("batchText").value || "";
   const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
 
-  let submitted=0, duplicated=0, bad=0;
-  const dupLines=[], badLines=[], okLines=[];
-  const fmtOk = (p)=> `${p.orderId} 产品名:${(p.title||'').trim()} 订单金额:${U.toNum(p.amount||0)} 回评类型:${(p.reviewReq||'文字评')}`;
-  if(!lines.length){ showNotice("提示","请先粘贴多行数据"); return; }
-
-  const parsed = [];
+  let rows = [];
+  let badLines = [];
   for(const line of lines){
     const p = parseLine(line);
-    if(!p.ok){ bad++; badLines.push(line); continue; }
-    parsed.push({line, p});
+    if(!p.ok){ badLines.push(line); continue; }
+    // detect market/review type from Chinese note if present
+    const det = detectMarketAndReviewType(p.title || "", defaultMarket);
+    const market = (p.market || det.market || defaultMarket || "US");
+    const currency = U.marketToCurrency(market);
+    rows.push({
+      orderId: (p.orderId||"").slice(0,19),
+      title: p.title || "",
+      amount: (p.amount==null? "" : String(p.amount)),
+      market,
+      currency,
+      asin: p.asin || "",
+      reviewReq: (p.reviewReq || det.reviewType || "TEXT"),
+      date: p.date || defaultDate,
+      note: p.note || ""
+    });
   }
 
-  if(!commit){
-    for(const item of parsed){ okLines.push(fmtOk(item.p)); }
-    showParseSummary({submitted: parsed.length, duplicated: 0, bad, dupLines: [], badLines, okLines});
+  if(!rows.length){
+    showNotice("提示", "未解析到可用行。\n失败 " + badLines.length + " 行。");
     return;
   }
 
-  for(const item of parsed){
-    const p = item.p;
-    const asin = (p.asin||"");
-    // 唯一键：同卖家 + 同订单号 + 同ASIN（允许同订单号不同ASIN）
-    const key = `${sellerId}::${p.orderId}::${asin}`;
-
-    if(S.orders.some(o=>o.key===key)){
-      duplicated++; dupLines.push(fmtOk(p));
-      continue;
-    }
-const o = {
-      id: U.id("O", S.seq.order++),
-      createdAt: Date.now(),
-      key,
-      orderId: p.orderId,
-      sellerId,
-      productId,
-      date: defaultDate,
-      market: p.market || defaultMarket,
-      currency: p.currency || "",
-      amount: p.amount ?? 0,
-      discount: p.discount ?? 0,
-      buyerCommission: p.buyerCommission ?? 0,
-      asin: p.asin || "",
-      title: p.title || "",
-      fx: p.fx || 0,
-      reviewReq: p.reviewReq || "auto",
-      note: p.note || "",
-      principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-      commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-      review: { status:"PENDING", doneType:null, date:"", link:"", note:"" }
-    };
-    S.orders.unshift(o);
-    submitted++;
-    okLines.push(fmtOk(p));
+  const subtitleLines = [];
+  subtitleLines.push("解析成功：" + rows.length + " 行；失败：" + badLines.length + " 行。");
+  if(badLines.length){
+    const head = badLines.slice(0,8).join("\n- ");
+    const more = badLines.length>8 ? ("\n… 还有 " + (badLines.length-8) + " 行") : "";
+    subtitleLines.push("失败行（不会提交）：\n- " + head + more);
   }
+  const subtitle = subtitleLines.join("\n\n");
 
-  save();
-  renderAll();
-  showParseSummary({submitted, duplicated, bad, dupLines, badLines, okLines});
+  const markets = MARKETS.map(x=>({v:x.m, t:x.m}));
+  const reviewOpts = ["文字评","图片评","视频评","免评","免评FB","免评点星"].map(v=>({v:v, t:v}));
+  const rtMap = {"文字评":"TEXT","图片评":"IMAGE","视频评":"VIDEO","免评":"FREE","免评FB":"FREE_FB","免评点星":"STAR"};
+
+  showTablePreviewModal({
+    title: "批量解析预览（可修改后再提交）",
+    subtitle,
+    columns: [
+      {key:"orderId", label:"订单号(19位)", width:"170px", type:"text"},
+      {key:"title", label:"产品名/标题", width:"280px", type:"text"},
+      {key:"amount", label:"订单金额", width:"120px", type:"text"},
+      {key:"market", label:"Market", width:"110px", type:"select", options:()=>markets},
+      {key:"asin", label:"ASIN", width:"160px", type:"text"},
+      {key:"reviewReq", label:"回评要求", width:"140px", type:"select", options:()=>reviewOpts},
+      {key:"date", label:"下单日期", width:"140px", type:"date"},
+      {key:"note", label:"备注", width:"220px", type:"text"},
+    ],
+    rows,
+    applyText: commit ? "确认提交登记" : "关闭",
+    onApply: (finalRows, close)=>{
+      if(!commit){ close(); return; }
+
+      let submitted=0, duplicated=0, bad=0;
+      const dupLines=[], okLines=[], bad2=[];
+      for(const r of finalRows){
+        const orderId = String(r.orderId||"").trim().slice(0,19);
+        if(!orderId){ bad++; bad2.push("订单号为空"); continue; }
+
+        const market = String(r.market||defaultMarket||"US").trim() || "US";
+        const currency2 = U.marketToCurrency(market);
+        const reviewLabel = String(r.reviewReq||"文字评").trim();
+        const reviewType = rtMap[reviewLabel] || "TEXT";
+
+        const key = U.orderKey(sellerId, orderId);
+        if(S.orders.some(x=>x.key===key)){ duplicated++; dupLines.push(orderId); continue; }
+
+        const asin = String(r.asin||"").trim();
+        if(S.orders.some(x=>x.sellerId===sellerId && (x.asin||"") === asin)){
+          duplicated++; dupLines.push(orderId + "（同卖家同ASIN）"); continue;
+        }
+
+        const seller = U.sellerById(sellerId);
+        const fxKey = U.marketToFxKey(market);
+        const fx = seller ? U.num(seller.fx?.[market] || seller.fx?.[fxKey] || 0) : 0;
+
+        const amount = num(r.amount, 0);
+
+        const o = {
+          id: U.id("O", S.seq.order++),
+          createdAt: new Date().toISOString(),
+          orderId,
+          key,
+          sellerId,
+          productId,
+          market,
+          currency: currency2,
+          amount,
+          discount: 0,
+          buyerCommission: 0,
+          asin,
+          note: String(r.note||"") || String(r.title||""),
+          date: r.date || defaultDate,
+          fx: fx || 0,
+          reviewReq: reviewType,
+          principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+          commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+          review:{ status:"PENDING", doneType:"", date:"", link:"", note:"" }
+        };
+
+        S.orders.unshift(o);
+        submitted++;
+        okLines.push(orderId);
+      }
+
+      save();
+      renderAll();
+      close();
+      showParseSummary({submitted, duplicated, bad, dupLines, badLines: bad2, okLines});
+    }
+  });
 }
+
 
 /* ===================== Link Product to Orders (Paste IDs) ===================== */
 function linkProductByPaste(){
@@ -2237,68 +2695,103 @@ function linkProductByPaste(){
   const ids = U.extractOrderIds(($("pasteLinkBox").value||"").trim());
   if(!ids.length){ $("pasteLinkHint").textContent="未识别到订单号"; return; }
 
-  let hit=0, miss=0;
-  ids.forEach(oid=>{
+  const rows = ids.map(oid=>{
     const o = S.orders.find(x=>x.orderId===oid);
-    if(!o){ miss++; return; }
-    // 关联产品并同步字段（修复：v6.4 “勾选产品不生效”）
-    o.productId = p.id;
-    o.sellerId = p.sellerId;
-    o.market = p.market;
-    o.currency = U.marketToCurrency(p.market);
-    o.reviewReq = p.reviewType;
-    o.discount = U.num(p.discount);
-    o.asin = p.asin || o.asin;
-    if(!o.note) o.note = p.name;
-    UI.selected.add(o.orderId);
-    hit++;
+    return {
+      orderId: oid,
+      found: o ? "已找到" : "未找到"
+    };
   });
-  save();
-  renderAll();
-  $("pasteLinkHint").textContent = `识别 ${ids.length} 个；命中并关联 ${hit} 个；未找到 ${miss} 个（已勾选命中订单）`;
+
+  showTablePreviewModal({
+    title: "解析筛选/关联预览（确认后才执行）",
+    subtitle: "共识别 " + ids.length + " 个订单号。你可以取消勾选某些行不处理；未找到的行不会执行关联。",
+    columns: [
+      {key:"orderId", label:"订单号", width:"190px", type:"text"},
+      {key:"found", label:"匹配结果", width:"110px", type:"text"},
+    ],
+    rows,
+    applyText: "确认执行关联并勾选",
+    onApply: (finalRows, close)=>{
+      let hit=0, miss=0;
+      finalRows.forEach(r=>{
+        const oid = String(r.orderId||"").trim();
+        if(!oid) return;
+        const o = S.orders.find(x=>x.orderId===oid);
+        if(!o){ miss++; return; }
+        // 关联产品并同步字段
+        o.productId = p.id;
+        o.sellerId = p.sellerId;
+        o.market = p.market;
+        o.currency = U.marketToCurrency(p.market);
+        o.reviewReq = p.reviewType;
+        o.discount = U.num(p.discount);
+        o.asin = p.asin || o.asin;
+        if(!o.note) o.note = p.name;
+        UI.selected.add(o.orderId);
+        hit++;
+      });
+      save();
+      renderAll();
+      close();
+      $("pasteLinkHint").textContent = "识别 " + ids.length + " 个；命中并关联 " + hit + " 个；未找到 " + miss + " 个（已勾选命中订单）";
+    }
+  });
 }
 
-/* ===================== Batch Mark Review Done ===================== */
+
 function batchMarkReviewDone(){
   const ids = U.extractOrderIds(($("pasteLinkBox").value||"").trim());
-  if(!ids.length){ showNotice("提示","未识别到订单号"); return; }
+  if(!ids.length){ $("pasteLinkHint").textContent="未识别到订单号"; return; }
 
-  let changed=0, skipped=0, missing=0;
-  const okLines=[], badLines=[], dupLines=[];
-
-  const toZhReview = (o)=>{
-    const p = o.productId ? U.productById(o.productId) : null;
-    const raw = (o.review && o.review.doneType) ? o.review.doneType : (p?.reviewType || o.reviewReq || "TEXT");
-    const v = String(raw||"").toUpperCase();
-    if(v==="IMAGE") return "图片评";
-    if(v==="VIDEO") return "视频评";
-    if(v==="WAIVED") return "免评";
-    if(v==="WAIVED_FB") return "免评FB";
-    if(v==="WAIVED_STAR") return "免评点星";
-    return "文字评";
-  };
-
-  const fmt = (o)=> `${o.orderId} 产品名:${(U.productName(o.productId)||o.note||"").trim()} 订单金额:${U.toNum(o.amount||0)} 回评类型:${toZhReview(o)}`;
-
-  ids.forEach(oid=>{
+  const rows = ids.map(oid=>{
     const o = S.orders.find(x=>x.orderId===oid);
-    if(!o){ missing++; badLines.push(`未找到：${oid}`); return; }
-    if(o.review && o.review.status==="DONE"){
-      skipped++; dupLines.push(fmt(o));
-      return;
+    let st = "未找到";
+    if(o){
+      st = (o.review && o.review.status==="DONE") ? "已是DONE" : "可标记";
     }
-    o.review.status = "DONE";
-    o.review.date = o.review.date || U.today();
-    changed++;
-    okLines.push(fmt(o));
+    return { orderId: oid, status: st };
   });
 
-  save();
-  renderAll();
-  showParseSummary({submitted: changed, duplicated: skipped, bad: missing, dupLines, badLines, okLines});
+  showTablePreviewModal({
+    title: "解析标记回评预览（确认后才执行）",
+    subtitle: "共识别 " + ids.length + " 个订单号。可取消勾选不处理的行；未找到/已是DONE会自动跳过。",
+    columns: [
+      {key:"orderId", label:"订单号", width:"190px", type:"text"},
+      {key:"status", label:"匹配状态", width:"120px", type:"text"},
+    ],
+    rows,
+    applyText: "确认批量标记DONE",
+    onApply: (finalRows, close)=>{
+      let changed=0, skipped=0, missing=0;
+      const dupLines=[], badLines=[], okLines=[];
+      function fmt(o){ return (o.orderId||"") + " | " + (U.sellerName(o.sellerId)||"") + " | " + (o.market||""); }
+
+      finalRows.forEach(r=>{
+        const oid = String(r.orderId||"").trim();
+        if(!oid) return;
+        const o = S.orders.find(x=>x.orderId===oid);
+        if(!o){ missing++; badLines.push("未找到："+oid); return; }
+        if(o.review && o.review.status==="DONE"){
+          skipped++; dupLines.push(fmt(o)); return;
+        }
+        if(!o.review) o.review = { status:"PENDING", doneType:"", date:"", link:"", note:"" };
+        o.review.status = "DONE";
+        o.review.date = o.review.date || U.today();
+        changed++;
+        okLines.push(fmt(o));
+      });
+
+      save();
+      renderAll();
+      close();
+      showParseSummary({submitted: changed, duplicated: skipped, bad: missing, dupLines, badLines, okLines});
+      $("pasteLinkHint").textContent = "批量标记完成：DONE " + changed + "；已是DONE跳过 " + skipped + "；未找到 " + missing;
+    }
+  });
 }
 
-/* ===================== Settlement ===================== */
+
 function openSettle(mode){
   const ids = Array.from(UI.selected);
   if(!ids.length){ alert("请先勾选订单"); return; }
@@ -2831,7 +3324,10 @@ function bind(){
     const el = $(id); if(!el) return;
     el.addEventListener("focus", ()=>{ try{ el.select(); }catch(e){} });
   });
+  // 新增：返款模块绑定
+  try{ bindPayout(); }catch(e){ console.warn('bindPayout failed', e); }
 }
+
 
 /* ===================== Render All ===================== */
 function renderAll(){
@@ -2844,9 +3340,585 @@ function renderAll(){
   renderProducts();
   renderOrders();
   renderBatches();
+  renderPayout();
   updateProductPreview();
 }
 
+
+
+/* ===================== Payout Module (新增返款模块，不影响原有功能) ===================== */
+function ensurePayoutSettings(){
+  if(!S.settings || typeof S.settings!=="object") S.settings = {};
+  if(!S.settings.payoutFxDefault) S.settings.payoutFxDefault = {usd:0,eur:0,gbp:0,cad:0,jpy:0};
+  if(!("payoutCommDefault" in S.settings)) S.settings.payoutCommDefault = null;
+  if(!Array.isArray(S.payoutBatches)) S.payoutBatches = [];
+  if(!S.seq) S.seq = {seller:1,product:1,order:1,batch:1,payoutBatch:1};
+  if(!("payoutBatch" in S.seq)) S.seq.payoutBatch = 1;
+}
+
+function fxKeyByCurrency(cur){
+  cur = String(cur||"").toUpperCase();
+  if(cur==="USD") return "usd";
+  if(cur==="EUR") return "eur";
+  if(cur==="GBP") return "gbp";
+  if(cur==="CAD") return "cad";
+  if(cur==="JPY") return "jpy";
+  return null;
+}
+function getFxForOrder(order, fxObj){
+  const k = fxKeyByCurrency(order.currency);
+  if(k && fxObj && fxObj[k]) return U.num(fxObj[k]);
+  // fallback：用卖家 FX（原币→CNY）
+  const seller = U.sellerById(order.sellerId);
+  if(seller && seller.fx && order.market && seller.fx[order.market]) return U.num(seller.fx[order.market]);
+  return 0;
+}
+function getPayoutStatus(order){
+  // 未返款状态：若订单回评 DONE，则默认进入待打款；否则不可返款
+  const st = order?.payout?.status;
+  if(st) return st;
+  if(order?.review?.status==="DONE") return "payout_pending";
+  return "";
+}
+function setPayoutStatus(order, status){
+  if(!order.payout) order.payout = {};
+  order.payout.status = status;
+}
+
+function readPayoutCfgInputs(){
+  return {
+    usd: U.num($("payoutFxUsd")?.value),
+    gbp: U.num($("payoutFxGbp")?.value),
+    eur: U.num($("payoutFxEur")?.value),
+    cad: U.num($("payoutFxCad")?.value),
+    jpy: U.num($("payoutFxJpy")?.value),
+    commDefault: ($("payoutCommDefault")?.value==="" ? null : U.num($("payoutCommDefault")?.value)),
+  };
+}
+function applyPayoutCfgToInputs(){
+  ensurePayoutSettings();
+  const fx = S.settings.payoutFxDefault || {usd:0,eur:0,gbp:0,cad:0,jpy:0};
+  if($("payoutFxUsd")) $("payoutFxUsd").value = fx.usd || "";
+  if($("payoutFxGbp")) $("payoutFxGbp").value = fx.gbp || "";
+  if($("payoutFxEur")) $("payoutFxEur").value = fx.eur || "";
+  if($("payoutFxCad")) $("payoutFxCad").value = fx.cad || "";
+  if($("payoutFxJpy")) $("payoutFxJpy").value = fx.jpy || "";
+  if($("payoutCommDefault")) $("payoutCommDefault").value = (S.settings.payoutCommDefault==null ? "" : S.settings.payoutCommDefault);
+}
+
+function payoutFilteredOrders(){
+  ensurePayoutSettings();
+  const sellerId = $("payoutSellerFilter")?.value || "";
+  const st = $("payoutStatusFilter")?.value || "";
+  const mk = $("payoutMarketFilter")?.value || "";
+  const q = ($("payoutSearch")?.value || "").trim().toLowerCase();
+
+  let list = (S.orders||[]).filter(o=>{
+    // 返款池：仅 DONE 可返（按你确认的阶段）
+    if(o.review?.status!=="DONE") return false;
+    if(sellerId && o.sellerId!==sellerId) return false;
+    if(mk && o.market!==mk) return false;
+    const ps = getPayoutStatus(o);
+    if(st && ps!==st) return false;
+
+    if(q){
+      const p = o.productId ? U.productById(o.productId) : null;
+      const hay = [
+        o.orderId||"", o.asin||"", p?.name||"", o.note||""
+      ].join(" ").toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // 默认：待打款置顶
+  list.sort((a,b)=>{
+    const sa = getPayoutStatus(a)==="payout_pending" ? 0 : 1;
+    const sb = getPayoutStatus(b)==="payout_pending" ? 0 : 1;
+    if(sa!==sb) return sa-sb;
+    return String(b.date||"").localeCompare(String(a.date||""));
+  });
+  return list;
+}
+
+function renderPayout(){
+  // 没有返款 DOM 时直接跳过（避免影响原页面）
+  if(!$("tab-payout") || !$("payoutRows")) return;
+
+  ensurePayoutSettings();
+
+  // seller options
+  const sel = $("payoutSellerFilter");
+  if(sel && sel.options.length<=1){
+    sel.innerHTML = '<option value="">全部卖家</option>' + (S.sellers||[]).map(s=>`<option value="${U.esc(s.id)}">${U.esc(s.name||s.id)}</option>`).join("");
+  }
+
+  applyPayoutCfgToInputs();
+
+  const all = payoutFilteredOrders();
+  const ps = UI.payoutPageSize || 100;
+  const totalPages = Math.max(1, Math.ceil(all.length/ps));
+  if(UI.payoutPage>totalPages) UI.payoutPage = totalPages;
+  const start = (UI.payoutPage-1)*ps;
+  const pageList = all.slice(start, start+ps);
+
+  const rows = pageList.map(o=>{
+    const checked = UI.payoutSelected.has(o.id) ? "checked" : "";
+    const ps = getPayoutStatus(o);
+    const psText = ps==="paid" ? "已返款" : "已回评待打款";
+    const commCny = (S.settings.payoutCommDefault!=null) ? U.num(S.settings.payoutCommDefault) : commissionShould(o);
+    return `<tr>
+      <td><input type="checkbox" data-payout-sel="${U.esc(o.id)}" ${checked}/></td>
+      <td class="mono">${U.esc(o.orderId||"")}</td>
+      <td>${U.esc(o.market||"")}</td>
+      <td>${U.esc(o.currency||"")}</td>
+      <td class="mono">${U.num(o.amount).toFixed(2)}</td>
+      <td class="mono">${U.num(o.discount).toFixed(2)}</td>
+      <td class="mono">${U.num(o.buyerCommission).toFixed(2)}</td>
+      <td class="mono">${commCny.toFixed(2)}</td>
+      <td>${psText}</td>
+      <td>${U.esc(o.review?.status||"")}</td>
+    </tr>`;
+  }).join("");
+
+  $("payoutRows").innerHTML = rows || `<tr><td colspan="10" class="muted">无符合条件的订单</td></tr>`;
+
+  // bind row selection
+  document.querySelectorAll('[data-payout-sel]').forEach(cb=>{
+    cb.onchange = ()=>{
+      const id = cb.getAttribute("data-payout-sel");
+      if(cb.checked) UI.payoutSelected.add(id); else UI.payoutSelected.delete(id);
+      renderPayoutSelHint();
+    };
+  });
+
+  if($("payoutPageInfo")) $("payoutPageInfo").textContent = `第 ${UI.payoutPage}/${totalPages} 页，合计 ${all.length} 单`;
+  renderPayoutSelHint();
+  renderPayoutBatches();
+}
+
+function renderPayoutSelHint(){
+  if(!$("payoutSelHint")) return;
+  $("payoutSelHint").textContent = `已选择 ${UI.payoutSelected.size} 单`;
+}
+
+function renderPayoutBatches(){
+  if(!$("payoutBatchRows")) return;
+  ensurePayoutSettings();
+  const rows = (S.payoutBatches||[]).slice().reverse().map(b=>{
+    const cnt = (b.lines||[]).length;
+    const total = U.num(b.totalCny).toFixed(2);
+    return `<tr>
+      <td class="mono">${U.esc(b.batchId||b.id)}</td>
+      <td class="mono">${U.esc(b.date||"")}</td>
+      <td>${U.esc(b.method||"")}</td>
+      <td class="mono">${cnt}</td>
+      <td class="mono">${total}</td>
+      <td>
+        <button class="btn sm" data-payout-export="${U.esc(b.id)}">导出CSV</button>
+        <button class="btn sm danger" data-payout-del="${U.esc(b.id)}">删除回滚</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("payoutBatchRows").innerHTML = rows || `<tr><td colspan="6" class="muted">暂无返款批次</td></tr>`;
+
+  document.querySelectorAll("[data-payout-export]").forEach(btn=>{
+    btn.onclick = ()=> exportPayoutBatchCSV(btn.getAttribute("data-payout-export"));
+  });
+  document.querySelectorAll("[data-payout-del]").forEach(btn=>{
+    btn.onclick = ()=> deletePayoutBatch(btn.getAttribute("data-payout-del"));
+  });
+}
+
+function payoutSelectPageAll(){
+  const all = payoutFilteredOrders();
+  const ps = UI.payoutPageSize || 100;
+  const start = (UI.payoutPage-1)*ps;
+  all.slice(start, start+ps).forEach(o=> UI.payoutSelected.add(o.id));
+  renderPayout();
+}
+function payoutClearSelection(){
+  UI.payoutSelected.clear();
+  renderPayout();
+}
+
+function payoutParseAndSelect(){
+  const text = $("payoutPaste")?.value || "";
+  const ids = U.extractOrderIds(text);
+  let hit=0;
+  ids.forEach(oid=>{
+    (S.orders||[]).filter(o=>String(o.orderId||"")===oid).forEach(o=>{
+      if(o.review?.status==="DONE"){ UI.payoutSelected.add(o.id); hit++; }
+    });
+  });
+  if($("payoutPasteHint")) $("payoutPasteHint").textContent = `识别 ${ids.length} 个订单号，命中可返款 ${hit} 个`;
+  renderPayout();
+}
+
+function payoutParseMarkDone(){
+  alert("该功能建议在“订单”页执行回评标记，以保持流程一致。本页面仅新增返款模块。");
+  // 不做自动标记，避免影响原有逻辑
+}
+
+function openPayoutModal(){
+  ensurePayoutSettings();
+  const ids = Array.from(UI.payoutSelected);
+  const orders = (S.orders||[]).filter(o=>ids.includes(o.id));
+  const eligible = orders.filter(o=>o.review?.status==="DONE" && getPayoutStatus(o)==="payout_pending");
+  if(eligible.length===0){
+    alert("请选择：已回评(DONE)且待打款的订单。");
+    return;
+  }
+
+  // fill batch inputs
+  const now = new Date();
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0'), d = String(now.getDate()).padStart(2,'0');
+  if($("payoutBatchDate")) $("payoutBatchDate").value = `${y}-${m}-${d}`;
+  if($("payoutBatchId") && !$("payoutBatchId").value){
+    $("payoutBatchId").value = `PB${y}${m}${d}-${String(S.seq.payoutBatch||1).padStart(3,'0')}`;
+  }
+
+  const fx = Object.assign({}, S.settings.payoutFxDefault);
+  $("payoutBatchFxUsd").value = fx.usd || "";
+  $("payoutBatchFxEur").value = fx.eur || "";
+  $("payoutBatchFxGbp").value = fx.gbp || "";
+  $("payoutBatchFxCad").value = fx.cad || "";
+  $("payoutBatchFxJpy").value = fx.jpy || "";
+
+  // build modal rows
+  const commDefault = (S.settings.payoutCommDefault!=null) ? U.num(S.settings.payoutCommDefault) : null;
+
+  const rows = eligible.map(o=>{
+    const amount = U.num(o.amount);
+    const discount = U.num(o.discount);
+    const buyerCommOrig = U.num(o.buyerCommission);
+    const principalOrig = amount - discount + buyerCommOrig;
+    const fxv = getFxForOrder(o, fx);
+    const principalCny = principalOrig * fxv;
+    const commCny = (commDefault!=null) ? commDefault : commissionShould(o);
+    const principalPay = principalCny;
+    const commPay = commCny;
+
+    return `<tr data-payout-row="${U.esc(o.id)}">
+      <td class="mono">${U.esc(o.orderId||"")}</td>
+      <td>${U.esc(o.market||"")}</td>
+      <td><input data-f="amount" type="number" step="0.01" value="${amount.toFixed(2)}"/></td>
+      <td><input data-f="discount" type="number" step="0.01" value="${discount.toFixed(2)}"/></td>
+      <td><input data-f="buyerCommOrig" type="number" step="0.01" value="${buyerCommOrig.toFixed(2)}"/></td>
+      <td class="mono" data-v="principalOrig">${principalOrig.toFixed(2)}</td>
+      <td class="mono" data-v="fx">${fxv.toFixed(6).replace(/0+$/,'').replace(/\.$/,'')}</td>
+      <td class="mono" data-v="principalCny">${principalCny.toFixed(2)}</td>
+      <td><input data-f="principalPay" type="number" step="0.01" value="${principalPay.toFixed(2)}"/></td>
+      <td><input data-f="commCny" type="number" step="0.01" value="${commCny.toFixed(2)}"/></td>
+      <td><input data-f="commPay" type="number" step="0.01" value="${commPay.toFixed(2)}"/></td>
+    </tr>`;
+  }).join("");
+
+  $("payoutModalRows").innerHTML = rows;
+
+  // bind recalculation on inputs change
+  document.querySelectorAll("#payoutModalRows tr").forEach(tr=>{
+    tr.querySelectorAll("input").forEach(inp=>{
+      inp.oninput = ()=> payoutModalRecalcRow(tr);
+    });
+  });
+
+  // bind top toggle
+  $("payoutModalTopToggle").onclick = ()=>{
+    const box = $("payoutModalTopBox");
+    const hidden = box.style.display==="none";
+    box.style.display = hidden ? "" : "none";
+    $("payoutModalTopToggle").textContent = hidden ? "隐藏" : "展开";
+  };
+
+  // bind close/cancel
+  $("payoutModalClose").onclick = closePayoutModal;
+  $("payoutModalCancel").onclick = closePayoutModal;
+
+  // bind export and confirm
+  $("payoutModalExport").onclick = ()=> exportPayoutModalCSV();
+  $("payoutModalConfirm").onclick = ()=> confirmPayoutModal();
+
+  // when fx input changes, refresh all fx columns
+  ["payoutBatchFxUsd","payoutBatchFxEur","payoutBatchFxGbp","payoutBatchFxCad","payoutBatchFxJpy"].forEach(id=>{
+    $(id).oninput = ()=> payoutModalRecalcAll();
+  payoutModalRunPrecheck();
+  });
+
+  payoutModalRecalcAll();
+  payoutModalRunPrecheck();
+  $("payoutModal").style.display = "";
+}
+
+function closePayoutModal(){
+  $("payoutModal").style.display = "none";
+}
+
+function payoutModalGetFxObj(){
+  return {
+    usd: U.num($("payoutBatchFxUsd").value),
+    eur: U.num($("payoutBatchFxEur").value),
+    gbp: U.num($("payoutBatchFxGbp").value),
+    cad: U.num($("payoutBatchFxCad").value),
+    jpy: U.num($("payoutBatchFxJpy").value),
+  };
+}
+
+function payoutModalRecalcRow(tr){
+  const id = tr.getAttribute("data-payout-row");
+  const order = (S.orders||[]).find(o=>o.id===id);
+  if(!order) return;
+  const fxObj = payoutModalGetFxObj();
+  const amount = U.num(tr.querySelector('input[data-f="amount"]').value);
+  const discount = U.num(tr.querySelector('input[data-f="discount"]').value);
+  const buyerCommOrig = U.num(tr.querySelector('input[data-f="buyerCommOrig"]').value);
+  const principalOrig = amount - discount + buyerCommOrig;
+  const fxv = getFxForOrder(Object.assign({}, order, {amount,discount,buyerCommission:buyerCommOrig}), fxObj);
+  const principalCny = principalOrig * fxv;
+
+  tr.querySelector('[data-v="principalOrig"]').textContent = principalOrig.toFixed(2);
+  tr.querySelector('[data-v="fx"]').textContent = fxv.toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
+  tr.querySelector('[data-v="principalCny"]').textContent = principalCny.toFixed(2);
+
+  payoutModalRecalcTotal();
+  payoutModalRunPrecheck();
+}
+function payoutModalRecalcAll(){
+  document.querySelectorAll("#payoutModalRows tr").forEach(tr=> payoutModalRecalcRow(tr));
+}
+function payoutModalRecalcTotal(){
+  let total = 0;
+  document.querySelectorAll("#payoutModalRows tr").forEach(tr=>{
+    const principalPay = U.num(tr.querySelector('input[data-f="principalPay"]').value);
+    const commPay = U.num(tr.querySelector('input[data-f="commPay"]').value);
+    total += principalPay + commPay;
+  });
+  $("payoutModalTotal").textContent = total.toFixed(2);
+}
+
+
+function payoutModalRunPrecheck(){
+  const listEl = $("payoutPrecheckList");
+  const sumEl = $("payoutPrecheckSummary");
+  const btn = $("payoutModalConfirm");
+  if(!listEl || !sumEl || !btn) return true;
+
+  const issues = [];
+  const fxObj = payoutModalGetFxObj();
+  const rows = Array.from(document.querySelectorAll("#payoutModalRows tr"));
+  rows.forEach(tr=>{
+    const id = tr.getAttribute("data-payout-row");
+    const o = (S.orders||[]).find(x=>x.id===id);
+    if(!o){ issues.push(`${id}: 订单不存在`); return; }
+
+    const orderId = o.orderId||o.id;
+    const st = getPayoutStatus(o);
+    if(o.review?.status!=="DONE") issues.push(`${orderId}: 回评非DONE`);
+    if(st!=="payout_pending") issues.push(`${orderId}: 返款状态非待打款(${st||"空"})`);
+
+    const amount = U.num(tr.querySelector('input[data-f="amount"]')?.value);
+    const discount = U.num(tr.querySelector('input[data-f="discount"]')?.value);
+    const buyerCommOrig = U.num(tr.querySelector('input[data-f="buyerCommOrig"]')?.value);
+    const commCny = U.num(tr.querySelector('input[data-f="commCny"]')?.value);
+
+    if(!(amount>=0)) issues.push(`${orderId}: 金额异常`);
+    if(!(discount>=0)) issues.push(`${orderId}: 折扣异常`);
+    if(!(buyerCommOrig>=0)) issues.push(`${orderId}: 买手佣金(原币)异常`);
+    if(!(commCny>=0)) issues.push(`${orderId}: 佣金(CNY)异常`);
+
+    const fx = getFxForOrder(o, fxObj);
+    if(!(fx>0)) issues.push(`${orderId}: FX缺失（${o.currency||o.market||"?"}）`);
+
+    // principal orig: amount - discount + buyerCommOrig
+    const principalOrig = amount - discount + buyerCommOrig;
+    if(principalOrig<0) issues.push(`${orderId}: 本金(原币)为负(${principalOrig.toFixed(2)})`);
+  });
+
+  const ok = issues.length===0;
+  sumEl.textContent = ok ? `通过（${rows.length} 单）` : `失败（${issues.length} 项）`;
+  listEl.innerHTML = ok ? '<div style="color:var(--ok)">无问题，可确认返款。</div>'
+                        : issues.slice(0,80).map(x=>`<div style="color:var(--bad)">• ${U.esc(x)}</div>`).join("") + (issues.length>80? `<div class="mini">… 还有 ${issues.length-80} 项</div>`:"");
+  btn.disabled = !ok;
+  btn.classList.toggle("disabled", !ok);
+  return ok;
+}
+
+
+function exportPayoutModalCSV(){
+  const payload = collectPayoutModalLines();
+  const head = ["orderId","market","currency","amount","discount","buyerCommOrig","principalOrig","fx","principalCny","principalPayCny","commShouldCny","commPayCny","totalPayCny"];
+  const rows = payload.lines.map(l=>[
+    l.orderId,l.market,l.currency,
+    l.amount,l.discount,l.buyerCommOrig,l.principalOrig,l.fx,l.principalCny,l.principalPayCny,l.commShouldCny,l.commPayCny,l.totalPayCny
+  ]);
+  const csv = U.toCSV([head,...rows]);
+  U.download(`payout_batch_${payload.batchId||"PB"}.csv`, csv, "text/csv");
+}
+
+function collectPayoutModalLines(){
+  const fxObj = payoutModalGetFxObj();
+  const batchId = ($("payoutBatchId").value||"").trim();
+  const date = $("payoutBatchDate").value || U.today();
+  const method = ($("payoutBatchMethod").value||"").trim();
+  const note = ($("payoutBatchNote").value||"").trim();
+
+  const lines = [];
+  document.querySelectorAll("#payoutModalRows tr").forEach(tr=>{
+    const id = tr.getAttribute("data-payout-row");
+    const o = (S.orders||[]).find(x=>x.id===id);
+    if(!o) return;
+
+    const amount = U.num(tr.querySelector('input[data-f="amount"]').value);
+    const discount = U.num(tr.querySelector('input[data-f="discount"]').value);
+    const buyerCommOrig = U.num(tr.querySelector('input[data-f="buyerCommOrig"]').value);
+    const principalOrig = U.num(tr.querySelector('[data-v="principalOrig"]').textContent);
+    const fxv = U.num(tr.querySelector('[data-v="fx"]').textContent);
+    const principalCny = U.num(tr.querySelector('[data-v="principalCny"]').textContent);
+
+    const principalPayCny = U.num(tr.querySelector('input[data-f="principalPay"]').value);
+    const commShouldCny = U.num(tr.querySelector('input[data-f="commCny"]').value);
+    const commPayCny = U.num(tr.querySelector('input[data-f="commPay"]').value);
+    const totalPayCny = principalPayCny + commPayCny;
+
+    lines.push({
+      id:o.id, orderId:o.orderId, market:o.market, currency:o.currency,
+      amount:amount.toFixed(2), discount:discount.toFixed(2), buyerCommOrig:buyerCommOrig.toFixed(2),
+      principalOrig:principalOrig.toFixed(2),
+      fx: fxv,
+      principalCny: principalCny.toFixed(2),
+      principalPayCny: principalPayCny.toFixed(2),
+      commShouldCny: commShouldCny.toFixed(2),
+      commPayCny: commPayCny.toFixed(2),
+      totalPayCny: totalPayCny.toFixed(2),
+      sellerId:o.sellerId, productId:o.productId
+    });
+  });
+
+  return {batchId,date,method,note,fx:fxObj,lines};
+}
+
+function confirmPayoutModal(){
+  const batchId = ($("payoutBatchId").value||"").trim();
+  const date = $("payoutBatchDate").value || "";
+  if(!batchId){ alert("请填写批次ID"); return; }
+  if(!date){ alert("请选择日期"); return; }
+
+  const payload = collectPayoutModalLines();
+  if(payload.lines.length===0){ alert("本批次无订单"); return; }
+
+  // 生成批次 + 标记订单已返款（方案A）
+  const id = `PB${String(S.seq.payoutBatch||1)}`;
+  S.seq.payoutBatch = (S.seq.payoutBatch||1) + 1;
+
+  let total = 0;
+  payload.lines.forEach(l=> total += U.num(l.totalPayCny));
+
+  S.payoutBatches.push({
+    id,
+    batchId: payload.batchId,
+    date: payload.date,
+    method: payload.method,
+    note: payload.note,
+    fx: payload.fx,
+    lines: payload.lines,
+    totalCny: total
+  });
+
+  // 回写订单：已返款
+  payload.lines.forEach(l=>{
+    const o = (S.orders||[]).find(x=>x.id===l.id);
+    if(!o) return;
+    if(!o.payout) o.payout = {};
+    o.payout.status = "paid";
+    o.payout.batchId = id;
+    o.payout.batchLabel = payload.batchId;
+    o.payout.paidAt = payload.date;
+    o.payout.totalPayCny = U.num(l.totalPayCny);
+  });
+
+  save();
+  UI.payoutSelected.clear();
+  closePayoutModal();
+  renderPayout();
+  alert(`已生成返款批次：${payload.batchId}（${payload.lines.length} 单），并标记为已返款`);
+}
+
+function exportPayoutBatchCSV(payoutBatchInternalId){
+  const b = (S.payoutBatches||[]).find(x=>x.id===payoutBatchInternalId);
+  if(!b){ alert("批次不存在"); return; }
+  const head = ["batchId","date","method","orderId","market","currency","amount","discount","buyerCommOrig","principalOrig","fx","principalCny","principalPayCny","commShouldCny","commPayCny","totalPayCny"];
+  const rows = (b.lines||[]).map(l=>[
+    b.batchId,b.date,b.method||"",
+    l.orderId,l.market,l.currency,l.amount,l.discount,l.buyerCommOrig,l.principalOrig,l.fx,l.principalCny,l.principalPayCny,l.commShouldCny,l.commPayCny,l.totalPayCny
+  ]);
+  U.download(`payout_${b.batchId||b.id}.csv`, U.toCSV([head,...rows]), "text/csv");
+}
+
+function deletePayoutBatch(payoutBatchInternalId){
+  const idx = (S.payoutBatches||[]).findIndex(x=>x.id===payoutBatchInternalId);
+  if(idx<0){ alert("批次不存在"); return; }
+  const b = S.payoutBatches[idx];
+  if(!confirm(`删除回滚返款批次 ${b.batchId||b.id}？将把该批次订单恢复为“待打款”。`)) return;
+
+  const ids = new Set((b.lines||[]).map(x=>x.id));
+  (S.orders||[]).forEach(o=>{
+    if(ids.has(o.id) && o.payout && o.payout.batchId===b.id){
+      o.payout.status = "payout_pending";
+      o.payout.batchId = null;
+      o.payout.batchLabel = "";
+    }
+  });
+
+  S.payoutBatches.splice(idx,1);
+  save();
+  renderPayout();
+}
+
+function bindPayout(){
+  if(!$("tab-payout")) return; // 没有返款 DOM 时跳过
+
+  $("payoutCfgToggle").onclick = ()=>{
+    const box = $("payoutCfgBox");
+    const hidden = box.style.display==="none";
+    box.style.display = hidden ? "" : "none";
+    $("payoutCfgToggle").textContent = hidden ? "隐藏" : "展开";
+  };
+
+  $("payoutCfgSave").onclick = ()=>{
+    ensurePayoutSettings();
+    const v = readPayoutCfgInputs();
+    S.settings.payoutFxDefault = {usd:v.usd, gbp:v.gbp, eur:v.eur, cad:v.cad, jpy:v.jpy};
+    S.settings.payoutCommDefault = v.commDefault;
+    save();
+    if($("payoutCfgHint")) $("payoutCfgHint").textContent = "已保存为默认（后续返款弹窗自动使用）";
+    renderPayout();
+  };
+
+  $("payoutCfgReset").onclick = ()=>{
+    ensurePayoutSettings();
+    S.settings.payoutFxDefault = {usd:0,eur:0,gbp:0,cad:0,jpy:0};
+    S.settings.payoutCommDefault = null;
+    save();
+    applyPayoutCfgToInputs();
+    if($("payoutCfgHint")) $("payoutCfgHint").textContent = "已恢复默认（空值）";
+    renderPayout();
+  };
+
+  ["payoutSellerFilter","payoutStatusFilter","payoutMarketFilter"].forEach(id=>{
+    if($(id)) $(id).onchange = ()=>{ UI.payoutPage=1; renderPayout(); };
+  });
+  if($("payoutSearch")) $("payoutSearch").oninput = ()=>{ UI.payoutPage=1; renderPayout(); };
+
+  $("payoutSelectAll").onclick = payoutSelectPageAll;
+  $("payoutClearSel").onclick = payoutClearSelection;
+  $("payoutPrev").onclick = ()=>{ UI.payoutPage=Math.max(1, UI.payoutPage-1); renderPayout(); };
+  $("payoutNext").onclick = ()=>{ UI.payoutPage=UI.payoutPage+1; renderPayout(); };
+
+  $("payoutParseSelect").onclick = payoutParseAndSelect;
+  $("payoutParseMarkDone").onclick = payoutParseMarkDone;
+
+  $("payoutOpenModal").onclick = openPayoutModal;
+}
 
 /* ===================== UI Enhancements (Searchable Select + Collapse Memory) ===================== */
 function ensureWrapWithSearch(selectEl, placeholder, wrapClass){
@@ -3005,6 +4077,7 @@ document.addEventListener("DOMContentLoaded", ()=>{
     try{ bind(); renderTabs(); renderAll(); initCollapseMemory(); initSearchableSelects(); }catch(_e){}
   });
 });
+
 </script>
 
 <!-- Modal Overlay (for Order Edit) -->
@@ -3482,6 +4555,3 @@ try{ SettleDrafts.bind(); }catch(e){ console.warn("SettleDrafts init failed", e)
 
 </body>
 </html>
-  .btn.sm{padding:6px 10px;font-size:12px;border-radius:10px;}
-  .btn.sm svg{width:14px;height:14px;}
-
