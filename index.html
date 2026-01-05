@@ -1,292 +1,3393 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>简易登记系统 v6.4.2（重构稳定版）</title>
-
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>简易登记系统 v6.4.2-next5</title>
 <style>
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto}
-button{cursor:pointer}
-.hidden{display:none!important}
-.tab-btn{padding:8px 14px;border-radius:16px;border:1px solid #ddd;background:#fff}
-.tab-btn.active{background:#2563eb;color:#fff;border-color:#2563eb}
-table{border-collapse:collapse;width:100%}
-th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
-.badge{padding:2px 6px;border-radius:8px;font-size:12px}
-.badge.red{background:#fee2e2;color:#b91c1c}
-.badge.green{background:#dcfce7;color:#166534}
-.badge.gray{background:#f3f4f6;color:#374151}
-.topbar{padding:16px;border-bottom:1px solid #eee}
-.container{padding:16px}
-.actions button{margin-right:6px}
-h3{margin:12px 0}
-input,select{padding:6px 8px}
+
+:root{
+  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text:#111827;
+  --border:#e5e7eb; --primary:#2563eb; --primary2:#1d4ed8;
+  --good:#16a34a; --danger:#ef4444; --warn:#f59e0b; --soft:#f9fafb;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--text)}
+.wrap{max-width:1500px;margin:0 auto;padding:16px}
+.header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+.header .title{font-size:20px;font-weight:800}
+.header .desc{color:var(--muted);font-size:12px;margin-top:4px;max-width:1120px;line-height:1.55}
+.top-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.tab{padding:8px 12px;border-radius:999px;border:1px solid var(--border);background:#fff;color:#111827;cursor:pointer;font-weight:800;font-size:13px}
+.tab.active{background:#e8f0ff;border-color:#c7d2fe;color:#1d4ed8}
+h3{margin:0 0 10px}
+h4{margin:0 0 8px}
+label{font-size:12px;color:var(--muted)}
+input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:#fff}
+textarea{min-height:90px;resize:vertical}
+.grid{display:grid;gap:10px}
+/*
+  Use minmax(0,1fr) to avoid layout blow-ups when a select option
+  has long text (e.g. "待结算（仅已回评/免评）").
+*/
+.grid > *{min-width:0}
+.grid.cols-2{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.grid.cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.grid.cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+/* FIX: prevent long select text (e.g. 佣金待结算）撑破 flex 行导致页面错乱 */
+.row > div{min-width:0 !important;}
+.row select, .row input, .row textarea{min-width:0; max-width:100%;}
+.row select{
+  display:block;
+  width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.btn{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--soft);cursor:pointer;font-weight:800;font-size:13px}
+.btn.sm{padding:6px 10px;font-size:12px;border-radius:10px}
+
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.primary:hover{background:var(--primary2)}
+.btn.good{background:var(--good);border-color:var(--good);color:#fff}
+.btn.danger{background:#fee2e2;border-color:#fecaca;color:#991b1b}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:13px;min-width:1100px}
+th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap}
+th{background:var(--soft);color:var(--muted);font-weight:900}
+td.small{color:var(--muted);font-size:12px}
+.badge{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:900}
+.badge.done{background:#dcfce7;color:#166534}
+.badge.pending{background:#fee2e2;color:#991b1b}
+.badge.waived{background:#e0f2fe;color:#0369a1}
+.badge.settled{background:#ede9fe;color:#5b21b6}
+.kpi{display:flex;gap:10px;flex-wrap:wrap}
+.kpi .box{flex:1;min-width:220px;border:1px solid var(--border);border-radius:12px;padding:10px;background:#fff}
+.kpi .box .v{font-size:18px;font-weight:900;margin-top:4px}
+.help{color:var(--muted);font-size:12px;line-height:1.5}
+.mini{font-size:12px;color:var(--muted)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+.tags{display:flex;gap:8px;flex-wrap:wrap}
+.tag{display:inline-flex;align-items:center;gap:8px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;padding:6px 10px;border-radius:999px;font-weight:900;font-size:12px;cursor:pointer}
+.tag .x{font-weight:900}
+details summary{cursor:pointer;font-weight:900;color:#1f2937}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+.modal .box{background:#fff;border-radius:14px;max-width:1200px;width:100%;max-height:92vh;overflow:auto;border:1px solid var(--border);box-shadow:0 10px 25px rgba(0,0,0,.18)}
+.modal .box .hd{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);position:sticky;top:0;background:#fff;z-index:2}
+.modal .box .bd{padding:14px}
+.modal .box .ft{display:flex;justify-content:flex-end;gap:10px;padding:12px 14px;border-top:1px solid var(--border);position:sticky;bottom:0;background:#fff}
+.pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:space-between}
+.pager .left,.pager .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pill{padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:#fff;font-weight:900;font-size:12px;color:var(--muted)}
+@media(max-width:980px){
+  .grid.cols-4,.grid.cols-5{grid-template-columns:1fr 1fr}
+  table{min-width:1100px}
+}
+
+  /* 搜索+下拉并排：卖家/产品 */
+  .searchWrap{display:flex; gap:8px; align-items:center;}
+  .searchWrap input:not([type="checkbox"]){width:150px;}input[type="checkbox"]{width:auto;height:auto;}
+  .searchWrap select{flex:1; min-width:220px;}
+  .searchWrap.searchWrap--seller select{max-width:260px;}
+  .searchWrap.searchWrap--product select{max-width:520px;}
+
+
+/* --- Settlement modal sticky header --- */
+#modalSettle .table-wrap{max-height:55vh; overflow:auto;}
+#modalSettle .table-wrap thead th{position:sticky; top:0; background:#fff; z-index:3;}
+
+
+/* ===== Settlement Modal enhancements ===== */
+#settleModal .table-wrap{max-height:55vh;overflow:auto;}
+#settleModal thead th{position:sticky;top:0;background:#fff;z-index:3;box-shadow:0 1px 0 rgba(0,0,0,.06);}
+#settleModal .settle-sticky{position:sticky;top:0;background:#fff;z-index:4;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:10px}
+#settleModal .row.total-bottom{display:none;}
+#settleModal .box{overflow:hidden;display:flex;flex-direction:column;}
+#settleModal .box .bd{flex:1;overflow:hidden;display:flex;flex-direction:column;}
+#settleModal .table-wrap{flex:1;max-height:none;}
+
+/* Orders table: fit within container; allow horizontal scroll if needed */
+.table-scroll{overflow:auto; border:1px solid var(--border); border-radius:12px; background:#fff;}
+.orders-table{width:100%; min-width:1200px; border-collapse:separate; border-spacing:0;}
+.orders-table th,.orders-table td{white-space:nowrap;}
+.orders-table input[type=checkbox]{width:14px;height:14px; vertical-align:middle;}
+.orders-table th:first-child,.orders-table td:first-child{width:44px; text-align:center;}
+.orders-table th:nth-child(2),.orders-table td:nth-child(2){width:64px;} /* 日期 */
+.orders-table th:nth-child(3),.orders-table td:nth-child(3){width:210px;} /* 订单号 */
+.orders-table th:last-child,.orders-table td:last-child{width:170px;} /* 操作 */
+.orders-table td:last-child .btn{padding:6px 10px; font-size:12px; border-radius:10px;}
+/* compact order form spacing */
+#tab-orders details summary{ cursor:pointer; }
+.grid.order-compact{ gap:10px; }
+
+/* === UI compact: actions column === */
+td.action-col{white-space:nowrap}
+td.action-col .btn{
+  padding:6px 8px;
+  font-size:12px;
+  border-radius:9px;
+}
+td.action-col .btn + .btn{margin-left:6px}
+td.action-col .btn.danger{background:#fff1f2;border-color:#fecdd3;color:#9f1239}
+/* make delete less eye-catching but still clear */
+td.action-col .btn.danger:hover{background:#ffe4e6}
+
+
+/* ===== Order page compact layout (v6.4.2) ===== */
+#tab-orders details{padding:10px 12px;}
+#tab-orders details>summary{margin:-10px -12px 10px -12px; padding:10px 12px;}
+#tab-orders .grid{gap:8px;}
+#tab-orders label{margin-bottom:4px;}
+#tab-orders input, #tab-orders select{height:34px; padding:6px 10px;}
+#tab-orders .row{gap:8px;}
+/* keep the order form within 2 rows by hiding seldom-used fields */
+
+#orderReviewType{min-width:0;width:100%;}
+
+/* Batch parse layout (left: text+actions, right: options) */
+.batch-layout{display:flex;gap:12px;align-items:stretch}
+.batch-layout .batch-left{flex:1;min-width:360px;display:flex;flex-direction:column;gap:10px}
+.batch-layout .batch-left textarea{min-height:150px}
+.batch-layout .batch-actions{justify-content:flex-start}
+.batch-layout .batch-actions .btn{min-width:110px}
+.batch-layout .batch-opts{width:520px;max-width:48%}
+.batch-opts-grid{align-items:end}
+.batch-opts-grid input,.batch-opts-grid select{width:100%}
+@media (max-width: 1000px){
+  .batch-layout{flex-direction:column}
+  .batch-layout .batch-opts{width:auto;max-width:none}
+}
+  .batch-right{width:auto;flex-direction:row;flex-wrap:wrap}
+  .batch-right .btn{width:auto}
+}
+
+  .btncol{display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;}
+  .btncol .btn{min-width:92px;}
+
 </style>
+<style>
+/* --- Settle drafts modal: ensure action buttons fully visible --- */
+#settleDraftModal .modal-body{overflow-x:auto;}
+#settleDraftModal table{width:100%; table-layout:fixed;}
+#settleDraftModal th, #settleDraftModal td{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+#settleDraftModal th:nth-child(1), #settleDraftModal td:nth-child(1){width:160px;}
+#settleDraftModal th:nth-child(2), #settleDraftModal td:nth-child(2){width:140px;}
+#settleDraftModal th:nth-child(3), #settleDraftModal td:nth-child(3){width:90px;}
+#settleDraftModal th:nth-child(4), #settleDraftModal td:nth-child(4){width:70px; text-align:center;}
+#settleDraftModal th:nth-child(5), #settleDraftModal td:nth-child(5){width:120px; text-align:right;}
+#settleDraftModal th:nth-child(6), #settleDraftModal td:nth-child(6){width:190px;}
+#settleDraftModal th:nth-child(7), #settleDraftModal td:nth-child(7){width:300px;}
+#settleDraftModal td:nth-child(7){white-space:normal; overflow:visible;}
+#settleDraftModal td:nth-child(7) .btn{padding:6px 10px; font-size:12px;}
+</style>
+
 </head>
-
 <body>
+<div class="wrap">
+  <div class="header">
+    <div>
+      <div class="title">简易登记系统 v6.4.2（重构稳定版）</div>
+      <div class="desc">
+        目标：修复 v6.4.0 中「批量解析/产品关联/结算乘汇率/回评默认/本佣一起/批次CSV导出」等失效点。<br/>
+        规则：结算本金 = (金额 - 折扣) × FX；佣金 = 按“回评登记弹窗”的已回评类型（自动跟随产品/无产品默认文字评）。
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn" id="btnExport">导出 JSON</button>
+      <button class="btn" id="btnImport">导入 JSON</button>
+      <button class="btn" id="btnLoadSample">加载示例数据</button>
+      <button class="btn danger" id="btnReset">清空数据</button>
+      <input type="file" id="importFile" accept="application/json" style="display:none"/>
+    </div>
+  </div>
 
-<div class="topbar">
-  <h2>简易登记系统 v6.4.2（重构稳定版）</h2>
-  <div class="actions">
-    <button onclick="exportJSON()">导出 JSON</button>
-    <button onclick="importJSON()">导入 JSON</button>
-    <button onclick="loadSample()">加载示例数据</button>
-    <button style="color:#b91c1c" onclick="clearAll()">清空数据</button>
+  <div class="tabs card" style="padding:10px">
+    <button class="tab active" data-tab="dashboard">看板</button>
+    <button class="tab" data-tab="sellers">卖家</button>
+    <button class="tab" data-tab="products">产品</button>
+    <button class="tab" data-tab="orders">订单</button>
+  </div>
+
+  <section id="tab-dashboard" class="card">
+    <h3>看板</h3>
+    <div class="kpi">
+      <div class="box"><div class="mini">卖家数</div><div class="v" id="kpiSellers">0</div></div>
+      <div class="box"><div class="mini">产品数</div><div class="v" id="kpiProducts">0</div></div>
+      <div class="box"><div class="mini">订单数</div><div class="v" id="kpiOrders">0</div></div>
+      <div class="box"><div class="mini">待结算本金</div><div class="v" id="kpiP">0</div></div>
+      <div class="box"><div class="mini">待结算佣金（已回评/免评）</div><div class="v" id="kpiC">0</div></div>
+    </div>
+    <hr/>
+    <div class="help">
+      快速验证：1) 创建卖家+产品 2) 批量解析登记订单 3) 在订单列表勾选 → 本金/佣金/本佣一起结算 4) 批次列表导出 CSV。
+    </div>
+  </section>
+
+  <section id="tab-sellers" class="card" style="display:none">
+    <h3>卖家（8 国 FX + 佣金 CNY）</h3>
+    <div class="help">FX 为“原币→CNY”。佣金固定人民币 CNY（按回评类型）。</div>
+    <hr/>
+    <div class="grid cols-4">
+      <div><label>Seller ID *</label><input id="sellerId" placeholder="例如：S001" class="mono"/></div>
+      <div><label>卖家名称 *</label><input id="sellerName" placeholder="例如：欧美测评"/></div>
+      <div><label>联系人（可选）</label><input id="sellerContact" placeholder="WhatsApp/Telegram/Email"/></div>
+      <div><label>备注（可选）</label><input id="sellerRemark" placeholder="备注"/></div>
+    </div>
+    <hr/>
+    <h4>FX（原币→CNY）</h4>
+    <div class="grid cols-4" id="sellerFxGrid"></div>
+    <hr/>
+    <h4>佣金（CNY）</h4>
+    <div class="grid cols-3" id="sellerCommissionGrid"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="btnSaveSeller">保存卖家</button>
+      <button class="btn" id="btnCancelSellerEdit" style="display:none">取消编辑</button>
+      <span class="mini" id="sellerEditHint"></span>
+    </div>
+
+    <hr/>
+    <div class="row">
+      <input id="sellerSearch" placeholder="搜索 Seller ID / 名称" style="max-width:340px"/>
+    </div>
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>名称</th><th>联系人</th><th>备注</th><th>FX 摘要</th><th>佣金摘要</th><th class="right">操作</th></tr>
+        </thead>
+        <tbody id="sellerRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-products" class="card" style="display:none">
+    <h3>产品（ASIN / Market / 折扣 / 回评类型）</h3>
+    <div class="help">产品的 Market/回评类型/折扣会在“新建订单/批量解析/粘贴选单关联产品”时作为默认值。</div>
+    <hr/>
+    <div class="grid cols-5">
+      <div><label>产品名称 *</label><input id="productName" placeholder="例如：美国车载充电器"/></div>
+      <div><label>ASIN *</label><input id="productAsin" placeholder="例如：B0XXXXXXX" class="mono"/></div>
+      <div><label>Market *</label><select id="productMarket"></select></div>
+      <div><label>卖家 *</label><select id="productSeller"></select></div>
+      <div><label>回评类型 *</label><select id="productReviewType"></select></div>
+    </div>
+    <div class="grid cols-4" style="margin-top:10px">
+      <div><label>折扣（原币）</label><input id="productDiscount" placeholder="例如：1.5" type="number" step="0.01"/></div>
+      <div><label>买手佣金（原币）</label><input id="productBuyerCommission" placeholder="例如：2.00" type="number" step="0.01"/></div>
+      <div><label>备注（可选）</label><input id="productRemark" placeholder="备注"/></div>
+      <div><label>卖家配置预览（自动）</label><input id="productPreview" disabled/></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="btnSaveProduct">保存产品</button>
+      <button class="btn" id="btnCancelProductEdit" style="display:none">取消编辑</button>
+      <span class="mini" id="productEditHint"></span>
+    </div>
+
+    <hr/>
+    <div class="row">
+      <input id="productSearch" placeholder="搜索 产品名 / ASIN / Seller / Market" style="max-width:420px"/>
+    </div>
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead>
+          <tr><th>产品名</th><th>ASIN</th><th>Market</th><th>币种</th><th>Seller</th><th>回评类型</th><th>折扣（原币）</th><th class="right">操作</th></tr>
+        </thead>
+        <tbody id="productRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-orders" class="card" style="display:none">
+    <h3>订单（登记 / 批量解析 / 产品关联 / 结算 / 回评 / 批次导出）</h3>
+
+    <details open>
+      <summary>新建/编辑订单（必选：卖家；可选：产品）</summary>
+      <div style="margin-top:10px" class="help">
+        选择产品后：自动填充 Market / 回评类型 / 折扣 / ASIN；并同步卖家为该产品卖家（如不同）。
+      </div>
+      <hr/>
+            <div class="grid" style="grid-template-columns: 1.25fr 1.5fr 1.05fr 0.75fr 0.75fr; gap:10px">
+        <div><label>选择产品（可选）</label>
+<select id="orderProduct"></select></div>
+        <div><label>订单号 Order ID *</label><input id="orderId" class="mono" placeholder="例如：111-3149968-9279463"/></div>
+        <div><label>卖家 *（必选）</label>
+<select id="orderSeller"></select></div>
+        <div><label>回评类型（默认跟随产品）</label><select id="orderReviewType"></select></div>
+        <div><label>折扣（原币）</label><input id="orderDiscount" placeholder="留空=用产品折扣" type="number" step="0.01"/></div>
+      </div>
+      <div class="grid" style="margin-top:10px; grid-template-columns: 0.7fr 1fr 0.75fr 0.75fr 1.2fr; gap:10px">
+  <div><label>国家/Market *</label><select id="orderMarket"></select></div>
+  <div><label>订单金额（原币）*</label><input id="orderAmount" placeholder="例如 15.99" type="number" step="0.01"/></div>
+  <div><label>ASIN（自动/可改）</label><input id="orderAsin" class="mono" placeholder="可留空"/></div>
+  <div><label>买手佣金（原币）</label><input id="orderBuyerCommission" placeholder="留空=用产品买手佣金" type="number" step="0.01"/></div>
+  <div><label>产品名/备注（可选）</label><input id="orderNote" placeholder="备注"/></div>
+</div>
+<div style="display:none">
+  <label>下单日期 *</label><input type="date" id="orderDate"/>
+  <label>币种（自动）</label><input id="orderCurrency" disabled/>
+  <label>汇率覆写（可选）</label><input id="orderFxOverride" placeholder="留空=用卖家默认FX" type="number" step="0.0001"/>
+</div>
+
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="btnSaveOrder">保存订单</button>
+        <button class="btn" id="btnCancelOrderEdit" style="display:none">取消编辑</button>
+        <span class="mini" id="orderEditHint"></span>
+      </div>
+    </details>
+
+    <hr/>
+
+    <details open>
+      <summary>批量解析登记订单（每行一单，可选产品套用）</summary>
+      <div class="help" style="margin-top:10px">
+        每行示例：<span class="mono">111-3149968-9279463美国儿童防水罩免评15.99</span>（订单号在前，价格在末尾）。<br/>
+        若选择“套用产品”：Market/折扣/回评类型/ASIN 全部按产品；否则按文本识别（识别失败用默认 Market）。
+      </div>
+      <hr/>
+      <div class="batch-layout">
+        <div class="batch-left">
+          <textarea id="batchText" placeholder="粘贴多行..."></textarea>
+          <div class="row batch-actions">
+            <button class="btn primary" id="btnBatchParse">解析并提交</button>
+            <button class="btn" id="btnBatchPreview">仅预览</button>
+          </div>
+          <div class="mini" id="batchHint"></div>
+        </div>
+
+        <div class="batch-right batch-opts">
+          <div class="grid cols-2 batch-opts-grid">
+<div>
+              <label>卖家 *（必选）</label>
+              <select id="batchSeller"></select>
+            </div>
+<div>
+              <label>套用产品（可选）</label>
+              <select id="batchProduct"></select>
+            </div>
+
+            <div>
+              <label>默认日期</label>
+              <input type="date" id="batchDate"/>
+            </div>
+            <div>
+              <label>默认 Market（识别失败用）</label>
+              <select id="batchMarket"></select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <hr/>
+
+    <details open>
+      <summary>订单列表（筛选 + 粘贴选单关联产品 + 多选结算）</summary>
+      <div class="grid cols-5" style="align-items:end;margin-top:12px">
+        <div><label>卖家筛选</label><select id="filterSeller"></select></div>
+        <div><label>本金状态</label>
+          <select id="filterPrincipal">
+            <option value="ALL">全部</option>
+            <option value="UNSETTLED">待结算</option>
+            <option value="SETTLED">已结算</option>
+          </select>
+        </div>
+        <div><label>佣金状态</label>
+          <select id="filterCommission">
+            <option value="ALL">全部</option>
+            <option value="UNSETTLED">待结算（仅已回评/免评）</option>
+            <option value="SETTLED">已结算</option>
+          </select>
+        </div>
+        <div><label>搜索订单号/产品/ASIN（输入前 19 位自动勾选）</label>
+          <input id="filterSearch" placeholder="例如：112-7138336-3094648" style="max-width:320px"/>
+        </div>
+        <div class="row" style="justify-content:flex-end">
+          <button class="btn" id="btnResetFilters">重置</button>
+          <button class="btn primary" id="btnSettlePrincipal" disabled>结算本金</button>
+          <button class="btn good" id="btnSettleCommission" disabled>结算佣金</button>
+          <button class="btn" id="btnSettleBoth" disabled>本佣一起</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;justify-content:space-between">
+        <div class="tags" id="selectedTags"></div>
+        <div class="mini" id="selectedCount"></div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:12px">
+        <div class="card" style="background:#f8fafc">
+          <h4 style="margin:0 0 8px">粘贴订单号：自动勾选（每行一单）</h4>
+          <textarea id="pasteSelectBox" rows="3" placeholder="111-3149968-9279463&#10;112-7138336-3094648"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn primary" id="btnParseSelect">解析并勾选</button>
+            <button class="btn" id="btnClearSelected">清空勾选</button>
+          </div>
+          <div class="mini" id="pasteSelectHint"></div>
+        </div>
+
+        <div class="card" style="background:#f8fafc">
+          <h4 style="margin:0 0 8px">粘贴订单号：关联产品（并勾选）</h4>
+<div class="grid cols-2" style="margin-top:8px">
+            <div><label>选择产品 *</label><select id="linkProduct"></select></div>
+            <div><label>操作</label>
+              <div class="row" style="gap:8px;flex-wrap:wrap">
+                <button class="btn primary" id="btnLinkProduct">解析+关联+勾选</button>
+                <button class="btn good" id="btnBatchReviewDone">批量标记已回评</button>
+              </div></div>
+          </div>
+          <textarea id="pasteLinkBox" rows="2" placeholder="111-3149968-9279463&#10;112-7138336-3094648"></textarea>
+<div class="mini" id="pasteLinkHint"></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;justify-content:flex-end;gap:10px;flex-wrap:wrap">
+        <button class="btn" id="btnSettleDrafts">收款草稿箱</button>
+        <button class="btn" id="btnExportOrdersCsv">导出订单 CSV（按当前筛选）</button>
+      </div>
+
+      <div class="pager" style="margin-top:10px">
+        <div class="left">
+          <span class="pill" id="pagerInfo">共 0 单</span>
+          <span class="pill" id="pagerPage">第 1 / 1 页</span>
+          <button class="btn" id="btnPrevPage">上一页</button>
+          <button class="btn" id="btnNextPage">下一页</button>
+        </div>
+        <div class="right">
+          <label class="mini">每页</label>
+          <select id="pageSize" style="width:120px">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+          <label class="mini">跳转页</label>
+          <input id="gotoPage" style="width:120px" placeholder="例如 3"/>
+          <button class="btn" id="btnGoto">跳转</button>
+        </div>
+      </div>
+    </details>
+
+    <div class="table-wrap" style="margin-top:10px">
+      <div class="table-scroll"><table class="orders-table">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="chkAll"/></th>
+            <th>日期</th><th>订单号</th><th>卖家</th><th>国家</th><th>产品</th><th>ASIN</th>
+            <th>回评</th><th>回评类型</th>
+            <th class="right">金额</th><th class="right">折扣</th><th class="right">本金(CNY)</th><th>本金状态</th>
+            <th class="right">佣金(CNY)</th><th>佣金状态</th>
+            <th class="right action-col">操作</th>
+          </tr>
+        </thead>
+        <tbody id="orderRows"></tbody>
+      </table></div>
+    </div>
+
+    <hr/>
+    <h4>批次列表（可导出 CSV / 删除回滚）</h4>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>批次ID</th><th>类型</th><th>日期</th><th>卖家</th><th>订单数</th><th class="right">合计(CNY)</th><th>FX 摘要</th><th class="right">操作</th></tr>
+        </thead>
+        <tbody id="batchRows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<!-- Settlement Modal -->
+<div class="modal" id="settleModal">
+  <div class="box">
+    <div class="hd">
+      <div>
+        <div style="font-weight:900" id="settleTitle">批量结算</div>
+        <div class="mini" id="settleSub">结算本金=(金额-折扣)×FX；佣金=按“回评登记”的已回评类型。</div>
+      </div>
+      <button class="btn" id="btnCloseSettle">关闭</button>
+    </div>
+    <div class="bd">
+      <div class="row" style="justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px">
+        <div class="mini" style="font-weight:800">批次信息与FX</div>
+        <button class="btn" id="btnToggleSettleMeta">展开</button>
+      </div>
+      <div id="settleMeta" style="display:none">
+      <div class="grid cols-4">
+        <div><label>批次ID *</label><input id="settleBatchId" class="mono" placeholder="例如 PB20260104-001"/></div>
+        <div><label>结算日期 *</label><input type="date" id="settleBatchDate"/></div>
+        <div><label>方式（可选）</label><input id="settleMethod" placeholder="支付宝/银行/USDT..."/></div>
+        <div><label>备注（可选）</label><input id="settleNote" placeholder="备注"/></div>
+      </div>
+
+      <hr/>
+      <h4>本批次 FX（可改，仅影响本批次）</h4>
+      <div class="grid cols-5">
+        <div><label>USD→CNY</label><input id="fx_usd" type="number" step="0.0001"/></div>
+        <div><label>EUR→CNY</label><input id="fx_eur" type="number" step="0.0001"/></div>
+        <div><label>GBP→CNY</label><input id="fx_gbp" type="number" step="0.0001"/></div>
+        <div><label>CAD→CNY</label><input id="fx_cad" type="number" step="0.0001"/></div>
+        <div><label>JPY→CNY</label><input id="fx_jpy" type="number" step="0.0001"/></div>
+      </div>
+
+      <hr/>
+      </div>
+
+      <div id="settleStickyBar" class="settle-sticky">
+        <div class="mini">提示：可在表内修改“金额/折扣/买手佣金(原币)”；点击【保存原币修改】回写到订单列表。</div>
+        <div class="row" style="gap:10px;justify-content:flex-end;flex-wrap:wrap">
+          <div style="font-weight:900">合计：<span id="settleTotalTop">0.00</span> CNY</div>
+          <button class="btn" id="btnSaveSettleEdits">保存原币修改</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>订单号</th><th>Market</th>
+              <th class="right">金额(原币)</th><th class="right">折扣(原币)</th><th class="right">买手佣金(原币)</th><th class="right">本金(原币)</th><th class="right">FX</th>
+              <th class="right">本金应付(CNY)</th><th class="right">本金本次结算(CNY)</th>
+              <th class="right">佣金应付(CNY)</th><th class="right">佣金本次结算(CNY)</th>
+            </tr>
+          </thead>
+          <tbody id="settleRows"></tbody>
+        </table>
+      </div>
+
+      <div class="row total-bottom" style="justify-content:space-between;margin-top:10px">
+        <div class="mini">可逐单修改“本次结算金额(CNY)”。<br/>提示：若产品/订单回评为“免评”类，通常使用“本佣一起”进行结算更符合业务习惯。</div>
+        <div style="font-weight:900">合计：<span id="settleTotal">0.00</span> CNY</div>
+      </div>
+
+      <hr/>
+      <div class="row" style="justify-content:flex-end">
+        <button class="btn" id="btnExportSettleCsv">导出本批次 CSV</button>
+      </div>
+    </div>
+    <div class="ft" style="gap:10px;flex-wrap:wrap">
+      <button class="btn" id="btnCancelSettle">取消</button>
+      <button class="btn" id="btnSaveSettleDraft">保存为收款草稿</button>
+      <button class="btn primary" id="btnConfirmSettle">确认结算</button>
+    </div>
   </div>
 </div>
 
-<div class="container">
-  <!-- Tabs -->
-  <div style="margin-bottom:12px">
-    <button class="tab-btn active" data-tab="dashboard">看板</button>
-    <button class="tab-btn" data-tab="sellers">卖家</button>
-    <button class="tab-btn" data-tab="products">产品</button>
-    <button class="tab-btn" data-tab="orders">订单</button>
-  </div>
 
-  <!-- 看板 -->
-  <div id="tab-dashboard">
-    <div style="display:flex;gap:16px">
-      <div>卖家数：<b id="kpi-sellers">0</b></div>
-      <div>产品数：<b id="kpi-products">0</b></div>
-      <div>订单数：<b id="kpi-orders">0</b></div>
+<!-- Settle Drafts Modal -->
+<div class="modal" id="settleDraftModal">
+  <div class="box" style="max-width:1180px;width:min(1180px,96vw)">
+    <div class="hd">
+      <div>
+        <div style="font-size:18px;font-weight:900">收款草稿箱</div>
+        <div class="muted" style="margin-top:4px">用于保存“待收款/待结算”的批次草稿：包含所选订单 + FX + 批次信息 + 表内改过的金额/折扣/买手佣金。</div>
+      </div>
+      <button class="btn" id="btnCloseSettleDraftModal">关闭</button>
+    </div>
+    <div class="bd">
+      <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <div class="muted">提示：恢复草稿会覆盖当前勾选，并打开结算窗口。</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end">
+          <button class="btn" id="btnExportSettleDraftListCSV">导出草稿列表CSV</button>
+        <button class="btn" id="btnExportAllSettleDraftDetailsCSV">导出全部明细CSV</button>
+        <button class="btn" id="btnImportSettleDraftJson">导入草稿 JSON</button>
+          <button class="btn danger" id="btnClearSettleDrafts">清空草稿箱</button>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden">
+        <table class="tbl" style="width:100%;min-width:980px;border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="width:160px">时间</th>
+              <th>卖家</th>
+              <th style="width:120px">模式</th>
+              <th style="width:90px">订单数</th>
+              <th style="width:140px;text-align:right">合计(CNY)</th>
+              <th style="width:240px">批次ID</th>
+              <th style="width:180px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="settleDraftTbody">
+            <tr><td colspan="7" class="muted" style="padding:16px">暂无草稿</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <input type="file" id="fileImportSettleDraft" accept="application/json" style="display:none"/>
     </div>
   </div>
-
-  <!-- 卖家 -->
-  <div id="tab-sellers" class="hidden">
-    <h3>卖家管理</h3>
-    <div class="actions">
-      <button onclick="exportSellerCSV()">导出卖家 CSV</button>
-      <button onclick="downloadSellerTemplate()">下载导入模板 CSV</button>
-      <button onclick="importSellerCSV()">导入卖家 CSV</button>
+</div>
+<!-- Review Modal -->
+<div class="modal" id="reviewModal">
+  <div class="box" style="max-width:860px">
+    <div class="hd">
+      <div>
+        <div style="font-weight:900">登记回评</div>
+        <div class="mini">默认：已上评（DONE）；已回评类型：自动跟随产品（无产品默认文字评）。</div>
+      </div>
+      <button class="btn" id="btnCloseReview">关闭</button>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th>卖家ID</th><th>卖家名称</th><th>联系人</th><th>备注</th>
-          <th>FX</th><th>佣金</th>
-        </tr>
-      </thead>
-      <tbody id="seller-table"></tbody>
-    </table>
-  </div>
-
-  <!-- 产品 -->
-  <div id="tab-products" class="hidden">
-    <h3>产品</h3>
-    <div class="actions">
-      <button onclick="exportProductCSV()">导出产品 CSV</button>
-      <button onclick="downloadProductTemplate()">下载导入模板 CSV</button>
-      <button onclick="importProductCSV()">导入产品 CSV</button>
+    <div class="bd">
+      <div class="grid cols-3">
+        <div><label>订单号</label><input id="rv_order" disabled class="mono"/></div>
+        <div><label>回评状态 *</label>
+          <select id="rv_status">
+            <option value="DONE">已上评（DONE）</option>
+            <option value="PENDING">待上评（PENDING）</option>
+            <option value="WAIVED">免评（WAIVED）</option>
+          </select>
+        </div>
+        <div><label>回评日期（可选）</label><input type="date" id="rv_date"/></div>
+      </div>
+      <div class="grid cols-2" style="margin-top:10px">
+        <div><label>已回评类型（用于佣金）</label>
+          <select id="rv_doneType"></select>
+        </div>
+        <div><label>截图/链接（可选）</label><input id="rv_link" placeholder="链接"/></div>
+      </div>
+      <div class="grid cols-1" style="margin-top:10px">
+        <div><label>备注（可选）</label><input id="rv_note" placeholder="备注"/></div>
+      </div>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th>产品名</th><th>ASIN</th><th>Market</th><th>Seller</th><th>回评类型</th>
-        </tr>
-      </thead>
-      <tbody id="product-table"></tbody>
-    </table>
-  </div>
-
-  <!-- 订单 -->
-  <div id="tab-orders" class="hidden">
-    <h3>订单列表</h3>
-    <div style="display:flex;gap:8px;margin-bottom:8px">
-      <input id="sellerSearch" placeholder="搜索卖家（仅过滤下拉）"/>
-      <select id="sellerSelect"></select>
+    <div class="ft">
+      <button class="btn" id="btnCancelReview">取消</button>
+      <button class="btn primary" id="btnSaveReview">确认</button>
     </div>
-    <table>
-      <thead>
-        <tr><th>订单号</th><th>卖家</th><th>状态</th></tr>
-      </thead>
-      <tbody id="order-table"></tbody>
-    </table>
   </div>
 </div>
 
 <script>
-/* ===================== IndexedDB & State ===================== */
-const DB_NAME="ops_v6_4_2_db", STORE="kv";
-let S={ sellers:[], products:[], orders:[] };
-let selectedSellerId="";
 
-function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);
-  r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains(STORE))db.createObjectStore(STORE);};
-  r.onsuccess=e=>res(e.target.result); r.onerror=e=>rej(e);});}
+// ---- HTML escape helper (global) ----
+function escHtml(s){
+  const t = String(s==null ? '' : s);
+  return t.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
 
-async function loadState(){const db=await openDB();return new Promise(res=>{
-  const tx=db.transaction(STORE,"readonly"), st=tx.objectStore(STORE), g=st.get("state");
-  g.onsuccess=()=>{if(g.result)S=g.result;res();};});}
+function num(v, d=0){
+  const n = parseFloat(String(v).replace(/[,\s]/g,''));
+  return Number.isFinite(n) ? n : d;
+}
 
-async function saveState(){const db=await openDB();const tx=db.transaction(STORE,"readwrite");
-  tx.objectStore(STORE).put(S,"state");}
+function round2(v){
+  const n = num(v, 0);
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
 
-/* ===================== Tabs ===================== */
-document.querySelectorAll(".tab-btn").forEach(b=>{
-  b.onclick=()=>{
-    document.querySelectorAll(".tab-btn").forEach(x=>x.classList.remove("active"));
-    b.classList.add("active");
-    ["dashboard","sellers","products","orders"].forEach(id=>document.getElementById("tab-"+id).classList.add("hidden"));
-    document.getElementById("tab-"+b.dataset.tab).classList.remove("hidden");
-  };
+/* ===================== Constants ===================== */
+const VERSION = "6.4.2";
+const STORAGE_KEY = "ops_rebuild_v6_4_2_state";
+
+const MARKETS = [
+  {m:"US", c:"USD"}, {m:"UK", c:"GBP"}, {m:"DE", c:"EUR"}, {m:"FR", c:"EUR"},
+  {m:"IT", c:"EUR"}, {m:"ES", c:"EUR"}, {m:"CA", c:"CAD"}, {m:"JP", c:"JPY"},
+];
+const REVIEW_TYPES = [
+  {k:"TEXT",    n:"文字评"},
+  {k:"IMAGE",   n:"图片评"},
+  {k:"VIDEO",   n:"视频评"},
+  {k:"FREE",    n:"免评"},
+  {k:"FREE_FB", n:"免评FB"},
+  {k:"STAR",    n:"免评点星"},
+];
+const FX_MARKETS = ["US","UK","DE","FR","IT","ES","CA","JP"];
+
+
+/* ===================== Result / Notice Modal ===================== */
+
+function showToast(message, kind){
+  try{
+    let host = document.getElementById('toastHost');
+    if(!host){
+      host = document.createElement('div');
+      host.id = 'toastHost';
+      host.style.position = 'fixed';
+      host.style.top = '14px';
+      host.style.right = '14px';
+      host.style.zIndex = '99999';
+      host.style.display = 'flex';
+      host.style.flexDirection = 'column';
+      host.style.gap = '10px';
+      document.body.appendChild(host);
+    }
+    const t = document.createElement('div');
+    t.className = 'toast';
+    t.style.minWidth = '280px';
+    t.style.maxWidth = '520px';
+    t.style.padding = '10px 12px';
+    t.style.borderRadius = '12px';
+    t.style.background = '#111827';
+    t.style.color = '#fff';
+    t.style.boxShadow = '0 10px 25px rgba(0,0,0,.25)';
+    t.style.fontSize = '13px';
+    t.style.lineHeight = '1.5';
+    t.style.opacity = '0';
+    t.style.transform = 'translateY(-6px)';
+    t.style.transition = 'all .18s ease';
+    t.textContent = String(message||'');
+    host.appendChild(t);
+    requestAnimationFrame(()=>{ t.style.opacity='1'; t.style.transform='translateY(0)'; });
+    setTimeout(()=>{
+      t.style.opacity='0'; t.style.transform='translateY(-6px)';
+      setTimeout(()=>t.remove(), 220);
+    }, (kind==='error'?5200:3200));
+  }catch(e){}
+}
+
+
+// 捕获运行时错误，避免“按钮无反应但用户看不到原因”
+window.addEventListener('error', (ev)=>{
+  try{
+    const msg = (ev && ev.message) ? ev.message : 'Unknown error';
+    showToast('脚本错误：' + msg, 'error');
+  }catch(e){}
 });
+function showNotice(title, message){
+  // 显目弹窗（必须点“确定”关闭），避免提示被忽略
+  const wrap = document.createElement('div');
+  wrap.style.position = 'fixed';
+  wrap.style.inset = '0';
+  wrap.style.background = 'rgba(17,24,39,.62)';
+  wrap.style.display = 'flex';
+  wrap.style.alignItems = 'center';
+  wrap.style.justifyContent = 'center';
+  wrap.style.padding = '18px';
+  wrap.style.zIndex = '100000';
 
-/* ===================== Render ===================== */
-function renderAll(){renderKPI();renderSellers();renderProducts();renderOrders();}
-function renderKPI(){
-  kpi("sellers",S.sellers.length);kpi("products",S.products.length);kpi("orders",S.orders.length);
+  const safeTitle = (U && U.esc) ? U.esc(title||'提示') : String(title||'提示');
+  const safeMsg = (U && U.esc) ? U.esc(message||'') : String(message||'');
+
+  wrap.innerHTML = `
+    <div style="width:min(760px,100%); background:#fff; border-radius:16px; overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.45); border:1px solid rgba(0,0,0,.06);">
+      <div style="padding:14px 16px; border-bottom:1px solid #e5e7eb; display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-weight:800; font-size:16px; color:#111827;">${safeTitle}</div>
+      </div>
+      <div style="padding:16px; font-size:14px; color:#111827; line-height:1.6; white-space:pre-wrap;">${safeMsg}</div>
+      <div style="padding:14px 16px; border-top:1px solid #e5e7eb; display:flex; justify-content:flex-end; gap:10px;">
+        <button id="__notice_ok" style="padding:10px 16px; border-radius:12px; border:1px solid #111827; background:#111827; color:#fff; font-weight:700; cursor:pointer;">确定</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(wrap);
+  function close(){ try{ document.removeEventListener('keydown', onKeyDown, true); }catch(_){}
+    try{ wrap.remove(); }catch(_){}
+  }
+  function onKeyDown(e){
+    const k = e.key;
+    const code = e.keyCode || e.which;
+    if(k==='Escape' || k==='Esc' || code===27){
+      e.preventDefault();
+      close();
+    }
+  }
+  document.addEventListener('keydown', onKeyDown, true);
+  wrap.addEventListener('click', (e)=>{ if(e.target===wrap){ close(); } });
+  const ok = wrap.querySelector('#__notice_ok');
+  ok && ok.addEventListener('click', close);
 }
-function kpi(k,v){document.getElementById("kpi-"+k).textContent=v;}
+window.addEventListener('error', (e)=>{ try{ showNotice('脚本错误', String(e.message||e.error||e)); }catch(_){ alert('脚本错误：'+(e.message||'')); } });
 
-function renderSellers(){
-  const tb=document.getElementById("seller-table");tb.innerHTML="";
-  S.sellers.forEach(s=>{
-    const fx=`USD:${s.fx?.usd??""} EUR:${s.fx?.eur??""} GBP:${s.fx?.gbp??""} CAD:${s.fx?.cad??""} JPY:${s.fx?.jpy??""}`;
-    const cm=`文:${s.commission?.text??""} 图:${s.commission?.image??""} 视:${s.commission?.video??""} 免:${s.commission?.waived??""} FB:${s.commission?.waived_fb??""} 点:${s.commission?.waived_star??""}`;
-    tb.insertAdjacentHTML("beforeend",`<tr>
-      <td>${s.seller_id}</td><td>${s.seller_name||""}</td><td>${s.contact||""}</td><td>${s.remark||""}</td>
-      <td>${fx}</td><td>${cm}</td></tr>`);
+
+function showResultModal(title, summaryText, failListText){
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal" style="max-width:920px;">
+      <div class="modal-header">
+        <div class="modal-title">${U.esc(title||'结果')}</div>
+        <button class="btn btn-sm" data-close>关闭</button>
+      </div>
+      <div class="modal-body">
+        <div style="white-space:pre-wrap;line-height:1.6;margin-bottom:10px;">${U.esc(summaryText||'')}</div>
+        <div class="grid" style="grid-template-columns:1fr;gap:10px;">
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin:6px 0;">
+              <div class="muted">失败/重复清单（可复制）</div>
+              <button class="btn btn-sm" id="btnCopyFailList">复制失败清单</button>
+            </div>
+            <textarea id="failListArea" rows="8" style="width:100%;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">${U.esc(failListText||'')}</textarea>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" data-close>知道了</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  function close(){
+    document.removeEventListener("keydown", onKeyDown, true);
+ wrap.remove(); }
+  function onKeyDown(e){ const k=e.key; const code=e.keyCode||e.which; if(k==='Escape'||k==='Esc'||code===27){ e.preventDefault(); close(); } }
+  document.addEventListener("keydown", onKeyDown, true);
+  wrap.addEventListener('click', (e)=>{ if(e.target===wrap || e.target.hasAttribute('data-close')) close(); });
+  const btn = wrap.querySelector('#btnCopyFailList');
+  btn.addEventListener('click', async ()=>{
+    const ta = wrap.querySelector('#failListArea');
+    ta.focus(); ta.select();
+    let ok=false;
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(ta.value||"");
+        ok=true;
+      }
+    }catch(e){}
+    if(!ok){
+      try{ ok=document.execCommand('copy'); }catch(e){}
+    }
+    showNotice('已复制', ok ? '失败清单已复制到剪贴板。' : '复制失败：请手动全选复制。');
   });
-  const sel=document.getElementById("sellerSelect");
-  sel.innerHTML=`<option value="">全部卖家</option>`;
-  S.sellers.forEach(s=>sel.insertAdjacentHTML("beforeend",`<option value="${s.seller_id}">${s.seller_name||s.seller_id}</option>`));
 }
 
-function renderProducts(){
-  const tb=document.getElementById("product-table");tb.innerHTML="";
-  S.products.forEach(p=>tb.insertAdjacentHTML("beforeend",
-    `<tr><td>${p.product_name||""}</td><td>${p.asin}</td><td>${p.market}</td><td>${p.seller_id||""}</td><td>${p.review_type||""}</td></tr>`));
-}
 
-function getFilteredOrders(){return selectedSellerId?S.orders.filter(o=>o.seller_id===selectedSellerId):S.orders;}
-function renderOrders(){
-  const tb=document.getElementById("order-table");tb.innerHTML="";
-  getFilteredOrders().forEach(o=>tb.insertAdjacentHTML("beforeend",
-    `<tr><td>${o.order_id}</td><td>${o.seller_id}</td><td><span class="badge gray">待处理</span></td></tr>`));
-}
+function showParseSummary({
+  submitted=0,
+  duplicated=0,
+  bad=0,
+  dupLines=[],
+  badLines=[],
+  okLines=[]
+}){
+  // 失败在上，成功在下；每行按字段展开
+  const failText = [
+    ...(badLines||[]).map(s => s ? `失败：${s}` : '').filter(Boolean),
+    ...(dupLines||[]).map(s => s ? `重复跳过：${s}` : '').filter(Boolean),
+  ].join('\n');
 
-/* ===================== 订单筛选（已封板） ===================== */
-sellerSelect.onchange=e=>{selectedSellerId=e.target.value;renderOrders();};
-sellerSearch.oninput=e=>{
-  const kw=e.target.value.toLowerCase();
-  [...sellerSelect.options].forEach((o,i)=>{if(i===0)return;o.hidden=!o.textContent.toLowerCase().includes(kw);});
+  const okText = (okLines||[]).join('\n');
+
+  const wrap = document.createElement('div');
+  wrap.style.position = 'fixed';
+  wrap.style.inset = '0';
+  wrap.style.background = 'rgba(17,24,39,.62)';
+  wrap.style.display = 'flex';
+  wrap.style.alignItems = 'center';
+  wrap.style.justifyContent = 'center';
+  wrap.style.padding = '18px';
+  wrap.style.zIndex = '100000';
+
+  function escHtml(s){
+    const t = String(s==null?'':s);
+    return t.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  wrap.innerHTML = `
+    <div style="width:min(960px,100%); background:#fff; border-radius:16px; box-shadow:0 24px 70px rgba(0,0,0,.45); border:1px solid rgba(0,0,0,.06);">
+      <div style="padding:14px 16px; border-bottom:1px solid #e5e7eb; display:flex; justify-content:space-between; align-items:center;">
+        <div style="font-weight:800; font-size:15px;">批量解析结果</div>
+        <button class="btn" data-close>关闭</button>
+      </div>
+      <div style="padding:14px 16px;">
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px;">
+          <div style="border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#f8fafc;">
+            <div class="muted" style="font-size:12px;">已提交</div>
+            <div style="font-size:22px; font-weight:800;">${submitted}</div>
+          </div>
+          <div style="border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#f8fafc;">
+            <div class="muted" style="font-size:12px;">重复跳过</div>
+            <div style="font-size:22px; font-weight:800;">${duplicated}</div>
+          </div>
+          <div style="border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#f8fafc;">
+            <div class="muted" style="font-size:12px;">失败</div>
+            <div style="font-size:22px; font-weight:800;">${bad}</div>
+          </div>
+        </div>
+
+        <div class="muted" style="margin-top:10px; font-size:12px;">
+          上方为失败/重复，下方为成功（每行：订单号 产品名:xxx 订单金额:xxx 回评类型:xxx）。
+        </div>
+
+        <div style="margin-top:12px;">
+          <div style="font-weight:700; margin:6px 0;">失败 / 重复（在上）</div>
+          <textarea id="parseFailList" style="width:100%; height:150px; border:1px solid #e5e7eb; border-radius:12px; padding:10px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; white-space:pre; overflow:auto;">${escHtml(failText)}</textarea>
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:center; justify-content:flex-end;">
+            <button class="btn" data-copy-fail>复制失败清单</button>
+          </div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <div style="font-weight:700; margin:6px 0;">成功（在下）</div>
+          <textarea id="parseOkList" style="width:100%; height:150px; border:1px solid #e5e7eb; border-radius:12px; padding:10px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; white-space:pre; overflow:auto;">${escHtml(okText)}</textarea>
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:center; justify-content:flex-end;">
+            <button class="btn" data-copy-ok>复制成功清单</button>
+            <button class="btn primary" data-close>确定</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(wrap);
+
+  async function doCopy(txt, sel){
+    try{
+      await navigator.clipboard.writeText(txt || '');
+      const btn = wrap.querySelector(sel);
+      if(btn){ const old = btn.textContent; btn.textContent='已复制'; setTimeout(()=>btn.textContent=old, 900); }
+    }catch(e){
+      const ta = wrap.querySelector(sel.includes('fail') ? '#parseFailList' : '#parseOkList');
+      if(ta){ ta.focus(); ta.select(); }
+    }
+  }
+
+  function close(){
+    wrap.remove();
+    document.removeEventListener('keydown', onKey, true);
+  }
+
+  function onKey(e){
+    const k = e.key || '';
+    if(k === 'Escape' || k === 'Esc' || e.keyCode === 27){
+      e.preventDefault();
+      close();
+    }
+  }
+  document.addEventListener('keydown', onKey, true);
+
+  wrap.addEventListener('click', (e)=>{
+    const t = e.target;
+    if(t && t.matches && t.matches('[data-close]')) close();
+    if(t && t.matches && t.matches('[data-copy-fail]')) doCopy(failText, '[data-copy-fail]');
+    if(t && t.matches && t.matches('[data-copy-ok]')) doCopy(okText, '[data-copy-ok]');
+  });
+}
+/* ===================== State ===================== */
+let S = {
+  sellers: [],     // {id,name,contact,remark, fx:{US..}, commission:{TEXT..}}
+  products: [],    // {id,name,asin,market,sellerId,reviewType,discount,remark}
+  orders: [],      // {id,orderId,date,sellerId,productId,market,currency,amount,discount,asin,note,reviewReq, review:{status,date,link,note,doneType}, principal:{settled,batchId,fx,amountCny}, commission:{settled,batchId,amountCny}}
+  batches: [],     // {id,type(PRINCIPAL|COMMISSION|BOTH), date, method,note, fx:{usd,eur,gbp,cad,jpy}, sellerLabel, lines:[{orderId,market,amount,discount,fx,principalShould,principalSettle,commissionShould,commissionSettle}], total}
+  seq: {seller:1, product:1, order:1, batch:1}
 };
 
-/* ===================== 产品 CSV ===================== */
-function exportProductCSV(){
-  const rows=[["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"]];
-  S.products.forEach(p=>rows.push([p.product_name,p.asin,p.market,p.currency||"",p.seller_id||"",p.review_type||"",p.discount_origin||"",p.buyer_commission_origin||"",p.remark||""]));
-  downloadCSV(rows,"products.csv");
+const UI = {
+  tab:"orders",
+  sellerEditId:null,
+  productEditId:null,
+  orderEditId:null,
+  selected:new Set(), // selected orderId
+  page:1,
+  pageSize:100,
+  settle:null, // {mode, orderIds[], fx, batchId, date, method, note, edits:{[orderId]:{p,c}} }
+  reviewOrderId:null
+};
+
+/* ===================== Helpers ===================== */
+function $(id){ return document.getElementById(id); }
+function setVal(id, v){ const el=$(id); if(el) el.value = (v===undefined||v===null) ? "" : String(v); }
+
+function safeSet(id, v){ const el = $(id); if(el) el.value = (v ?? ""); }
+
+function clearSearchInputForSelect(selectId){
+  try{
+    const sel = $(selectId);
+    if(!sel) return;
+    const wrap = sel.closest?.(".searchWrap");
+    const inp = wrap?.querySelector?.("input");
+    if(inp) inp.value="";
+  }catch(e){}
 }
-function downloadProductTemplate(){
-  const rows=[["product_name","asin","market","currency","seller_id","review_type","discount_origin","buyer_commission_origin","remark"],
-              ["示例产品","B0XXXX","US","USD","seller_demo","文字评","0","0",""]];
-  downloadCSV(rows,"product_import_template.csv");
-}
-function importProductCSV(){
-  filePick(".csv",txt=>{
-    const lines=txt.split(/\r?\n/).filter(x=>x.trim()); if(!lines.length) return;
-    const head=lines.shift().split(",");
-    let add=0,skip=0;
-    lines.forEach(l=>{
-      const c=l.split(","), row={}; head.forEach((h,i)=>row[h]=c[i]||"");
-      if(!row.asin||!row.market) return;
-      if(S.products.find(p=>p.asin===row.asin&&p.market===row.market)){skip++;return;}
-      S.products.push(row); add++;
+
+
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+const U = {
+  today(){ return new Date().toISOString().slice(0,10); },
+  dateMD(d){ // YYYY-MM-DD -> MM-DD
+    const s = String(d||'');
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? `${m[2]}-${m[3]}` : s;
+  },
+  id(prefix, n){ return prefix + String(n).padStart(4,"0"); },
+  num(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; },
+  toNum(v){ return U.num(v); },
+  money(v){ return U.num(v).toFixed(2); },
+  esc(v){ const s=String(v??''); return s.replace(/[&<>"']/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); },
+  marketToCurrency(m){ return (MARKETS.find(x=>x.m===m)||{}).c || ""; },
+  marketToFxKey(m){
+    if(m==="US") return "usd";
+    if(m==="UK") return "gbp";
+    if(m==="CA") return "cad";
+    if(m==="JP") return "jpy";
+    return "eur"; // DE/FR/IT/ES
+  },
+  sellerById(id){ return S.sellers.find(x=>x.id===id) || null; },
+  productById(id){ return S.products.find(x=>x.id===id) || null; },
+  sellerName(id){ return (U.sellerById(id)||{}).name || ""; },
+  productName(id){ return (U.productById(id)||{}).name || ""; },
+  reviewName(k){ return (REVIEW_TYPES.find(x=>x.k===k)||{}).n || k; },
+  badgeReview(status){
+    if(status==="DONE") return '<span class="badge done">完成</span>';
+    if(status==="WAIVED") return '<span class="badge waived">免评</span>';
+    return '<span class="badge pending">等待</span>';
+  },
+  badgeSettle(ok, labelOk="已结算", labelNo="待结算"){
+    return ok ? `<span class="badge settled">${labelOk}</span>` : `<span class="badge pending">${labelNo}</span>`;
+  },
+  csvEscape(v){
+    const s = String(v ?? "");
+    if(/[",\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+    return s;
+  },
+  download(filename, text, mime="text/plain"){
+    const blob = new Blob([text], {type:mime+";charset=utf-8"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 500);
+  },
+  extractOrderIds(text){
+    if(!text) return [];
+    const re = /\b\d{3}-\d{7}-\d{7}\b/g;
+    const ids = [];
+    String(text).split(/\r?\n/).map(x=>x.trim()).filter(Boolean).forEach(line=>{
+      const ms = line.match(re);
+      if(ms){ ms.forEach(m=>{ if(!ids.includes(m)) ids.push(m); }); }
+      else{
+        // 无匹配时：默认取前19个字符（允许纯数字/其它格式），保证可录入后再手动编辑
+        const fb = line.slice(0,19);
+        if(fb && !ids.includes(fb)) ids.push(fb);
+      }
     });
-    saveState(); renderProducts(); alert(`新增 ${add}，跳过 ${skip}`);
+    return ids;
+  }
+
+  ,orderKey:(sellerId,orderId)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}`
+};
+
+/* ===================== Persistence ===================== */
+function blankState(){
+  return {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+}
+function cleanupOldKeys(){
+  try{
+    const keep = STORAGE_KEY;
+    const toRemove = [];
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(!k || k===keep) continue;
+      if(k.startsWith("ops_") || k.startsWith("OPS_") || k.includes("ops_v") || k.includes("ops_rebuild") || k.includes("settle_") || k.includes("draft_")){
+        toRemove.push(k);
+      }
+    }
+    toRemove.forEach(k=>{ try{ localStorage.removeItem(k);}catch(_e){} });
+  }catch(_e){}
+}
+function _safeSetItem(key, value){
+  try{ localStorage.setItem(key, value); return true; }
+  catch(e){ 
+    const msg = (e && e.name ? e.name : "") + " " + (e && e.message ? e.message : String(e));
+    if(msg.includes("QuotaExceeded")) return false;
+    throw e;
+  }
+}
+function save(){
+  try{
+    const json = JSON.stringify(S);
+    if(_safeSetItem(STORAGE_KEY, json)) return;
+    // file:// 下多个版本共用同一个 localStorage，很容易挤爆；先清理旧 key 再重试
+    cleanupOldKeys();
+    if(_safeSetItem(STORAGE_KEY, json)) return;
+
+    // 仍然超额：尝试瘦身保存（保留核心数据，裁剪历史/草稿）
+    const slim = JSON.parse(json);
+    if(Array.isArray(slim.drafts) && slim.drafts.length>20) slim.drafts = slim.drafts.slice(-20);
+    if(Array.isArray(slim.settlementBatches) && slim.settlementBatches.length>200) slim.settlementBatches = slim.settlementBatches.slice(-200);
+    if(Array.isArray(slim.batches) && slim.batches.length>200) slim.batches = slim.batches.slice(-200);
+    const json2 = JSON.stringify(slim);
+    if(_safeSetItem(STORAGE_KEY, json2)) return;
+
+    alert("保存失败：浏览器本地存储空间已满。\n\n建议：\n1) 点击右上角『清空数据』后再『导入 JSON』；或\n2) 在浏览器设置里清理站点数据（file:// 也会共用）。\n\n本次操作已在内存中完成，但刷新页面可能会丢失。");
+  }catch(e){
+    console.error(e);
+    alert("保存失败: " + (e && e.message ? e.message : String(e)));
+  }
+}
+function computeSeq(){
+  const max = {seller:0, product:0, order:0, batch:0};
+  S.sellers.forEach(x=>{ const m=String(x.id||"").match(/^S(\d+)$/); if(m) max.seller=Math.max(max.seller, Number(m[1])); });
+  S.products.forEach(x=>{ const m=String(x.id||"").match(/^P(\d+)$/); if(m) max.product=Math.max(max.product, Number(m[1])); });
+  S.orders.forEach(x=>{ const m=String(x.id||"").match(/^O(\d+)$/); if(m) max.order=Math.max(max.order, Number(m[1])); });
+  S.batches.forEach(x=>{ const m=String(x.id||"").match(/^B(\d+)$/); if(m) max.batch=Math.max(max.batch, Number(m[1])); });
+  S.seq = {seller:max.seller+1, product:max.product+1, order:max.order+1, batch:max.batch+1};
+}
+function normalizeImported(obj){
+  // 接受旧结构：兼容 v6.2/6.4 的 sellers/products/orders/batches
+  const out = blankState();
+  out.sellers = Array.isArray(obj.sellers) ? obj.sellers : (Array.isArray(obj.seller)? obj.seller: []);
+  out.products = Array.isArray(obj.products) ? obj.products : (Array.isArray(obj.product)? obj.product: []);
+  out.orders = Array.isArray(obj.orders) ? obj.orders : (Array.isArray(obj.order)? obj.order: []);
+  // normalize orders: ensure sellerId/orderId exist, build key sellerId::orderId, allow same-seller duplicates via _1 suffix
+  const _seen = new Set();
+  out.orders = (out.orders||[]).map(o=>{
+    const x = Object.assign({}, o);
+    x.sellerId = (x.sellerId || x.seller || '').trim();
+    x.orderId  = (x.orderId || x.order_id || x.id || '').trim();
+    if(x.sellerId && x.orderId){
+      const base = x.orderId;
+      let k = U.orderKey(x.sellerId, x.orderId);
+      let idx = 0;
+      while(_seen.has(k)){
+        idx += 1;
+        x.orderId = `${base}_${idx}`;
+        k = U.orderKey(x.sellerId, x.orderId);
+      }
+      _seen.add(k);
+      x.key = k;
+    } else {
+      x.key = U.orderKey(x.sellerId, x.orderId);
+    }
+    return x;
   });
+  out.batches = Array.isArray(obj.batches) ? obj.batches : (Array.isArray(obj.batch)? obj.batch: []);
+
+  out.sellers = out.sellers.map(s=>{
+    const fx = s.fx || s.fxs || {};
+    const cm = s.commission || s.commissions || {};
+    const fx2 = {};
+    FX_MARKETS.forEach(m=> fx2[m] = U.num(fx[m]));
+    // EUR markets sync (DE as master)
+    if(fx2.DE){ fx2.FR=fx2.DE; fx2.IT=fx2.DE; fx2.ES=fx2.DE; }
+    const cm2 = {};
+    REVIEW_TYPES.forEach(t=> cm2[t.k] = U.num(cm[t.k] ?? cm[t.n] ?? cm[String(t.k)]));
+    return { id:String(s.id||"").trim(), name:String(s.name||s.sellerName||"").trim(), contact:s.contact||"", remark:s.remark||"", fx:fx2, commission:cm2 };
+  }).filter(s=>s.id && s.name);
+
+  out.products = out.products.map(p=>{
+    return {
+      id:String(p.id||"").trim() || ("P"+Math.random().toString(16).slice(2,6)),
+      name:String(p.name||p.productName||"").trim(),
+      asin:String(p.asin||p.ASIN||"").trim(),
+      market:String(p.market||p.Market||"").trim(),
+      sellerId:String(p.sellerId||p.seller_id||"").trim(),
+      reviewType:String(p.reviewType||p.review_type||"TEXT").trim(),
+      discount:U.num(p.discount ?? p.sellerDiscount ?? 0),
+      buyerCommission:U.num(p.buyerCommission ?? p.buyer_commission ?? 0),
+      remark:p.remark||""
+    };
+  }).filter(p=>p.name && p.asin && p.market && p.sellerId);
+
+  out.orders = out.orders.map(o=>{
+    const market = String(o.market||o.Market||"").trim();
+    const productId = (o.productId ?? o.product_id) ? String(o.productId ?? o.product_id).trim() : null;
+    const review = o.review || {};
+    const principal = o.principal || {};
+    const commission = o.commission || {};
+    return {
+      id:String(o.id||"").trim() || ("O"+Math.random().toString(16).slice(2,6)),
+      orderId:String(o.orderId||o.order_id||o.OrderID||"").trim().slice(0,19),
+      date:String(o.date||o.orderDate||o.order_date||"").slice(0,10) || U.today(),
+      sellerId:String(o.sellerId||o.seller_id||"").trim(),
+      productId:productId || null,
+      market:market || "US",
+      currency:String(o.currency||"").trim() || U.marketToCurrency(market||"US"),
+      amount:U.num(o.amount ?? o.orderAmount ?? o.price ?? 0),
+      discount:U.num(o.discount ?? o.sellerDiscount ?? 0),
+      asin:String(o.asin||o.ASIN||"").trim(),
+      note:o.note||o.productName||"",
+      reviewReq:String(o.reviewReq||o.reviewType||o.review_type||"TEXT").trim(), // 订单要求（跟随产品）
+      fxOverride: (o.fxOverride==null || o.fxOverride==="") ? null : U.num(o.fxOverride),
+      review:{
+        status:String(review.status || o.reviewStatus || o.review_status || "PENDING").trim(),
+        date:String(review.date || o.reviewDate || o.review_date || "").slice(0,10),
+        link:review.link || o.reviewLink || "",
+        note:review.note || o.reviewNote || "",
+        doneType:String(review.doneType || o.reviewDoneType || "").trim() // 佣金用
+      },
+      principal:{
+        settled:!!(principal.settled ?? o.principalSettled ?? o.principal_settled ?? false),
+        batchId: principal.batchId || o.principalBatchId || "",
+        fx: U.num(principal.fx ?? o.fxRate ?? 0),
+        amountCny: U.num(principal.amountCny ?? o.principalCny ?? 0)
+      },
+      commission:{
+        settled:!!(commission.settled ?? o.commissionSettled ?? o.commission_settled ?? false),
+        batchId: commission.batchId || o.commissionBatchId || "",
+        amountCny: U.num(commission.amountCny ?? o.commissionCny ?? 0)
+      }
+    };
+  }).filter(o=>o.orderId && o.sellerId && o.market);
+
+  out.batches = out.batches.map(b=>{
+    const fx = b.fx || {};
+    return {
+      id:String(b.id||"").trim() || ("B"+Math.random().toString(16).slice(2,6)),
+      batchId:String(b.batchId||b.id||"").trim(),
+      type:String(b.type||"PRINCIPAL").trim(),
+      date:String(b.date||"").slice(0,10) || U.today(),
+      method:b.method||"",
+      note:b.note||"",
+      sellerLabel:b.sellerLabel || b.seller || "",
+      fx:{
+        usd:U.num(fx.usd ?? fx.USD ?? 0),
+        eur:U.num(fx.eur ?? fx.EUR ?? 0),
+        gbp:U.num(fx.gbp ?? fx.GBP ?? 0),
+        cad:U.num(fx.cad ?? fx.CAD ?? 0),
+        jpy:U.num(fx.jpy ?? fx.JPY ?? 0),
+      },
+      lines:Array.isArray(b.lines)? b.lines: [],
+      total:U.num(b.total ?? b.totalCny ?? 0)
+    };
+  }).filter(b=>b.batchId);
+
+  return out;
+}
+function load(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw){ S = blankState(); return; }
+    S = normalizeImported(JSON.parse(raw));
+    computeSeq();
+  }catch(e){
+    S = blankState();
+  }
 }
 
-/* ===================== 卖家 CSV（中文表头） ===================== */
-const SELLER_HEADERS_CN=[
-  "卖家ID","卖家名称","联系人","备注",
-  "FX_USD","FX_EUR","FX_GBP","FX_CAD","FX_JPY",
-  "佣金_文字评","佣金_图片评","佣金_视频评","佣金_免评","佣金_免评FB","佣金_免评点星"
-];
-
-function exportSellerCSV(){
-  const rows=[SELLER_HEADERS_CN];
-  S.sellers.forEach(s=>{
-    rows.push([
-      s.seller_id, s.seller_name||"", s.contact||"", s.remark||"",
-      s.fx?.usd??"", s.fx?.eur??"", s.fx?.gbp??"", s.fx?.cad??"", s.fx?.jpy??"",
-      s.commission?.text??"", s.commission?.image??"", s.commission?.video??"",
-      s.commission?.waived??"", s.commission?.waived_fb??"", s.commission?.waived_star??""
-    ]);
-  });
-  downloadCSV(rows,"sellers.csv");
+/* ===================== Business Logic ===================== */
+function canSettleCommission(order){
+  return order.review.status==="DONE" || order.review.status==="WAIVED";
+}
+function getSellerFxRate(sellerId, market){
+  const s = U.sellerById(sellerId);
+  if(!s) return 0;
+  return U.num((s.fx||{})[market]);
+}
+function effectiveFx(order, batchFx){
+  // 优先：订单 汇率覆写；否则：批次 FX（按币种）；否则：卖家默认 FX
+  if(order.fxOverride!=null && order.fxOverride!=="") return U.num(order.fxOverride);
+  const fxKey = U.marketToFxKey(order.market);
+  const fromBatch = batchFx ? U.num(batchFx[fxKey]) : 0;
+  if(fromBatch) return fromBatch;
+  return getSellerFxRate(order.sellerId, order.market);
+}
+function principalOrig(order){
+  // allow negative (亏损) when discount > amount
+  return (U.num(order.amount) - U.num(order.discount));
+}
+function commissionShould(order){
+  // 佣金按“回评登记弹窗”的 doneType；如果为空：按产品/订单要求；如果无产品：文字评
+  const seller = U.sellerById(order.sellerId);
+  if(!seller) return 0;
+  let t = (order.review.doneType || "").trim();
+  if(!t){
+    const p = order.productId ? U.productById(order.productId) : null;
+    t = (p?.reviewType || order.reviewReq || "TEXT").trim();
+  }
+  if(!REVIEW_TYPES.some(x=>x.k===t)) t="TEXT";
+  return U.num((seller.commission||{})[t]);
+}
+function currentPrincipalCny(order){
+  // 展示用：按卖家 FX 或订单覆写计算（不使用批次 FX）
+  const fx = effectiveFx(order, null);
+  return principalOrig(order) * U.num(fx);
 }
 
-function downloadSellerTemplate(){
-  const rows=[SELLER_HEADERS_CN,
-    ["seller_anne_us","Anne服务商","Anne","美国团队","7.2","8.4","9.6","5.0","0.05","30","50","70","10","10","10"]
+/* ===================== Render Helpers ===================== */
+function renderTabs(){
+  document.querySelectorAll("[data-tab]").forEach(btn=>{
+    btn.classList.toggle("active", btn.dataset.tab===UI.tab);
+  });
+  ["dashboard","sellers","products","orders"].forEach(t=>{
+    const el = $("tab-"+t);
+    if(el) el.style.display = (t===UI.tab) ? "block" : "none";
+  });
+}
+function setOptions(sel, opts, placeholder){
+  if(!sel) return;
+  const prevVal = sel.value;
+  sel.innerHTML = "";
+  if(placeholder!=null){
+    const o=document.createElement("option");
+    o.value=""; o.textContent=placeholder;
+    sel.appendChild(o);
+  }
+  (opts||[]).forEach(x=>{
+    const o=document.createElement("option");
+    o.value=String(x.value ?? ""); o.textContent=String(x.label ?? "");
+    sel.appendChild(o);
+  });
+  // try keep previous value if still exists
+  if(prevVal && Array.from(sel.options).some(o=>o.value===prevVal)){
+    sel.value = prevVal;
+  }
+  // notify searchable wrapper to refresh its cache after options are rebuilt
+  try{
+    sel.dispatchEvent(new CustomEvent("ops:options-updated", {bubbles:false}));
+  }catch(e){}
+}
+function renderSelects(){
+  const marketOpts = MARKETS.map(x=>({value:x.m, label:`${x.m} (${x.c})`}));
+  setOptions($("productMarket"), marketOpts, "选择");
+  setOptions($("orderMarket"), marketOpts, "选择");
+  setOptions($("batchMarket"), marketOpts, "选择");
+
+  const sellerOpts = S.sellers.map(s=>({value:s.id, label:`${s.name}（${s.id}）`}));
+  setOptions($("productSeller"), sellerOpts, "选择卖家");
+  setOptions($("orderSeller"), sellerOpts, "选择卖家");
+  setOptions($("batchSeller"), sellerOpts, "选择卖家");
+  setOptions($("filterSeller"), [{value:"ALL",label:"全部卖家"}, ...sellerOpts], null);
+
+  const rtOpts = REVIEW_TYPES.map(x=>({value:x.k, label:x.n}));
+  setOptions($("productReviewType"), rtOpts, "选择");
+  setOptions($("orderReviewType"), [{value:"",label:"自动（跟随产品）"}, ...rtOpts], null);
+  setOptions($("rv_doneType"), [{value:"",label:"自动（跟随产品）"}, ...rtOpts], null);
+
+  const productOpts = S.products.map(p=>{
+    const s = U.sellerName(p.sellerId);
+    return {value:p.id, label:`${p.name} | ${p.market} | ${s} | ${p.asin}`};
+  });
+  setOptions($("orderProduct"), [{value:"",label:"不选产品（手动填）"}, ...productOpts], null);
+  setOptions($("batchProduct"), [{value:"",label:"不套用产品"}, ...productOpts], null);
+  setOptions($("linkProduct"), [{value:"",label:"选择产品"}, ...productOpts], null);
+  // 新建订单默认不选卖家/不选产品（避免浏览器自动选中第 1 个真实选项）
+  if(!UI.orderEditId){
+    if($('orderSeller').value) $('orderSeller').value='';
+    if($('orderProduct').value) $('orderProduct').value='';
+  }
+}
+
+function renderSellerGrids(){
+  const fxGrid = $("sellerFxGrid");
+  fxGrid.innerHTML = "";
+  FX_MARKETS.forEach(m=>{
+    fxGrid.innerHTML += `<div><label>${m} FX（${U.marketToCurrency(m)}→CNY）</label><input id="seller_fx_${m}" type="number" step="0.0001" placeholder="例如 7.2"/></div>`;
+  });
+  // EUR markets: show DE as master
+  const de = fxGrid.querySelector("#seller_fx_DE");
+  if(de){
+    const lab = de.closest("div").querySelector("label");
+    if(lab) lab.textContent = "EUR FX（DE/FR/IT/ES 共用）";
+    ["FR","IT","ES"].forEach(k=>{
+      const inp = fxGrid.querySelector("#seller_fx_"+k);
+      if(inp) inp.closest("div").style.display = "none";
+    });
+    de.addEventListener("input", ()=>{
+      ["FR","IT","ES"].forEach(k=>{
+        const inp = $("seller_fx_"+k);
+        if(inp) inp.value = de.value;
+      });
+    });
+  }
+
+  const cmGrid = $("sellerCommissionGrid");
+  cmGrid.innerHTML = "";
+  REVIEW_TYPES.forEach(t=>{
+    cmGrid.innerHTML += `<div><label>${t.n} 佣金(CNY)</label><input id="seller_cm_${t.k}" type="number" step="0.01" placeholder="例如 50"/></div>`;
+  });
+}
+function renderKPI(){
+  $("kpiSellers").textContent = S.sellers.length;
+  $("kpiProducts").textContent = S.products.length;
+  $("kpiOrders").textContent = S.orders.length;
+  $("kpiP").textContent = S.orders.filter(o=>!o.principal.settled).length;
+  $("kpiC").textContent = S.orders.filter(o=>!o.commission.settled && canSettleCommission(o)).length;
+}
+function updateProductPreview(){
+  const sellerId = $("productSeller").value;
+  if(!sellerId){ $("productPreview").value=""; return; }
+  const s = U.sellerById(sellerId);
+  if(!s){ $("productPreview").value=""; return; }
+  $("productPreview").value = `FX: USD ${U.money(s.fx.US)} / EUR ${U.money(s.fx.DE)} / GBP ${U.money(s.fx.UK)} | 佣金: 文${U.money(s.commission.TEXT)} 免${U.money(s.commission.FREE)}`;
+}
+function renderSellers(){
+  const q = ($("sellerSearch").value||"").trim().toLowerCase();
+  const rows = S.sellers.filter(s=>{
+    if(!q) return true;
+    return (s.id||"").toLowerCase().includes(q) || (s.name||"").toLowerCase().includes(q);
+  }).map(s=>{
+    const fxSummary = `USD ${U.money(s.fx.US)} | EUR ${U.money(s.fx.DE)} | GBP ${U.money(s.fx.UK)} | CAD ${U.money(s.fx.CA)} | JPY ${U.money(s.fx.JP)}`;
+    const cmSummary = `文:${U.money(s.commission.TEXT)} 图:${U.money(s.commission.IMAGE)} 视:${U.money(s.commission.VIDEO)} 免:${U.money(s.commission.FREE)} FB:${U.money(s.commission.FREE_FB)} 点:${U.money(s.commission.STAR)}`;
+    return `<tr>
+      <td class="mono">${esc(s.id)}</td>
+      <td>${esc(s.name)}</td>
+      <td>${esc(s.contact||"")}</td>
+      <td>${esc(s.remark||"")}</td>
+      <td class="small">${esc(fxSummary)}</td>
+      <td class="small">${esc(cmSummary)}</td>
+      <td class="right">
+        <button class="btn" onclick="Actions.editSeller('${esc(s.id)}')">编辑</button>
+        <button class="btn danger" onclick="Actions.deleteSeller('${esc(s.id)}')">删除</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("sellerRows").innerHTML = rows || `<tr><td colspan="7" class="small">暂无卖家</td></tr>`;
+}
+function renderProducts(){
+  const q = ($("productSearch").value||"").trim().toLowerCase();
+  const rows = S.products.filter(p=>{
+    if(!q) return true;
+    const sname = U.sellerName(p.sellerId).toLowerCase();
+    return (p.name||"").toLowerCase().includes(q) ||
+           (p.asin||"").toLowerCase().includes(q) ||
+           (p.market||"").toLowerCase().includes(q) ||
+           sname.includes(q);
+  }).map(p=>{
+    return `<tr>
+      <td>${esc(p.name)}</td>
+      <td class="mono">${esc(p.asin)}</td>
+      <td>${esc(p.market)}</td>
+      <td>${esc(U.marketToCurrency(p.market))}</td>
+      <td>${esc(U.sellerName(p.sellerId))}</td>
+      <td>${esc(U.reviewName(p.reviewType))}</td>
+      <td class="right">${esc(U.money(p.discount||0))}</td>
+      <td class="right">
+        <button class="btn" onclick="Actions.quickOrderFromProduct('${esc(p.id)}')">下单</button>
+        <button class="btn" onclick="Actions.editProduct('${esc(p.id)}')">编辑</button>
+        <button class="btn danger" onclick="Actions.deleteProduct('${esc(p.id)}')">删除</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("productRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无产品</td></tr>`;
+}
+function filteredOrders(){
+  const seller = $("filterSeller").value || "ALL";
+  const ps = $("filterPrincipal").value || "ALL";
+  const cs = $("filterCommission").value || "ALL";
+  const qraw = ($("filterSearch").value||"").trim().toLowerCase();
+
+  return S.orders.filter(o=>{
+    if(seller!=="ALL" && o.sellerId!==seller) return false;
+    if(ps==="UNSETTLED" && o.principal.settled) return false;
+    if(ps==="SETTLED" && !o.principal.settled) return false;
+    if(cs==="UNSETTLED"){
+      if(o.commission.settled) return false;
+      if(!canSettleCommission(o)) return false;
+    }
+    if(cs==="SETTLED" && !o.commission.settled) return false;
+
+    if(qraw){
+      const hay = [o.orderId,o.note,o.asin,U.sellerName(o.sellerId),o.market, U.productName(o.productId||"")].join(" ").toLowerCase();
+      if(!hay.includes(qraw)) return false;
+    }
+    return true;
+  });
+}
+function updateSettleButtons(){
+  const n = UI.selected.size;
+  $("btnSettlePrincipal").disabled = n===0;
+  $("btnSettleCommission").disabled = n===0;
+  $("btnSettleBoth").disabled = n===0;
+}
+function renderSelectedTags(){
+  const box = $("selectedTags");
+  box.innerHTML = "";
+  const arr = Array.from(UI.selected);
+  arr.forEach(oid=>{
+    const t = document.createElement("span");
+    t.className = "tag";
+    t.innerHTML = `<span class="mono">${esc(oid)}</span><span class="x">×</span>`;
+    t.title = "点击取消选择";
+    t.onclick = ()=>{ UI.selected.delete(oid); renderOrders(); };
+    box.appendChild(t);
+  });
+  $("selectedCount").textContent = arr.length ? `已选择 ${arr.length} 单` : "";
+  updateSettleButtons();
+}
+function renderOrders(){
+  // 排序：新建订单优先（createdAt 降序），无 createdAt 则保持原顺序
+  const list = filteredOrders().slice().sort((a,b)=>{
+    const ta = (a.createdAt||0), tb = (b.createdAt||0);
+    if(tb!==ta) return tb-ta;
+    // 兜底：按内部自增 id 末尾数字降序（新更大）
+    const na = Number(String(a.id||'').replace(/\D+/g,''))||0;
+    const nb = Number(String(b.id||'').replace(/\D+/g,''))||0;
+    return nb-na;
+  });
+  const total = list.length;
+
+  UI.pageSize = Number($("pageSize").value || 100);
+  const totalPages = Math.max(1, Math.ceil(total / UI.pageSize));
+  UI.page = Math.min(Math.max(1, UI.page), totalPages);
+
+  const start = (UI.page-1)*UI.pageSize;
+  const pageList = list.slice(start, start+UI.pageSize);
+
+  $("pagerInfo").textContent = `共 ${total} 单`;
+  $("pagerPage").textContent = `第 ${UI.page} / ${totalPages} 页`;
+
+  const rows = pageList.map(o=>{
+    const sellerName = U.sellerName(o.sellerId);
+    const pName = o.productId ? U.productName(o.productId) : (o.note||"");
+    const pCny = currentPrincipalCny(o);
+    const cm = commissionShould(o);
+
+    const pSett = U.badgeSettle(o.principal.settled);
+    const cSett = o.commission.settled ? U.badgeSettle(true) :
+      (canSettleCommission(o) ? U.badgeSettle(false) : `<span class="badge pending">未回评</span>`);
+
+    return `<tr>
+      <td><input type="checkbox" ${UI.selected.has(o.orderId)?"checked":""} onchange="Actions.toggleSelect('${esc(o.orderId)}')"/></td>
+      <td>${esc(U.dateMD(o.date))}</td>
+      <td class=\"mono\">${esc(o.orderId)}</td>
+      <td>${esc(sellerName)}</td>
+      <td>${esc(o.market)}</td>
+      <td>${esc(pName)}</td>
+      <td class="mono">${esc(o.asin||"")}</td>
+      <td>${U.badgeReview(o.review.status)}</td>
+      <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
+      <td class="right">${esc(U.money(o.amount||0))}</td>
+      <td class="right">${esc(U.money(o.discount||0))}</td>
+      <td class="right">${esc(U.money(pCny))}</td>
+      <td>${pSett}</td>
+      <td class="right">${esc(U.money(cm))}</td>
+      <td>${cSett}</td>
+      <td class=\"right action-col\">
+        <button class=\"btn\" onclick=\"Actions.editOrder('${esc(o.id)}')">编辑</button>
+        <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
+        <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("orderRows").innerHTML = rows || `<tr><td colspan="16" class="small">暂无订单</td></tr>`;
+  renderSelectedTags();
+}
+
+/* ===================== Export Orders CSV ===================== */
+function exportOrdersCsv(){
+  const list = filteredOrders();
+  const headers = [
+    "order_id","date","seller","market","product","asin",
+    "amount","discount","principal_orig","fx_used","principal_cny_preview",
+    "review_status","review_doneType","commission_cny_preview",
+    "principal_settled","principal_batch","commission_settled","commission_batch","note"
   ];
-  downloadCSV(rows,"seller_import_template.csv");
+  const rows = list.map(o=>{
+    const fx = effectiveFx(o, null);
+    const principalOrigV = principalOrig(o);
+    const principalCny = principalOrigV * fx;
+    const cm = commissionShould(o);
+    return [
+      o.orderId, o.date, U.sellerName(o.sellerId), o.market, U.productName(o.productId||"") || o.note || "",
+      o.asin || "",
+      U.money(o.amount||0), U.money(o.discount||0), U.money(principalOrigV),
+      fx, U.money(principalCny),
+      o.review.status, o.review.doneType || "", U.money(cm),
+      o.principal.settled ? "YES":"NO", o.principal.batchId||"",
+      o.commission.settled ? "YES":"NO", o.commission.batchId||"",
+      o.note||""
+    ].map(U.csvEscape);
+  });
+  const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\n");
+  U.download("orders_filtered_"+U.today()+".csv", csv, "text/csv");
 }
 
-function importSellerCSV(){
-  filePick(".csv",txt=>{
-    const lines=txt.split(/\r?\n/).filter(x=>x.trim()); if(lines.length<2) return;
-    const head=lines.shift();
-    if(head!==SELLER_HEADERS_CN.join(",")){alert("表头不匹配，请使用模板"); return;}
-    let add=0,upd=0,fail=0;
-    lines.forEach(l=>{
-      const c=l.split(","), m={}; SELLER_HEADERS_CN.forEach((h,i)=>m[h]=c[i]||"");
-      if(!m["卖家ID"]){fail++; return;}
-      let s=S.sellers.find(x=>x.seller_id===m["卖家ID"]);
-      if(!s){
-        s={seller_id:m["卖家ID"], fx:{}, commission:{}};
-        S.sellers.push(s); add++;
-      }else upd++;
-      // 非空字段才更新
-      if(m["卖家名称"]) s.seller_name=m["卖家名称"];
-      if(m["联系人"]) s.contact=m["联系人"];
-      if(m["备注"]) s.remark=m["备注"];
-      s.fx=s.fx||{}; s.commission=s.commission||{};
-      [["FX_USD","usd"],["FX_EUR","eur"],["FX_GBP","gbp"],["FX_CAD","cad"],["FX_JPY","jpy"]]
-        .forEach(([k,f])=>{ if(m[k]!=="") s.fx[f]=num(m[k]); });
-      [["佣金_文字评","text"],["佣金_图片评","image"],["佣金_视频评","video"],["佣金_免评","waived"],["佣金_免评FB","waived_fb"],["佣金_免评点星","waived_star"]]
-        .forEach(([k,f])=>{ if(m[k]!=="") s.commission[f]=num(m[k]); });
-    });
-    saveState(); renderSellers(); alert(`新增 ${add}，更新 ${upd}，失败 ${fail}`);
+/* ===================== Batches ===================== */
+function buildBatchCSV(batch){
+  const headers = ["订单号","Market","金额(原币)","折扣(原币)","本金(原币)","FX","本金应收(CNY)","本金本次结算(CNY)","佣金应付(CNY)","佣金本次结算(CNY)","批次ID","结算日期","类型"];
+  const rows = (batch.lines||[]).map(l=>[
+    l.orderId, l.market,
+    U.money(l.amount), U.money(l.discount), U.money(l.principalOrig),
+    l.fx, U.money(l.principalShould), U.money(l.principalSettle),
+    U.money(l.commissionShould), U.money(l.commissionSettle),
+    batch.batchId, batch.date, batch.type
+  ].map(U.csvEscape).join(","));
+  return [headers.map(U.csvEscape).join(","), ...rows].join("\n");
+}
+function renderBatches(){
+  const rows = (S.batches||[]).map(b=>{
+    const typeLabel = b.type==="PRINCIPAL" ? "本金" : b.type==="COMMISSION" ? "佣金" : "本佣";
+    const fxSummary = `USD ${U.money(b.fx.usd)} | EUR ${U.money(b.fx.eur)} | GBP ${U.money(b.fx.gbp)} | CAD ${U.money(b.fx.cad)} | JPY ${U.money(b.fx.jpy)}`;
+    return `<tr>
+      <td class="mono">${esc(b.batchId)}</td>
+      <td>${esc(typeLabel)}</td>
+      <td>${esc(b.date)}</td>
+      <td>${esc(b.sellerLabel || "（多卖家）")}</td>
+      <td>${esc((b.lines||[]).length)}</td>
+      <td class="right">${esc(U.money(b.total||0))}</td>
+      <td class="small">${esc(fxSummary)}</td>
+      <td class="right">
+        <button class="btn" onclick="Actions.exportBatchCSV('${esc(b.id)}')">导出CSV</button>
+        <button class="btn danger" onclick="Actions.deleteBatch('${esc(b.id)}')">删除回滚</button>
+      </td>
+    </tr>`;
+  }).join("");
+  $("batchRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无批次</td></tr>`;
+}
+
+/* ===================== Actions ===================== */
+
+function resetOrderForm(){
+  // 新建订单默认全空（产品/卖家都不默认选中）
+  safeSet("orderId", "");
+  safeSet("orderSeller", "");
+  safeSet("orderProduct", "");
+  safeSet("orderMarket", "");
+  safeSet("orderCurrency", "");
+  safeSet("orderAmount", "");
+  safeSet("orderDiscount", "");
+  safeSet("orderAsin", "");
+  safeSet("orderFxOverride", "");
+  // 回评类型：默认跟随产品；无产品则默认文字评（由产品选择逻辑处理）
+  safeSet("orderReviewType", "auto");
+  safeSet("orderNote", "");
+  safeSet("orderDate", U.today());
+  if($("orderBuyerCommission")) safeSet("orderBuyerCommission", "");
+
+  // 清空并排搜索框（搜索框仅用于过滤）
+  ["orderSellerId","orderProductId","batchSellerId","batchProductId","filterSeller"].forEach(id=>{
+    const el = document.getElementById(id+"__search");
+    if(el) el.value = "";
   });
 }
 
-/* ===================== 工具 ===================== */
-function num(v){const n=Number(v); if(Number.isNaN(n)) throw new Error("数值非法"); return n;}
-function filePick(acc,cb){const i=document.createElement("input"); i.type="file"; i.accept=acc;
-  i.onchange=()=>{const r=new FileReader(); r.onload=()=>cb(r.result); r.readAsText(i.files[0]);}; i.click();}
-function downloadCSV(rows,name){
-  const csv=rows.map(r=>r.join(",")).join("\n");
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download=name; a.click();
+
+const Actions = {
+  /* ---- Seller ---- */
+  editSeller(id){
+    const s = U.sellerById(id); if(!s) return;
+    UI.sellerEditId = id;
+    $("sellerId").value = s.id;
+    $("sellerId").disabled = true;
+    $("sellerName").value = s.name;
+    $("sellerContact").value = s.contact||"";
+    $("sellerRemark").value = s.remark||"";
+    FX_MARKETS.forEach(m=>{ $("seller_fx_"+m).value = (s.fx||{})[m] ?? ""; });
+    REVIEW_TYPES.forEach(t=>{ $("seller_cm_"+t.k).value = (s.commission||{})[t.k] ?? ""; });
+    $("btnCancelSellerEdit").style.display = "inline-block";
+    $("sellerEditHint").textContent = "正在编辑：" + s.id;
+  },
+  cancelSellerEdit(){
+    UI.sellerEditId = null;
+    $("sellerId").disabled = false;
+    $("sellerId").value="";
+    $("sellerName").value="";
+    $("sellerContact").value="";
+    $("sellerRemark").value="";
+    FX_MARKETS.forEach(m=>{ $("seller_fx_"+m).value=""; });
+    REVIEW_TYPES.forEach(t=>{ $("seller_cm_"+t.k).value=""; });
+    $("btnCancelSellerEdit").style.display="none";
+    $("sellerEditHint").textContent="";
+  },
+  saveSeller(){
+    const id = ($("sellerId").value||"").trim();
+    const name = ($("sellerName").value||"").trim();
+    if(!id || !name){ alert("请填写 Seller ID 和 卖家名称"); return; }
+    const fx = {};
+    FX_MARKETS.forEach(m=> fx[m] = U.num($("seller_fx_"+m).value));
+    // EUR markets sync
+    if(fx.DE){ fx.FR=fx.DE; fx.IT=fx.DE; fx.ES=fx.DE; }
+    const commission = {};
+    REVIEW_TYPES.forEach(t=> commission[t.k] = U.num($("seller_cm_"+t.k).value));
+    const payload = {id,name,contact:$("sellerContact").value||"",remark:$("sellerRemark").value||"",fx,commission};
+
+    if(UI.sellerEditId){
+      const idx = S.sellers.findIndex(x=>x.id===UI.sellerEditId);
+      if(idx>=0) S.sellers[idx] = payload;
+    }else{
+      if(S.sellers.some(x=>x.id===id)){ alert("Seller ID 已存在"); return; }
+      S.sellers.push(payload);
+    }
+    save();
+    Actions.cancelSellerEdit();
+    renderAll();
+  },
+  deleteSeller(id){
+    if(S.products.some(p=>p.sellerId===id) || S.orders.some(o=>o.sellerId===id)){
+      alert("该卖家已被产品/订单引用，不能删除。"); return;
+    }
+    if(!confirm("确定删除卖家 "+id+"？")) return;
+    S.sellers = S.sellers.filter(x=>x.id!==id);
+    save(); renderAll();
+  },
+
+  /* ---- Product ---- */
+  editProduct(id){
+    const p = U.productById(id); if(!p) return;
+    UI.productEditId = id;
+    $("productName").value = p.name;
+    $("productAsin").value = p.asin;
+    $("productMarket").value = p.market;
+    $("productSeller").value = p.sellerId;
+    $("productReviewType").value = p.reviewType;
+    $("productDiscount").value = p.discount ?? 0;
+    $("productBuyerCommission").value = p.buyerCommission ?? 0;
+    $("productRemark").value = p.remark||"";
+    $("btnCancelProductEdit").style.display="inline-block";
+    $("productEditHint").textContent="正在编辑："+p.id;
+    updateProductPreview();
+  },
+  cancelProductEdit(){
+    UI.productEditId=null;
+    $("productName").value="";
+    $("productAsin").value="";
+    $("productMarket").value="";
+    $("productSeller").value="";
+    $("productReviewType").value="";
+    $("productDiscount").value="";
+    $("productBuyerCommission").value="";
+    $("productRemark").value="";
+    $("btnCancelProductEdit").style.display="none";
+    $("productEditHint").textContent="";
+    updateProductPreview();
+  },
+  saveProduct(){
+    const name = ($("productName").value||"").trim();
+    const asin = ($("productAsin").value||"").trim();
+    const market = $("productMarket").value;
+    const sellerId = $("productSeller").value;
+    const reviewType = $("productReviewType").value;
+    if(!name || !asin || !market || !sellerId || !reviewType){
+      alert("请填写：产品名、ASIN、Market、卖家、回评类型"); return;
+    }
+    const discount = U.num($("productDiscount").value);
+    const buyerCommission = U.num($("productBuyerCommission").value);
+    const remark = $("productRemark").value||"";
+    const payload = {id:UI.productEditId || U.id("P", S.seq.product++), name, asin, market, sellerId, reviewType, discount, buyerCommission, remark};
+
+    if(UI.productEditId){
+      const idx = S.products.findIndex(x=>x.id===UI.productEditId);
+      if(idx>=0) S.products[idx]=payload;
+    }else{
+      S.products.push(payload);
+    }
+    save();
+    Actions.cancelProductEdit();
+    renderAll();
+  },
+  deleteProduct(id){
+    if(S.orders.some(o=>o.productId===id)){ alert("该产品已被订单引用，不能删除。"); return; }
+    if(!confirm("确定删除该产品？")) return;
+    S.products = S.products.filter(x=>x.id!==id);
+    save(); renderAll();
+  },
+  quickOrderFromProduct(pid){
+    $("orderProduct").value = pid;
+    applyProductToOrder();
+    $("orderId").focus();
+  },
+
+  /* ---- Order ---- */
+  toggleSelect(orderId){
+    if(UI.selected.has(orderId)) UI.selected.delete(orderId);
+    else UI.selected.add(orderId);
+    renderOrders();
+  },
+  editOrder(id){
+    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    UI.orderEditId = id;
+    $("orderProduct").value = o.productId || "";
+    $("orderDate").value = o.date || U.today();
+    $("orderId").value = o.orderId || "";
+    $("orderSeller").value = o.sellerId || "";
+    $("orderMarket").value = o.market || "US";
+    $("orderCurrency").value = U.marketToCurrency(o.market || "US");
+    $("orderAmount").value = U.num(o.amount);
+    $("orderDiscount").value = U.num(o.discount);
+    $("orderAsin").value = o.asin || "";
+    $("orderNote").value = o.note || "";
+    $("orderReviewType").value = o.reviewReq || "";
+    $("orderFxOverride").value = (o.fxOverride==null ? "" : o.fxOverride);
+    $("btnCancelOrderEdit").style.display="inline-block";
+    $("orderEditHint").textContent="正在编辑："+o.orderId;
+  },
+  cancelOrderEdit(){
+    UI.orderEditId=null;
+    $("orderProduct").value="";
+    $("orderDate").value=U.today();
+    $("orderId").value="";
+    $("orderSeller").value="";
+    $("orderReviewType").value="";
+    $("orderMarket").value="";
+    $("orderCurrency").value="";
+    $("orderAmount").value="";
+    $("orderDiscount").value="";
+    $("orderBuyerCommission").value="";
+    $("orderAsin").value="";
+    $("orderNote").value="";
+    $("orderFxOverride").value="";
+    $("btnCancelOrderEdit").style.display="none";
+    $("orderEditHint").textContent="";
+  },
+  saveOrder(){
+    const rawOrderId = ($("orderId").value||"").trim();
+    const orderId = rawOrderId ? rawOrderId.slice(0,19) : "";
+    const sellerId = ($("orderSeller").value||"").trim();
+    const productId = ($("orderProduct").value||"").trim() || null;
+
+    if(!sellerId){ showNotice("提示","请选择卖家"); return; }
+    if(!orderId){ showNotice("提示","请输入订单号（系统会按前 19 位作为订单号）"); return; }
+
+    const asin = (($("orderAsin").value||"").trim() || "");
+
+    // 规则：同卖家 + 同 ASIN 不允许录入（ASIN 为空也视作同 ASIN）
+    const sameAsinExists = S.orders.some(o=>{
+      if(UI.orderEditId && o.id===UI.orderEditId) return false;
+      return o.sellerId===sellerId && ((o.asin||"")===asin);
+    });
+    if(sameAsinExists){
+      showNotice("禁止提交","同一卖家下，已存在相同 ASIN 的订单（ASIN 为空也算相同）。请更换 ASIN 或修改为不同产品。");
+      return;
+    }
+
+    const payload = {
+      orderId,
+      key: U.orderKey(sellerId, orderId),
+      sellerId,
+      productId,
+      market: ($("orderMarket").value||"").trim(),
+      currency: ($("orderCurrency").value||"").trim(),
+      amount: U.toNum($("orderAmount").value),
+      discount: U.toNum($("orderDiscount").value),
+      buyerCommission: U.toNum($("orderBuyerCommission").value),
+      asin,
+      title: ($("orderNote").value||"").trim(),
+      fx: U.toNum(($("orderFxOverride")?$("orderFxOverride").value:"")),
+      reviewReq: (($("orderReviewType")?$("orderReviewType").value:"auto")||"auto").trim(),
+      note: ($("orderNote").value||"").trim(),
+      date: ($("orderDate").value||"").trim() || U.today(),
+    };
+
+    // sellerId::orderId 唯一键（同卖家同单号不允许；如确实重复请手动改订单号 _1）
+    const keyExists = S.orders.some(o => o.key===payload.key && (!UI.orderEditId || o.id!==UI.orderEditId));
+    if(keyExists){
+      showNotice("重复订单","同卖家下该订单号已存在。若确实是重复订单，请手动把订单号改为“{订单号}_1”等后再提交。");
+      return;
+    }
+
+    if(UI.orderEditId){
+      const i = S.orders.findIndex(o=>o.id===UI.orderEditId);
+      if(i>=0){
+        const prev = S.orders[i];
+        S.orders[i] = {
+          ...prev,
+          ...payload,
+          // 保留已结算/回评信息
+          principal: prev.principal || {settled:false,batchId:null,amountCny:0,settledAmountCny:0},
+          commission: prev.commission || {settled:false,batchId:null,amountCny:0,settledAmountCny:0},
+          review: prev.review || {status:"PENDING",doneType:null,date:"",link:"",note:""}
+        };
+      }
+      UI.orderEditId = null;
+      $("btnCancelOrderEdit").classList.add("hidden");
+      showNotice("已保存","订单已更新成功。");
+    }else{
+      const id = U.id("O", S.seq.order++);
+      S.orders.unshift({
+        id,
+        createdAt: Date.now(),
+        ...payload,
+        principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+        commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+        review: { status:"PENDING", doneType:null, date:"", link:"", note:"" }
+      });
+      showNotice("已提交","订单已保存成功。");
+      resetOrderForm();
+    }
+
+    save();
+    renderAll();
+  },
+  deleteOrder(id){
+    // safer delete: open confirmation modal
+    openDeleteModal(id);
+  },
+
+  /* ---- Review ---- */
+  openReview(id){
+    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    UI.reviewOrderId = id;
+    $("rv_order").value = o.orderId;
+    $("rv_status").value = o.review.status || "DONE";
+    $("rv_date").value = o.review.date || U.today();
+    $("rv_link").value = o.review.link || "";
+    $("rv_note").value = o.review.note || "";
+    // doneType 默认：已有 doneType -> 用它；否则产品回评类型；否则文字评
+    const p = o.productId ? U.productById(o.productId) : null;
+    const auto = (p?.reviewType || o.reviewReq || "TEXT");
+    $("rv_doneType").value = o.review.doneType || "" ; // allow auto
+    $("rv_doneType").dataset.auto = auto; // stash
+    $("reviewModal").style.display="flex";
+  },
+  closeReview(){ $("reviewModal").style.display="none"; UI.reviewOrderId=null; },
+  saveReview(){
+    const id = UI.reviewOrderId; if(!id) return;
+    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    o.review.status = $("rv_status").value;
+    o.review.date = $("rv_date").value || "";
+    o.review.link = $("rv_link").value || "";
+    o.review.note = $("rv_note").value || "";
+    // 若选择为空，保持为空（自动），佣金计算时会自动回落到产品/订单要求
+    o.review.doneType = $("rv_doneType").value || "";
+    // 如果状态变为 WAIVED，也允许结算佣金（按 doneType/产品规则）
+    save();
+    Actions.closeReview();
+    renderAll();
+  },
+
+  /* ---- Batch Export/Delete ---- */
+  exportBatchCSV(batchInternalId){
+    const b = S.batches.find(x=>x.id===batchInternalId); if(!b) return;
+    const csv = buildBatchCSV(b);
+    U.download(`${b.batchId}_${b.type}.csv`, csv, "text/csv");
+  },
+  deleteBatch(batchInternalId){
+    const b = S.batches.find(x=>x.id===batchInternalId); if(!b) return;
+    if(!confirm("删除批次会回滚订单结算状态，确定？")) return;
+
+    (b.lines||[]).forEach(line=>{
+      const o = S.orders.find(x=>x.orderId===line.orderId);
+      if(!o) return;
+      if(b.type==="PRINCIPAL" || b.type==="BOTH"){
+        o.principal.settled=false; o.principal.batchId=""; o.principal.amountCny=0; o.principal.fx=0;
+      }
+      if(b.type==="COMMISSION" || b.type==="BOTH"){
+        o.commission.settled=false; o.commission.batchId=""; o.commission.amountCny=0;
+      }
+    });
+    S.batches = S.batches.filter(x=>x.id!==batchInternalId);
+    save(); renderAll();
+  }
+};
+
+/* ===================== Product -> Order autofill ===================== */
+function applyProductToOrder(){
+  const pid = $("orderProduct").value;
+  if(!pid){
+    // next5: 选择“不选产品”时，立即清空自动填充字段
+    setVal('orderMarket','');
+    setVal('orderCurrency','');
+    setVal('orderAsin','');
+    setVal('orderSeller','');
+    setVal('orderNote','');
+    setVal('orderAmount','');
+    setVal('orderDiscount','0');
+    setVal('orderBuyerCommission','');
+    // 回评类型默认文字评
+    setVal('orderReviewType','文字评');
+    return;
+  }
+  const p = U.productById(pid);
+  if(!p) return;
+  // seller sync
+  $("orderSeller").value = p.sellerId;
+  $("orderMarket").value = p.market;
+  $("orderCurrency").value = U.marketToCurrency(p.market);
+  // default fields
+  $("orderDiscount").value = U.num(p.discount);
+  $("orderAsin").value = p.asin || "";
+  if(!$("orderNote").value) $("orderNote").value = p.name || "";
+  // orderReviewType: allow user override; if empty, set
+  if(!$("orderReviewType").value) $("orderReviewType").value = p.reviewType || "";
 }
 
-/* ===================== JSON & 示例 ===================== */
-function exportJSON(){downloadCSV([[JSON.stringify(S)]],"data.json");}
-function importJSON(){filePick("",txt=>{S=JSON.parse(txt);saveState();renderAll();});}
-function loadSample(){
-  S={
-    sellers:[
-      {seller_id:"seller_xl",seller_name:"小龙",fx:{usd:7.2,eur:8.4,gbp:9.6,cad:5,jpy:0.05},
-       commission:{text:30,image:50,video:70,waived:10,waived_fb:10,waived_star:10}},
-      {seller_id:"seller_anne",seller_name:"Anne服务商"}
-    ],
-    products:[],
-    orders:[{order_id:"111-xxx",seller_id:"seller_xl"},{order_id:"222-yyy",seller_id:"seller_anne"}]
-  };
-  saveState(); renderAll();
+/* ===================== Batch Parse ===================== */
+function detectMarketAndReviewType(text, fallbackMarket){
+  const t = text || "";
+  let market = fallbackMarket || "US";
+  const rules = [
+    {k:"美国", m:"US"},{k:"英国", m:"UK"},{k:"德国", m:"DE"},{k:"法国", m:"FR"},{k:"意大利", m:"IT"},{k:"西班牙", m:"ES"},{k:"加拿大", m:"CA"},{k:"日本", m:"JP"},
+    {k:"US", m:"US"},{k:"UK", m:"UK"},{k:"DE", m:"DE"},{k:"FR", m:"FR"},{k:"IT", m:"IT"},{k:"ES", m:"ES"},{k:"CA", m:"CA"},{k:"JP", m:"JP"},
+  ];
+  for(const r of rules){ if(t.includes(r.k)){ market=r.m; break; } }
+
+  let reviewType = "TEXT";
+  const rtRules = [
+    {k:"文字评", v:"TEXT"},
+    {k:"图片评", v:"IMAGE"},
+    {k:"视频评", v:"VIDEO"},
+    {k:"免评FB", v:"FREE_FB"},
+    {k:"免评点星", v:"STAR"},
+    {k:"免评", v:"FREE"},
+  ];
+  for(const r of rtRules){ if(t.includes(r.k)){ reviewType=r.v; break; } }
+  return {market, reviewType};
 }
-function clearAll(){ if(confirm("确定清空？")){S={sellers:[],products:[],orders:[]}; saveState(); renderAll();}}
+function parseLine(line){
+  const raw = String(line||'').trim();
+  if(!raw) return null;
+
+  // 1) 订单号：默认取前 19 位；若前 19 位不是 Amazon 单号格式，仍按“纯单号”处理（价格=0，其它空）
+  const head = raw.slice(0,19);
+  const isAmazonOrderId = /^\d{3}-\d{7}-\d{7}$/.test(head);
+  const orderId = isAmazonOrderId ? head : head; // 仍然保留前 19 位作为订单号
+
+  const rest = raw.slice(19).trim();
+
+  // 2) 价格：只在 rest 中识别，避免把“纯 19 位单号”误识别为金额
+  //    规则：在 rest 里找第一个“独立数字(可带小数)”；若 rest 为空则 price=0
+  let price = 0;
+  if(rest){
+    // 优先识别带小数的价格，其次整数；均要求前后不是数字，避免粘连
+    const m = rest.match(/(^|[^\d])(\d+(?:\.\d{1,2})?)(?=$|[^\d])/);
+    if(m){
+      const v = parseFloat(m[2]);
+      if(Number.isFinite(v)) price = v;
+    }
+  }
+
+  // 3) 折扣价 / 买手佣金（买家佣金）：不会同时出现；识别失败则为 0
+  let discount = 0;
+  let buyerCommission = 0;
+
+  // 折扣：折扣价10 / 折扣10 / review后“折扣价 3”
+  const mDisc = raw.match(/折扣价\s*([0-9]+(?:\.[0-9]{1,2})?)/) || raw.match(/折扣\s*([0-9]+(?:\.[0-9]{1,2})?)/);
+  if(mDisc){
+    const v = parseFloat(mDisc[1]);
+    if(Number.isFinite(v)) discount = v;
+  }
+
+  // 佣金：佣金30 / 买家佣金30 / 买手佣金30（额外给买家）
+  const mComm = raw.match(/(?:买家佣金|买手佣金|佣金)\s*([0-9]+(?:\.[0-9]{1,2})?)/);
+  if(mComm){
+    const v = parseFloat(mComm[1]);
+    if(Number.isFinite(v)) buyerCommission = v;
+  }
+
+  // 4) 回评要求：默认文字评；能识别则覆盖
+  //    规则：图片/图评 => 图片评；视频 => 视频评；免评/FB/feedback/无法上评 => 免评 或 免评FB
+  let reviewType = '文字评';
+  const low = raw.toLowerCase();
+  if(/免评点星/.test(raw)) reviewType = '免评点星';
+  else if(/免评fb/.test(low) || /feedback/.test(low)) reviewType = '免评FB';
+  else if(/无法上评/.test(raw) || /fb/.test(low)) reviewType = '免评'; // 你要求“无法上评FB”按免评计算
+  else if(/免评/.test(raw)) reviewType = '免评';
+  else if(/视频/.test(raw)) reviewType = '视频评';
+  else if(/图评/.test(raw) || /图片/.test(raw)) reviewType = '图片评';
+  // 其余默认文字评
+
+  // 5) 产品名：取 rest 去掉金额、折扣/佣金等关键词后的前半段（尽量保留中文名）
+  let title = rest;
+  if(title){
+    // 去掉括号后备注
+    title = title.replace(/\(.*?\)/g,' ').trim();
+    // 去掉折扣/佣金信息段
+    title = title.replace(/折扣价\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
+    title = title.replace(/折扣\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
+    title = title.replace(/(?:买家佣金|买手佣金|佣金)\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
+    // 去掉回评关键词
+    title = title.replace(/(?:文字评价|图片评价|视频评价|review\+feedback|review|feedback|免评点星|免评fb|免评)/ig,' ');
+    // 去掉刚刚识别的价格数字（只去掉第一个匹配）
+    title = title.replace(/(^|[^\d])(\d+(?:\.\d{1,2})?)(?=$|[^\d])/, ' ');
+    title = title.replace(/\s+/g,' ').trim();
+  }
+
+  return { ok:true, orderId, title, amount: price, discount, buyerCommission, reviewReq: reviewType };
+}
+
+
+function batchHandle(commit){
+  const sellerId = $("batchSeller").value;
+  if(!sellerId){ showNotice("提示","批量登记请先选择卖家"); return; }
+  const productId = $("batchProduct").value || null;
+  const defaultDate = $("batchDate").value || U.today();
+  const defaultMarket = $("batchMarket").value || "";
+  const text = $("batchText").value || "";
+  const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+
+  let submitted=0, duplicated=0, bad=0;
+  const dupLines=[], badLines=[], okLines=[];
+  const fmtOk = (p)=> `${p.orderId} 产品名:${(p.title||'').trim()} 订单金额:${U.toNum(p.amount||0)} 回评类型:${(p.reviewReq||'文字评')}`;
+  if(!lines.length){ showNotice("提示","请先粘贴多行数据"); return; }
+
+  const parsed = [];
+  for(const line of lines){
+    const p = parseLine(line);
+    if(!p.ok){ bad++; badLines.push(line); continue; }
+    parsed.push({line, p});
+  }
+
+  if(!commit){
+    for(const item of parsed){ okLines.push(fmtOk(item.p)); }
+    showParseSummary({submitted: parsed.length, duplicated: 0, bad, dupLines: [], badLines, okLines});
+    return;
+  }
+
+  for(const item of parsed){
+    const p = item.p;
+    const asin = (p.asin||"");
+    // 唯一键：同卖家 + 同订单号 + 同ASIN（允许同订单号不同ASIN）
+    const key = `${sellerId}::${p.orderId}::${asin}`;
+
+    if(S.orders.some(o=>o.key===key)){
+      duplicated++; dupLines.push(fmtOk(p));
+      continue;
+    }
+const o = {
+      id: U.id("O", S.seq.order++),
+      createdAt: Date.now(),
+      key,
+      orderId: p.orderId,
+      sellerId,
+      productId,
+      date: defaultDate,
+      market: p.market || defaultMarket,
+      currency: p.currency || "",
+      amount: p.amount ?? 0,
+      discount: p.discount ?? 0,
+      buyerCommission: p.buyerCommission ?? 0,
+      asin: p.asin || "",
+      title: p.title || "",
+      fx: p.fx || 0,
+      reviewReq: p.reviewReq || "auto",
+      note: p.note || "",
+      principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+      commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+      review: { status:"PENDING", doneType:null, date:"", link:"", note:"" }
+    };
+    S.orders.unshift(o);
+    submitted++;
+    okLines.push(fmtOk(p));
+  }
+
+  save();
+  renderAll();
+  showParseSummary({submitted, duplicated, bad, dupLines, badLines, okLines});
+}
+
+/* ===================== Link Product to Orders (Paste IDs) ===================== */
+function linkProductByPaste(){
+  const pid = $("linkProduct").value;
+  if(!pid){ alert("请先选择产品"); return; }
+  const p = U.productById(pid);
+  if(!p){ alert("产品不存在"); return; }
+
+  const ids = U.extractOrderIds(($("pasteLinkBox").value||"").trim());
+  if(!ids.length){ $("pasteLinkHint").textContent="未识别到订单号"; return; }
+
+  let hit=0, miss=0;
+  ids.forEach(oid=>{
+    const o = S.orders.find(x=>x.orderId===oid);
+    if(!o){ miss++; return; }
+    // 关联产品并同步字段（修复：v6.4 “勾选产品不生效”）
+    o.productId = p.id;
+    o.sellerId = p.sellerId;
+    o.market = p.market;
+    o.currency = U.marketToCurrency(p.market);
+    o.reviewReq = p.reviewType;
+    o.discount = U.num(p.discount);
+    o.asin = p.asin || o.asin;
+    if(!o.note) o.note = p.name;
+    UI.selected.add(o.orderId);
+    hit++;
+  });
+  save();
+  renderAll();
+  $("pasteLinkHint").textContent = `识别 ${ids.length} 个；命中并关联 ${hit} 个；未找到 ${miss} 个（已勾选命中订单）`;
+}
+
+/* ===================== Batch Mark Review Done ===================== */
+function batchMarkReviewDone(){
+  const ids = U.extractOrderIds(($("pasteLinkBox").value||"").trim());
+  if(!ids.length){ showNotice("提示","未识别到订单号"); return; }
+
+  let changed=0, skipped=0, missing=0;
+  const okLines=[], badLines=[], dupLines=[];
+
+  const toZhReview = (o)=>{
+    const p = o.productId ? U.productById(o.productId) : null;
+    const raw = (o.review && o.review.doneType) ? o.review.doneType : (p?.reviewType || o.reviewReq || "TEXT");
+    const v = String(raw||"").toUpperCase();
+    if(v==="IMAGE") return "图片评";
+    if(v==="VIDEO") return "视频评";
+    if(v==="WAIVED") return "免评";
+    if(v==="WAIVED_FB") return "免评FB";
+    if(v==="WAIVED_STAR") return "免评点星";
+    return "文字评";
+  };
+
+  const fmt = (o)=> `${o.orderId} 产品名:${(U.productName(o.productId)||o.note||"").trim()} 订单金额:${U.toNum(o.amount||0)} 回评类型:${toZhReview(o)}`;
+
+  ids.forEach(oid=>{
+    const o = S.orders.find(x=>x.orderId===oid);
+    if(!o){ missing++; badLines.push(`未找到：${oid}`); return; }
+    if(o.review && o.review.status==="DONE"){
+      skipped++; dupLines.push(fmt(o));
+      return;
+    }
+    o.review.status = "DONE";
+    o.review.date = o.review.date || U.today();
+    changed++;
+    okLines.push(fmt(o));
+  });
+
+  save();
+  renderAll();
+  showParseSummary({submitted: changed, duplicated: skipped, bad: missing, dupLines, badLines, okLines});
+}
+
+/* ===================== Settlement ===================== */
+function openSettle(mode){
+  const ids = Array.from(UI.selected);
+  if(!ids.length){ alert("请先勾选订单"); return; }
+
+  // default mode: 如果全是免评产品，推荐 BOTH（但仍尊重用户点击的 mode）
+  const batchIdPrefix = (mode==="PRINCIPAL" ? "PB" : mode==="COMMISSION" ? "CB" : "BB");
+  const batchId = `${batchIdPrefix}${U.today().replaceAll("-","")}-${String(Math.floor(Math.random()*900)+100)}`;
+
+  // prefill fx from first seller (if single), else zeros
+  const sellerIds = Array.from(new Set(ids.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+  if(sellerIds.length>1){ alert('不同卖家的订单不能一起结算，请先按卖家分开勾选。'); return; }
+
+  const singleSeller = sellerIds.length===1 ? U.sellerById(sellerIds[0]) : null;
+
+  const fx = {
+    usd: singleSeller ? U.num(singleSeller.fx.US) : 7.2,
+    eur: singleSeller ? U.num(singleSeller.fx.DE) : 7.8,
+    gbp: singleSeller ? U.num(singleSeller.fx.UK) : 9.1,
+    cad: singleSeller ? U.num(singleSeller.fx.CA) : 5.3,
+    jpy: singleSeller ? U.num(singleSeller.fx.JP) : 0.05,
+  };
+
+  UI.settle = {mode, orderIds:ids, fx, batchId, date:U.today(), method:"", note:"", edits:{}};
+  ids.forEach(oid=>{ UI.settle.edits[oid] = {p:null, c:null, amount:null, discount:null, buyerCommission:null}; });
+
+  $("settleTitle").textContent = (mode==="PRINCIPAL" ? "批量结算：本金" : mode==="COMMISSION" ? "批量结算：佣金" : "批量结算：本佣一起");
+  $("settleBatchId").value = batchId;
+  $("settleBatchDate").value = UI.settle.date;
+  $("settleMethod").value = "";
+  $("settleNote").value = "";
+  $("fx_usd").value = fx.usd;
+  $("fx_eur").value = fx.eur;
+  $("fx_gbp").value = fx.gbp;
+  $("fx_cad").value = fx.cad;
+  $("fx_jpy").value = fx.jpy;
+
+  // default collapse meta to give table more space
+  if($("settleMeta")) $("settleMeta").style.display = "none";
+  if($("btnToggleSettleMeta")) $("btnToggleSettleMeta").textContent = "展开";
+
+  renderSettleRows();
+  $("settleModal").style.display="flex";
+}
+function closeSettle(){ $("settleModal").style.display="none"; UI.settle=null; }
+function syncSettleFxFromInputs(){
+  if(!UI.settle) return;
+  UI.settle.fx = {
+    usd: U.num($("fx_usd").value),
+    eur: U.num($("fx_eur").value),
+    gbp: U.num($("fx_gbp").value),
+    cad: U.num($("fx_cad").value),
+    jpy: U.num($("fx_jpy").value),
+  };
+  renderSettleRows();
+}
+function renderSettleRows(){
+  if(!UI.settle) return;
+  UI.settle.batchId = ($("settleBatchId").value||"").trim() || UI.settle.batchId;
+  UI.settle.date = $("settleBatchDate").value || UI.settle.date;
+  UI.settle.method = ($("settleMethod").value||"").trim();
+  UI.settle.note = ($("settleNote").value||"").trim();
+
+  const mode = UI.settle.mode;
+  let total = 0;
+
+  const rows = UI.settle.orderIds.map(oid=>{
+    const o = S.orders.find(x=>x.orderId===oid);
+    if(!o) return "";
+    const fx = effectiveFx(o, UI.settle.fx);
+    const editedAmt = (UI.settle.edits[oid] && UI.settle.edits[oid].amount!=null) ? U.num(UI.settle.edits[oid].amount) : null;
+    const amount = editedAmt!=null ? editedAmt : U.num(o.amount);
+    const editedDisc = (UI.settle.edits[oid] && UI.settle.edits[oid].discount!=null) ? U.num(UI.settle.edits[oid].discount) : null;
+    const editedBC = (UI.settle.edits[oid] && UI.settle.edits[oid].buyerCommission!=null) ? U.num(UI.settle.edits[oid].buyerCommission) : null;
+    const discount = editedDisc!=null ? editedDisc : U.num(o.discount);
+    const buyerCommission = editedBC!=null ? editedBC : U.num(o.buyerCommission);
+    const pOrig = Math.max(0, amount - discount + buyerCommission);
+    const pShould = pOrig * fx;
+
+    const cShould = commissionShould(o);
+
+    const pEditable = (mode!=="COMMISSION") && !o.principal.settled;
+    const cEditable = (mode!=="PRINCIPAL") && !o.commission.settled && canSettleCommission(o);
+
+    const pAuto = pEditable ? pShould : 0;
+    const cAuto = cEditable ? cShould : 0;
+
+    const pVal = (UI.settle.edits[oid].p==null ? pAuto : Math.max(0, U.num(UI.settle.edits[oid].p)));
+    const cVal = (UI.settle.edits[oid].c==null ? cAuto : Math.max(0, U.num(UI.settle.edits[oid].c)));
+
+    total += pVal + cVal;
+
+    return `<tr>
+      <td class="mono">${esc(o.orderId)}</td>
+      <td>${esc(o.market)}</td>
+      <td class="right"><input data-oid="${esc(oid)}" data-k="amount" type="number" step="0.01" value="${esc(U.money(amount))}" style="max-width:120px"/></td>
+      <td class="right"><input data-oid="${esc(oid)}" data-k="discount" type="number" step="0.01" value="${esc(U.money(discount))}" style="max-width:110px"/></td>
+      <td class="right"><input data-oid="${esc(oid)}" data-k="buyerCommission" type="number" step="0.01" value="${esc(U.money(buyerCommission))}" style="max-width:110px"/></td>
+      <td class="right">${esc(U.money(pOrig))}</td>
+      <td class="right">${esc(fx)}</td>
+      <td class="right">${esc(U.money(pShould))}</td>
+      <td class="right">
+        <input data-oid="${esc(oid)}" data-k="p" type="number" step="0.01" value="${U.money(pVal)}" ${pEditable?"":"disabled"} style="max-width:140px"/>
+      </td>
+      <td class="right">${esc(U.money(cShould))}</td>
+      <td class="right">
+        <input data-oid="${esc(oid)}" data-k="c" type="number" step="0.01" value="${U.money(cVal)}" ${cEditable?"":"disabled"} style="max-width:140px"/>
+      </td>
+    </tr>`;
+  }).join("");
+
+  $("settleRows").innerHTML = rows || `<tr><td colspan="11" class="small">无可结算订单</td></tr>`;
+  $("settleTotal").textContent = U.money(total);
+  if($("settleTotalTop")) $("settleTotalTop").textContent = U.money(total);
+
+  // bind input listeners
+  $("settleRows").querySelectorAll("input[data-oid]").forEach(inp=>{
+    inp.addEventListener("input", ()=>{
+      const oid = inp.dataset.oid;
+      const k = inp.dataset.k;
+      if(!UI.settle || !UI.settle.edits[oid]) return;
+      UI.settle.edits[oid][k] = inp.value==="" ? null : U.num(inp.value);
+      renderSettleRows();
+    }, {once:false});
+  });
+
+}
+function applySettleAmountEditsToOrders(showMsg=true){
+  if(!UI.settle) return;
+  let changedAmt = 0, changedDisc = 0, changedBC = 0;
+
+  UI.settle.orderIds.forEach(oid=>{
+    const o = S.orders.find(x=>x.orderId===oid);
+    if(!o) return;
+    const ed = UI.settle.edits?.[oid];
+    if(!ed) return;
+
+    if(ed.amount!=null){
+      const newAmt = U.num(ed.amount);
+      if(U.num(o.amount)!==newAmt){
+        o.amount = newAmt;
+        changedAmt++;
+      }
+    }
+    if(ed.discount!=null){
+      const newDisc = U.num(ed.discount);
+      if(U.num(o.discount)!==newDisc){
+        o.discount = newDisc;
+        changedDisc++;
+      }
+    }
+    if(ed.buyerCommission!=null){
+      const newBC = U.num(ed.buyerCommission);
+      if(U.num(o.buyerCommission)!==newBC){
+        o.buyerCommission = newBC;
+        changedBC++;
+      }
+    }
+  });
+
+  const changed = changedAmt + changedDisc + changedBC;
+  if(changed){
+    save();
+    renderOrders();
+  }
+
+  if(showMsg){
+    if(changed){
+      const parts = [];
+      if(changedAmt) parts.push(`金额(原币) ${changedAmt} 条`);
+      if(changedDisc) parts.push(`折扣(原币) ${changedDisc} 条`);
+      if(changedBC) parts.push(`买手佣金(原币) ${changedBC} 条`);
+      showNotice("已保存", `已回写：${parts.join("，")}。`);
+    }else{
+      showNotice("未修改", "没有检测到需要回写的变更。");
+    }
+  }
+}
+
+function exportCurrentSettleCsv(){
+
+  if(!UI.settle){ alert("请先打开结算窗口"); return; }
+  const batch = buildCurrentBatchObject(false);
+  const csv = buildBatchCSV(batch);
+  U.download(`settle_${batch.batchId}.csv`, csv, "text/csv");
+}
+function buildCurrentBatchObject(applyToOrders){
+  const mode = UI.settle.mode;
+  const batchId = ($("settleBatchId").value||"").trim() || UI.settle.batchId;
+  const date = $("settleBatchDate").value || UI.settle.date;
+  const method = ($("settleMethod").value||"").trim();
+  const note = ($("settleNote").value||"").trim();
+  const fx = {
+    usd: U.num($("fx_usd").value),
+    eur: U.num($("fx_eur").value),
+    gbp: U.num($("fx_gbp").value),
+    cad: U.num($("fx_cad").value),
+    jpy: U.num($("fx_jpy").value),
+  };
+
+  const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+  const sellerLabel = sellerIds.length===1 ? U.sellerName(sellerIds[0]) : "（多卖家）";
+
+  const lines = [];
+  let total = 0;
+
+  UI.settle.orderIds.forEach(oid=>{
+    const o = S.orders.find(x=>x.orderId===oid);
+    if(!o) return;
+
+    const fxUsed = effectiveFx(o, fx);
+    const amount = U.num(o.amount);
+    const discount = U.num(o.discount);
+    const buyerCommission = U.num(o.buyerCommission);
+    const pOrig = Math.max(0, amount - discount + buyerCommission);
+    const pShould = pOrig * fxUsed;
+    const cShould = commissionShould(o);
+
+    const pEditable = (mode!=="COMMISSION") && !o.principal.settled;
+    const cEditable = (mode!=="PRINCIPAL") && !o.commission.settled && canSettleCommission(o);
+
+    const pAuto = pEditable ? pShould : 0;
+    const cAuto = cEditable ? cShould : 0;
+
+    const pVal = (UI.settle.edits[oid].p==null ? pAuto : Math.max(0, U.num(UI.settle.edits[oid].p)));
+    const cVal = (UI.settle.edits[oid].c==null ? cAuto : Math.max(0, U.num(UI.settle.edits[oid].c)));
+
+    total += pVal + cVal;
+
+    if(applyToOrders){
+      if(pVal>0){
+        o.principal.settled = true;
+        o.principal.batchId = batchId;
+        o.principal.fx = fxUsed;
+        o.principal.amountCny = pVal;
+      }
+      if(cVal>0){
+        o.commission.settled = true;
+        o.commission.batchId = batchId;
+        o.commission.amountCny = cVal;
+      }
+    }
+
+    lines.push({
+      orderId:o.orderId, market:o.market,
+      amount, discount, principalOrig:pOrig, fx:fxUsed,
+      principalShould:pShould, principalSettle:pVal,
+      commissionShould:cShould, commissionSettle:cVal
+    });
+  });
+
+  return {
+    id: U.id("B", S.seq.batch++),
+    batchId,
+    type: mode,
+    date,
+    method,
+    note,
+    sellerLabel,
+    fx,
+    lines,
+    total
+  };
+}
+async function confirmSettle(){
+  if(!UI.settle) return;
+  applySettleAmountEditsToOrders(false);
+  const batch = buildCurrentBatchObject(true);
+
+  // guard: if all zeros, do not create batch
+  if((batch.lines||[]).every(l=>U.num(l.principalSettle)===0 && U.num(l.commissionSettle)===0)){
+    alert("本批次没有可结算金额（可能已结算/未回评）。");
+    return;
+  }
+
+  S.batches.unshift(batch);
+  save();
+  closeSettle();
+  renderAll();
+
+  // 如果是从【收款草稿箱】打开的草稿，结算完成后自动移出草稿箱
+  if(window.__settleDraftOpenedId && window.__settleDrafts && typeof window.__settleDrafts.del === "function"){
+    try{ await window.__settleDrafts.del(window.__settleDraftOpenedId); }catch(e){}
+    window.__settleDraftOpenedId = null;
+    try{ if(typeof window.__settleDrafts.refreshOpen === "function") window.__settleDrafts.refreshOpen(); }catch(e){}
+  }
+
+  alert("已结算并生成批次。可在批次列表导出 CSV。");
+}
+
+/* ===================== Sample Data ===================== */
+function seedSample(){
+  S = blankState();
+
+  const sid = U.id("S", S.seq.seller++);
+  S.sellers.push({
+    id:sid, name:"欧美测评", contact:"", remark:"",
+    fx:{US:7.2, UK:9.1, DE:7.8, FR:7.8, IT:7.8, ES:7.8, CA:5.3, JP:0.05},
+    commission:{TEXT:50, IMAGE:70, VIDEO:100, FREE:20, FREE_FB:30, STAR:30}
+  });
+
+  const pidText = U.id("P", S.seq.product++);
+  S.products.push({
+    id:pidText, name:"美国车载充电器", asin:"B0FFL2X1F3", market:"US", sellerId:sid,
+    reviewType:"TEXT", discount:0, remark:""
+  });
+
+  const pidFree = U.id("P", S.seq.product++);
+  S.products.push({
+    id:pidFree, name:"免评示例产品", asin:"B0G81FMNNN", market:"US", sellerId:sid,
+    reviewType:"FREE", discount:1.00, remark:"免评产品：建议本佣一起结算"
+  });
+
+  S.orders.push({
+    id:U.id("O", S.seq.order++),
+    orderId:"111-3149968-9279463",
+    date:U.today(),
+    sellerId:sid,
+    productId:pidFree,
+    market:"US",
+    currency:"USD",
+    amount:19.99,
+    discount:1.00,
+    asin:"B0G81FMNNN",
+    note:"免评示例产品",
+    reviewReq:"FREE",
+    fxOverride:null,
+    review:{status:"PENDING", date:"", link:"", note:"", doneType:""},
+    principal:{settled:false, batchId:"", fx:0, amountCny:0},
+    commission:{settled:false, batchId:"", amountCny:0},
+  });
+
+  computeSeq();
+  save();
+}
+
+/* ===================== Events ===================== */
+function gotoPage(n){
+  const total = filteredOrders().length;
+  const totalPages = Math.max(1, Math.ceil(total / UI.pageSize));
+  UI.page = Math.min(Math.max(1, n), totalPages);
+  renderOrders();
+}
+
+function bind(){
+  document.querySelectorAll("[data-tab]").forEach(btn=>{
+    btn.onclick = ()=>{ UI.tab = btn.dataset.tab; renderTabs(); };
+  });
+
+  $("btnExport").onclick = ()=> U.download("ops_export_"+VERSION+".json", JSON.stringify(S,null,2), "application/json");
+  $("btnImport").onclick = ()=> $("importFile").click();
+  $("importFile").onchange = async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    try{
+      const obj = JSON.parse(await f.text());
+      S = normalizeImported(obj);
+      computeSeq();
+      save();
+      UI.selected.clear();
+      UI.page = 1;
+      alert("导入成功");
+      renderAll();
+    }catch(err){
+      alert("导入失败："+err.message);
+    }finally{
+      e.target.value="";
+    }
+  };
+
+  $("btnLoadSample").onclick = ()=>{
+    if(!confirm("加载示例数据会覆盖当前数据，确定？")) return;
+    seedSample();
+    UI.selected.clear();
+    UI.page = 1;
+    renderAll();
+  };
+
+  $("btnReset").onclick = ()=>{
+    if(!confirm("确定清空所有数据？")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    S = blankState();
+    save();
+    UI.selected.clear();
+    UI.page = 1;
+    Actions.cancelSellerEdit();
+    Actions.cancelProductEdit();
+    Actions.cancelOrderEdit();
+    renderAll();
+    alert("已清空。");
+  };
+
+  // seller
+  $("btnSaveSeller").onclick = Actions.saveSeller;
+  $("btnCancelSellerEdit").onclick = Actions.cancelSellerEdit;
+  $("sellerSearch").oninput = renderSellers;
+
+  // product
+  $("btnSaveProduct").onclick = Actions.saveProduct;
+  $("btnCancelProductEdit").onclick = Actions.cancelProductEdit;
+  $("productSearch").oninput = renderProducts;
+  $("productSeller").onchange = updateProductPreview;
+
+  // order entry
+  $("orderProduct").onchange = ()=>{ applyProductToOrder(); };
+  $("orderMarket").onchange = ()=> $("orderCurrency").value = U.marketToCurrency($("orderMarket").value);
+  $("btnSaveOrder").onclick = Actions.saveOrder;
+  $("btnCancelOrderEdit").onclick = Actions.cancelOrderEdit;
+
+  // batch parse
+  $("btnBatchPreview").onclick = ()=>{ try{ batchHandle(false); }catch(e){ showNotice("脚本错误", (e&&e.message)?e.message:String(e)); } };
+  $("btnBatchParse").onclick = ()=>{ try{ batchHandle(true); }catch(e){ showNotice("脚本错误", (e&&e.message)?e.message:String(e)); } };
+
+  // filters
+  ["filterSeller","filterPrincipal","filterCommission"].forEach(id=> $(id).onchange = ()=>{ UI.page=1; renderOrders(); });
+  $("filterSearch").oninput = (e)=>{
+    const v = (e.target.value||"").slice(0,19);
+    if(e.target.value!==v) e.target.value=v;
+    const q = v.trim();
+    if(q){
+      S.orders.forEach(o=>{ if(o.orderId.startsWith(q)) UI.selected.add(o.orderId); });
+    }
+    UI.page=1;
+    renderOrders();
+  };
+
+  $("btnResetFilters").onclick = ()=>{
+    $("filterSeller").value="ALL";
+    $("filterPrincipal").value="ALL";
+    $("filterCommission").value="ALL";
+    $("filterSearch").value="";
+    $("pasteSelectBox").value="";
+    $("pasteSelectHint").textContent="";
+    $("pasteLinkBox").value="";
+    $("pasteLinkHint").textContent="";
+    UI.selected.clear();
+    UI.page=1;
+    renderOrders();
+  };
+
+  // paste select
+  $("btnParseSelect").onclick = ()=>{
+    const ids = U.extractOrderIds(($("pasteSelectBox").value||"").trim());
+    if(!ids.length){ $("pasteSelectHint").textContent="未识别到订单号"; return; }
+    let hit=0;
+    ids.forEach(oid=>{
+      const o = S.orders.find(x=>x.orderId===oid);
+      if(o){ UI.selected.add(oid); hit++; }
+    });
+    $("pasteSelectHint").textContent = `识别 ${ids.length} 个，命中 ${hit} 个（已勾选）`;
+    renderOrders();
+  };
+  $("btnClearSelected").onclick = ()=>{ UI.selected.clear(); renderOrders(); };
+
+  // link product by paste
+  $("btnLinkProduct").onclick = linkProductByPaste;
+  $("btnBatchReviewDone").onclick = batchMarkReviewDone;
+
+  // check all
+  $("chkAll").onchange = (e)=>{
+    const checked = e.target.checked;
+    // 只全选“当前页”订单（避免一键全选所有页）
+    const list = filteredOrders().slice().sort((a,b)=>{
+      const ta=(a.createdAt||0), tb=(b.createdAt||0);
+      if(tb!==ta) return tb-ta;
+      const na = Number(String(a.id||'').replace(/\D+/g,''))||0;
+      const nb = Number(String(b.id||'').replace(/\D+/g,''))||0;
+      return nb-na;
+    });
+    const total = list.length;
+    const pageSize = Number($("pageSize").value || 100);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    UI.page = Math.min(Math.max(1, UI.page), totalPages);
+    const start = (UI.page-1)*pageSize;
+    const pageList = list.slice(start, start+pageSize);
+
+    pageList.forEach(o=>{
+      if(checked) UI.selected.add(o.orderId);
+      else UI.selected.delete(o.orderId);
+    });
+    renderOrders();
+  };
+
+  // settlement buttons
+  $("btnSettlePrincipal").onclick = ()=> openSettle("PRINCIPAL");
+  $("btnSettleCommission").onclick = ()=> openSettle("COMMISSION");
+  $("btnSettleBoth").onclick = ()=> openSettle("BOTH");
+
+  // settlement modal
+  $("btnCloseSettle").onclick = closeSettle;
+  $("btnSaveSettleEdits").onclick = ()=> applySettleAmountEditsToOrders(true);
+
+  // settle meta toggle (batch info + FX)
+  const toggleMeta = ()=>{
+    const meta = $("settleMeta");
+    const btn = $("btnToggleSettleMeta");
+    if(!meta || !btn) return;
+    const isOpen = meta.style.display !== "none";
+    meta.style.display = isOpen ? "none" : "block";
+    btn.textContent = isOpen ? "展开" : "隐藏";
+  };
+  if($("btnToggleSettleMeta")) $("btnToggleSettleMeta").onclick = toggleMeta;
+
+  $("btnCancelSettle").onclick = closeSettle;
+  $("btnConfirmSettle").onclick = confirmSettle;
+  $("btnExportSettleCsv").onclick = exportCurrentSettleCsv;
+  ["fx_usd","fx_eur","fx_gbp","fx_cad","fx_jpy"].forEach(id=>{
+    $(id).addEventListener("input", syncSettleFxFromInputs);
+  });
+
+  // review modal
+  $("btnCloseReview").onclick = Actions.closeReview;
+  $("btnCancelReview").onclick = Actions.closeReview;
+  $("btnSaveReview").onclick = Actions.saveReview;
+
+  // export orders csv
+  $("btnExportOrdersCsv").onclick = exportOrdersCsv;
+
+  // pagination
+  $("pageSize").onchange = ()=>{ UI.page=1; renderOrders(); };
+  $("btnPrevPage").onclick = ()=> gotoPage(UI.page-1);
+  $("btnNextPage").onclick = ()=> gotoPage(UI.page+1);
+  $("btnGoto").onclick = ()=>{
+    const n = Number(($("gotoPage").value||"").trim());
+    if(!n) return;
+    gotoPage(n);
+  };
+
+  // focus select all for fast paste
+  ["filterSearch","pasteSelectBox","pasteLinkBox"].forEach(id=>{
+    const el = $(id); if(!el) return;
+    el.addEventListener("focus", ()=>{ try{ el.select(); }catch(e){} });
+  });
+}
+
+/* ===================== Render All ===================== */
+function renderAll(){
+  renderSelects();
+  renderSellerGrids();
+  if(!$("orderDate").value) $("orderDate").value = U.today();
+  if(!$("batchDate").value) $("batchDate").value = U.today();
+  renderKPI();
+  renderSellers();
+  renderProducts();
+  renderOrders();
+  renderBatches();
+  updateProductPreview();
+}
+
+
+/* ===================== UI Enhancements (Searchable Select + Collapse Memory) ===================== */
+function ensureWrapWithSearch(selectEl, placeholder, wrapClass){
+  if(!selectEl) return;
+  // prevent double-init per element
+  if(selectEl.dataset.searchInit==="1") return;
+  selectEl.dataset.searchInit="1";
+
+  // Create wrapper row: [input][select]
+  const wrap = document.createElement("div");
+  wrap.className = wrapClass || "";
+  wrap.style.display="flex";
+  wrap.style.gap="8px";
+  wrap.style.alignItems="center";
+  wrap.style.maxWidth="520px";
+
+  const input = document.createElement("input");
+  input.id = selectEl.id + "__search";
+  input.type="text";
+  input.className="input";
+  input.placeholder = placeholder || "搜索...";
+
+  // insert wrapper into DOM, keeping layout stable
+  const parent = selectEl.parentNode;
+  parent.insertBefore(wrap, selectEl);
+  wrap.appendChild(input);
+  wrap.appendChild(selectEl);
+
+  // Build cache from current options (excluding placeholder)
+  function buildCache(){
+    const opts = Array.from(selectEl.options||[]);
+    const placeholderOpt = (opts[0] && opts[0].value==="") ? {value:"", text:opts[0].textContent||""} : null;
+    const list = opts
+      .filter((o,i)=>!(placeholderOpt && i===0))
+      .map(o=>({value:o.value, text:o.textContent||""}));
+    selectEl._opsAllOptions = list;
+    selectEl._opsPlaceholder = placeholderOpt;
+  }
+
+  function applyFilter(){
+    const q = (input.value||"").trim().toLowerCase();
+    const all = selectEl._opsAllOptions || [];
+    const ph = selectEl._opsPlaceholder;
+    const prev = selectEl.value;
+
+    // rebuild options to guarantee filtering works across browsers
+    selectEl.innerHTML = "";
+    if(ph){
+      const o=document.createElement("option");
+      o.value=""; o.textContent=ph.text;
+      selectEl.appendChild(o);
+    }
+    const filtered = !q ? all : all.filter(x=> (x.text||"").toLowerCase().includes(q) || String(x.value||"").toLowerCase().includes(q));
+    filtered.forEach(x=>{
+      const o=document.createElement("option");
+      o.value=x.value; o.textContent=x.text;
+      selectEl.appendChild(o);
+    });
+
+    // selection policy:
+    // - if user is searching (q not empty) and there is at least one match, auto-select the first match
+    //   (without stealing focus), and trigger change so dependent fields auto-fill.
+    // - otherwise keep previous selection if still present; else blank.
+    const hasPrev = prev && Array.from(selectEl.options).some(o=>o.value===prev);
+    if(q){
+      const opts = Array.from(selectEl.options).filter(o=>o.value!=="" );
+      if(opts.length){
+        const first = opts[0].value;
+        if(selectEl.value!==first){
+          selectEl.value = first;
+          // guard against re-entrant rebuild loops
+          if(!selectEl._opsAutoSel){
+            selectEl._opsAutoSel = true;
+            try{
+              selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+            }finally{
+              setTimeout(()=>{ selectEl._opsAutoSel = false; }, 0);
+            }
+          }
+        }
+      }else{
+        selectEl.value = "";
+      }
+    }else if(hasPrev){
+      selectEl.value = prev;
+    }else{
+      selectEl.value = "";
+    }
+  }
+
+  // initial cache + filter
+  buildCache();
+  applyFilter();
+
+  input.addEventListener("input", ()=>{ applyFilter(); });
+
+  // when options are rebuilt by renderSelects/setOptions, refresh cache and re-apply current query
+  selectEl.addEventListener("ops:options-updated", ()=>{
+    buildCache();
+    applyFilter();
+  });
+}
+
+function initSearchableSelects(){
+  // 新增/编辑订单
+  ensureWrapWithSearch(document.getElementById("orderSeller"), "搜索卖家...");
+  ensureWrapWithSearch(document.getElementById("orderProduct"), "搜索产品...");
+  // 批量解析登记
+  ensureWrapWithSearch(document.getElementById("batchSeller"), "搜索卖家...");
+  ensureWrapWithSearch(document.getElementById("batchProduct"), "搜索产品...");
+  // 筛选区
+  ensureWrapWithSearch(document.getElementById("filterSeller"), "搜索卖家...");
+  // 产品页卖家
+  ensureWrapWithSearch(document.getElementById("productSeller"), "搜索卖家...");
+}
+
+function initCollapseMemory(){
+  const KEY="ops_ui_collapses_v1";
+  let saved={};
+  try{ saved = JSON.parse(localStorage.getItem(KEY)||"{}")||{}; }catch(e){ saved={}; }
+
+  const details = Array.from(document.querySelectorAll("details"));
+  details.forEach((d, idx)=>{
+    const k = d.getAttribute("data-ui") || d.id || ("d"+idx);
+    d.setAttribute("data-ui", k);
+
+    if(saved.hasOwnProperty(k)){
+      d.open = !!saved[k];
+    }
+
+    d.addEventListener("toggle", ()=>{
+      try{
+        saved[k]=!!d.open;
+        localStorage.setItem(KEY, JSON.stringify(saved));
+      }catch(e){
+        // ignore storage errors
+      }
+    });
+  });
+}
+
+
 
 /* ===================== Init ===================== */
-(async()=>{ await loadState(); renderAll(); })();
+load();
+document.addEventListener("DOMContentLoaded", ()=>{
+  bind();
+  renderTabs();
+  renderAll();
+  initCollapseMemory();
+  initSearchableSelects();
+});
 </script>
+
+<!-- Modal Overlay (for Order Edit) -->
+<div id="modalOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);">
+  <div style="background:#fff;max-width:1100px;margin:4vh auto;max-height:92vh;overflow:auto;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e5e7eb;position:sticky;top:0;background:#fff;z-index:1;">
+      <div style="font-weight:800;">编辑订单</div>
+      <button class="btn" id="btnModalClose">×</button>
+    </div>
+    <div id="modalBody" style="padding:14px 16px;"></div>
+  </div>
+</div>
+
+
+<script>
+(function(){
+  // --- Modal helpers ---
+  const overlay = document.getElementById('modalOverlay');
+  const body = document.getElementById('modalBody');
+  const btnClose = document.getElementById('btnModalClose');
+
+  let movedEl = null;
+  let restoreParent = null;
+  let restoreNext = null;
+
+  function findOrderEditDetails(){
+    const ordersTab = document.getElementById('tab-orders');
+    if(!ordersTab) return null;
+    const ds = Array.from(ordersTab.querySelectorAll('details'));
+    // pick the one whose summary contains '新建/编辑订单'
+    return ds.find(d=>{
+      const s = d.querySelector('summary');
+      return s && (s.textContent||'').includes('新建/编辑订单');
+    }) || null;
+  }
+
+  function openModal(){
+    const el = findOrderEditDetails();
+    if(!el) { alert('未找到订单编辑区域（details）'); return; }
+
+    // ensure it's open
+    try { el.open = true; } catch(e){}
+
+    // move into modal
+    if(!movedEl){
+      movedEl = el;
+      restoreParent = el.parentNode;
+      restoreNext = el.nextSibling;
+    }
+    body.innerHTML = '';
+    body.appendChild(el);
+
+    overlay.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeModal(){
+    overlay.style.display = 'none';
+    document.body.style.overflow = '';
+    // move back
+    if(movedEl && restoreParent){
+      if(restoreNext && restoreNext.parentNode === restoreParent){
+        restoreParent.insertBefore(movedEl, restoreNext);
+      }else{
+        restoreParent.appendChild(movedEl);
+      }
+    }
+  }
+
+  btnClose && (btnClose.onclick = closeModal);
+  overlay && (overlay.addEventListener('click', (e)=>{ if(e.target === overlay) closeModal(); }));
+  window.addEventListener('keydown', (e)=>{ if(e.key === 'Escape' && overlay.style.display==='block') closeModal(); });
+
+  // --- Patch Actions.editOrder to open modal after filling form ---
+  if(window.Actions && typeof window.Actions.editOrder === 'function'){
+    const _editOrder = window.Actions.editOrder.bind(window.Actions);
+    window.Actions.editOrder = function(id){
+      _editOrder(id);
+      openModal();
+    };
+  } else {
+    // Actions is defined as const in script; expose if present
+    try{
+      if(typeof Actions !== 'undefined'){
+        window.Actions = Actions;
+        const _editOrder = window.Actions.editOrder.bind(window.Actions);
+        window.Actions.editOrder = function(id){ _editOrder(id); openModal(); };
+        const _q = window.Actions.quickOrderFromProduct && window.Actions.quickOrderFromProduct.bind(window.Actions);
+        if(_q){
+          window.Actions.quickOrderFromProduct = function(pid){
+            // do not force tab switch; just prefill order form and open modal
+            try{ document.getElementById("orderProduct").value = pid; }catch(e){}
+            try{ if(typeof applyProductToOrder==="function") applyProductToOrder(); }catch(e){}
+            try{ document.getElementById("orderId").focus(); }catch(e){}
+            openModal();
+          };
+        }
+      }
+    }catch(e){}
+  }
+
+  // Ensure cancel button closes modal too
+  function hookCloseButtons(){
+    const cancelBtn = document.getElementById('btnCancelOrderEdit');
+    if(cancelBtn && !cancelBtn.__modalHooked){
+      cancelBtn.__modalHooked = true;
+      cancelBtn.addEventListener('click', ()=>{ setTimeout(closeModal, 0); });
+    }
+    const saveBtn = document.getElementById('btnSaveOrder');
+    if(saveBtn && !saveBtn.__modalHooked){
+      saveBtn.__modalHooked = true;
+      saveBtn.addEventListener('click', ()=>{ 
+        // save logic runs in existing handler; close a tick later if edit was active
+        setTimeout(()=>{
+          // if edit hint cleared or cancel button hidden, close
+          const hint = document.getElementById('orderEditHint');
+          const cancel = document.getElementById('btnCancelOrderEdit');
+          if(cancel && cancel.style.display === 'none') closeModal();
+          if(hint && (hint.textContent||'')==='') closeModal();
+        }, 50);
+      });
+    }
+  }
+  // run now and after tab switches (simple interval, lightweight)
+  hookCloseButtons();
+  setInterval(hookCloseButtons, 800);
+})();
+
+/* ================== 收款草稿箱（结算草稿） ================== */
+const SettleDrafts = (()=> {
+  const DB_NAME = "ops_v642_settle_drafts";
+  const STORE = "drafts";
+  let _db = null;
+
+  function id() { return "SD" + Date.now() + "-" + Math.floor(Math.random()*900+100); }
+  function nowISO(){ return new Date().toISOString(); }
+  function safeJsonClone(obj){
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  function openDB(){
+    return new Promise((resolve, reject)=>{
+      if(_db) return resolve(_db);
+      if(!("indexedDB" in window)) return reject(new Error("IndexedDB 不可用"));
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = (e)=>{
+        const db = req.result;
+        if(!db.objectStoreNames.contains(STORE)){
+          const os = db.createObjectStore(STORE, {keyPath:"id"});
+          os.createIndex("updatedAt","updatedAt",{unique:false});
+        }
+      };
+      req.onsuccess = ()=>{ _db=req.result; resolve(_db); };
+      req.onerror = ()=>reject(req.error||new Error("打开 IndexedDB 失败"));
+    });
+  }
+
+  async function putDraft(draft){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction(STORE,"readwrite");
+      tx.oncomplete=()=>resolve(true);
+      tx.onerror=()=>reject(tx.error||new Error("保存草稿失败"));
+      tx.objectStore(STORE).put(draft);
+    });
+  }
+  async function getDraft(id){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE,"readonly");
+      const req=tx.objectStore(STORE).get(id);
+      req.onsuccess=()=>resolve(req.result||null);
+      req.onerror=()=>reject(req.error||new Error("读取草稿失败"));
+    });
+  }
+  async function listDrafts(){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE,"readonly");
+      const os=tx.objectStore(STORE);
+      const idx=os.index("updatedAt");
+      const out=[];
+      idx.openCursor(null,"prev").onsuccess=(e)=>{
+        const cur=e.target.result;
+        if(cur){ out.push(cur.value); cur.continue(); }
+        else resolve(out);
+      };
+      tx.onerror=()=>reject(tx.error||new Error("读取草稿列表失败"));
+    });
+  }
+  async function delDraft(id){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE,"readwrite");
+      tx.oncomplete=()=>resolve(true);
+      tx.onerror=()=>reject(tx.error||new Error("删除草稿失败"));
+      tx.objectStore(STORE).delete(id);
+    });
+  }
+  async function clearAll(){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE,"readwrite");
+      tx.oncomplete=()=>resolve(true);
+      tx.onerror=()=>reject(tx.error||new Error("清空失败"));
+      tx.objectStore(STORE).clear();
+    });
+  }
+
+  function modeLabel(m){ return m==="PRINCIPAL"?"本金":m==="COMMISSION"?"佣金":"本佣一起"; }
+
+  async function saveCurrentSettleAsDraft(){
+    if(!UI.settle){ alert("请先打开结算窗口，再保存草稿。"); return; }
+    // enforce single seller already (openSettle does) but draft could be saved after
+    const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+    if(sellerIds.length>1){ alert("不同卖家的订单不能保存为同一份收款草稿。"); return; }
+    const sellerId = sellerIds[0] || "";
+    const seller = sellerId ? U.sellerById(sellerId) : null;
+
+    // sync latest inputs into UI.settle
+    UI.settle.batchId = ($("settleBatchId").value||"").trim() || UI.settle.batchId;
+    UI.settle.date = $("settleBatchDate").value || UI.settle.date;
+    UI.settle.method = ($("settleMethod").value||"").trim();
+    UI.settle.note = ($("settleNote").value||"").trim();
+    UI.settle.fx = {
+      usd: U.num($("fx_usd").value),
+      eur: U.num($("fx_eur").value),
+      gbp: U.num($("fx_gbp").value),
+      cad: U.num($("fx_cad").value),
+      jpy: U.num($("fx_jpy").value),
+    };
+
+    const totalCny = U.num(($("settleTotalTop")?.textContent||"0").replace(/[^\d\.\-]/g,""));
+    const draft = {
+      id: id(),
+      type: "SELLER_SETTLE_DRAFT",
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+      sellerId,
+      sellerName: seller ? seller.name : "",
+      mode: UI.settle.mode,
+      totalCny,
+      batchId: UI.settle.batchId,
+      settleSnapshot: safeJsonClone(UI.settle),
+    };
+
+    await putDraft(draft);
+    showNotice("已保存：收款草稿（可在「收款草稿箱」中恢复）");
+  }
+
+  function openDraftModal(){
+    $("settleDraftModal").style.display="flex";
+    renderDraftList().catch(e=>alert("草稿箱读取失败："+(e?.message||e)));
+  }
+  function closeDraftModal(){
+    $("settleDraftModal").style.display="none";
+  }
+
+  async function renderDraftList(){
+    const tbody = $("settleDraftTbody");
+    const list = await listDrafts();
+    if(!list.length){
+      tbody.innerHTML = '<tr><td colspan="7" class="muted" style="padding:16px">暂无草稿</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(d=>{
+      const t = d.updatedAt ? d.updatedAt.replace("T"," ").slice(0,19) : "";
+      const seller = d.sellerName || d.sellerId || "-";
+      const mode = modeLabel(d.mode);
+      const cnt = d.settleSnapshot?.orderIds?.length || 0;
+      const total = (d.totalCny==null?0:d.totalCny).toFixed(2);
+      const bid = d.batchId || (d.settleSnapshot?.batchId||"");
+      return `<tr>
+        <td>${escHtml(t)}</td>
+        <td>${escHtml(seller)}</td>
+        <td>${escHtml(mode)}</td>
+        <td>${cnt}</td>
+        <td style="text-align:right">${total}</td>
+        <td>${escHtml(bid)}</td>
+        <td>
+          <button class="btn small" data-act="open" data-id="${d.id}">打开结算</button>
+          <button class="btn small" data-act="export" data-id="${d.id}">导出</button>
+          <button class="btn small danger" data-act="del" data-id="${d.id}">删除</button>
+        </td>
+      </tr>`;
+    }).join("");
+  }
+
+  async function openDraft(id){
+    window.__settleDraftOpenedId = id;
+    const d = await getDraft(id);
+    if(!d || !d.settleSnapshot){ alert("草稿不存在或已损坏"); return; }
+    const snap = d.settleSnapshot;
+
+    // restore selection
+    UI.selected = new Set(snap.orderIds || []);
+    renderOrders(); // refresh checkbox state + chips
+
+    // open settle in same mode then apply snapshot
+    openSettle(snap.mode || "BOTH");
+    applySettleSnapshot(snap);
+    closeDraftModal();
+    showNotice("已恢复草稿：结算窗口已打开。");
+  }
+
+  function applySettleSnapshot(snap){
+    // deep clone into UI.settle to avoid accidental ref
+    UI.settle = JSON.parse(JSON.stringify(snap));
+
+    $("settleTitle").textContent = (UI.settle.mode==="PRINCIPAL" ? "批量结算：本金" : UI.settle.mode==="COMMISSION" ? "批量结算：佣金" : "批量结算：本佣一起");
+    $("settleBatchId").value = UI.settle.batchId || "";
+    $("settleBatchDate").value = UI.settle.date || U.today();
+    $("settleMethod").value = UI.settle.method || "";
+    $("settleNote").value = UI.settle.note || "";
+    $("fx_usd").value = U.num(UI.settle.fx?.usd||0);
+    $("fx_eur").value = U.num(UI.settle.fx?.eur||0);
+    $("fx_gbp").value = U.num(UI.settle.fx?.gbp||0);
+    $("fx_cad").value = U.num(UI.settle.fx?.cad||0);
+    $("fx_jpy").value = U.num(UI.settle.fx?.jpy||0);
+
+    // ensure edits entries exist
+    (UI.settle.orderIds||[]).forEach(oid=>{
+      if(!UI.settle.edits) UI.settle.edits = {};
+      if(!UI.settle.edits[oid]) UI.settle.edits[oid] = {p:null,c:null,amount:null,discount:null,buyerCommission:null};
+    });
+
+    renderSettleRows();
+  }
+
+  async function exportDraft(id){
+    const d = await getDraft(id);
+    if(!d){ showNotice("草稿不存在"); return; }
+    const snap = d.settleSnapshot || {};
+    const orderIds = (snap.orderIds || []).slice();
+    const fxMap = snap.fxMap || snap.fxByMarket || {};
+    const edits = snap.edits || {};
+    const batchId = d.batchId || snap.batchId || "";
+    const sellerName = d.sellerName || snap.sellerName || "";
+    const mode = d.mode || snap.mode || "";
+    const createdAt = d.createdAt || "";
+    const rows = [];
+    rows.push([
+      "batch_id","created_at","seller","mode",
+      "order_id","market",
+      "amount","discount","buyer_commission",
+      "fx","principal_cny","commission_cny",
+      "principal_settle_cny","commission_settle_cny"
+    ]);
+    orderIds.forEach(oid=>{
+      const o = (S.orders||[]).find(x=>x.order_id===oid);
+      const market = (o && (o.market || o.country)) || "";
+      const fx = num(fxMap[market] ?? fxMap[(market||"").toUpperCase()] ?? 0);
+      const e = edits[oid] || {};
+      const amount = num(e.amount ?? o?.amount ?? o?.order_amount ?? 0);
+      const discount = num(e.discount ?? o?.discount ?? 0);
+      const bc = num(e.buyerCommission ?? e.buyer_commission ?? o?.buyer_commission ?? o?.buyerCommission ?? 0);
+      const principal_cny = (amount - discount) * fx;
+      const commission_cny = bc * fx;
+      const principal_settle = num(e.principal_settle_cny ?? e.principalSettleCny ?? 0);
+      const commission_settle = num(e.commission_settle_cny ?? e.commissionSettleCny ?? 0);
+      rows.push([
+        batchId,createdAt,sellerName,mode,
+        oid,market,
+        amount,discount,bc,
+        fx,round2(principal_cny),round2(commission_cny),
+        principal_settle,commission_settle
+      ]);
+    });
+    const csv = rows.map(r=>r.map(U.csvEscape).join(",")).join("\n");
+    U.download(`settle_draft_${batchId||id}.csv`, csv, "text/csv;charset=utf-8");
+    showNotice("已导出CSV");
+  }
+
+  async function importDraftFromFile(file){
+    const txt = await file.text();
+    const obj = JSON.parse(txt);
+    if(!obj || !obj.id || !obj.settleSnapshot){ throw new Error("JSON 格式不正确"); }
+    obj.updatedAt = nowISO();
+    await putDraft(obj);
+  }
+
+  function bind(){
+    // Order list toolbar entry
+    const btn = $("btnSettleDrafts");
+    if(btn) btn.onclick = ()=>openDraftModal();
+
+    // Settle modal save draft
+    const saveBtn = $("btnSaveSettleDraft");
+    if(saveBtn) saveBtn.onclick = ()=>saveCurrentSettleAsDraft().catch(e=>alert("保存草稿失败："+(e?.message||e)));
+
+    // Draft modal
+    $("btnCloseSettleDraftModal").onclick = closeDraftModal;
+    $("btnClearSettleDrafts").onclick = async ()=>{
+      if(!confirm("确认清空草稿箱？此操作不可恢复")) return;
+      try{ await clearAll(); await renderDraftList(); showNotice("已清空草稿箱"); }catch(e){ alert("清空失败："+(e?.message||e)); }
+    };
+    $("btnExportSettleDraftListCSV").onclick = async ()=>{
+      try{ await exportSettleDraftListCSV(); }catch(e){ alert("导出失败："+(e?.message||e)); }
+    };
+    $("btnExportAllSettleDraftDetailsCSV").onclick = async ()=>{
+      try{ await exportAllSettleDraftDetailsCSV(); }catch(e){ alert("导出失败："+(e?.message||e)); }
+    };
+    $("btnImportSettleDraftJson").onclick = ()=>$("fileImportSettleDraft").click();
+    $("fileImportSettleDraft").addEventListener("change", async (e)=>{
+      const f=e.target.files?.[0]; if(!f) return;
+      try{ await importDraftFromFile(f); await renderDraftList(); showNotice("已导入草稿"); }
+      catch(err){ alert("导入失败："+(err?.message||err)); }
+      finally{ e.target.value=""; }
+    });
+
+    $("settleDraftTbody").addEventListener("click", async (e)=>{
+      const b = e.target.closest("button"); if(!b) return;
+      const act=b.dataset.act, id=b.dataset.id;
+      try{
+        if(act==="open") await openDraft(id);
+        else if(act==="export") await exportDraft(id);
+        else if(act==="del"){
+          if(!confirm("确认删除该草稿？")) return;
+          await delDraft(id); await renderDraftList();
+        }
+      }catch(err){
+        alert("操作失败："+(err?.message||err));
+      }
+    });
+
+    // ESC close modal
+    document.addEventListener("keydown", (e)=>{
+      if(e.key==="Escape"||e.key==="Esc"){
+        if($("settleDraftModal").style.display==="flex") closeDraftModal();
+      }
+    });
+  }
+
+  return { bind, openDraftModal, saveCurrentSettleAsDraft };
+
+  // expose minimal API for other modules (e.g. 结算确认后自动删除草稿)
+  window.__settleDrafts = window.__settleDrafts || {};
+  window.__settleDrafts.del = async (id)=>{ await idbDel(DRAFTS_STORE, id); };
+  window.__settleDrafts.refreshOpen = async ()=>{
+    const modal = qs('#dlgSettleDrafts');
+    if(modal && modal.style.display==='flex'){
+      try{ await renderDrafts(); }catch(e){}
+    }
+  };
+})();
+
+try{ SettleDrafts.bind(); }catch(e){ console.warn("SettleDrafts init failed", e); }
+
+</script>
+
+
+<!-- Delete confirm modal (safer delete) -->
+<div class="modal" id="delModal" style="display:none;z-index:9999">
+  <div class="modal-card" style="max-width:520px">
+    <div class="modal-head">
+      <div class="modal-title">确认删除</div>
+      <button class="btn" id="delCloseBtn">关闭</button>
+    </div>
+    <div class="small" style="margin-top:8px;line-height:1.6">
+      该操作不可恢复。为避免误删，请勾选确认后再删除。
+    </div>
+    <div style="margin-top:12px;border:1px solid var(--border);border-radius:12px;padding:10px;background:var(--soft)">
+      <div class="row" style="align-items:flex-start">
+        <input type="checkbox" id="delAck" style="width:16px;height:16px;margin-top:2px"/>
+        <label for="delAck" style="color:var(--text);font-size:13px">我确认要删除该订单（不可恢复）</label>
+      </div>
+      <div class="small" id="delInfo" style="margin-top:8px;color:var(--muted)"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="delCancelBtn">取消</button>
+      <button class="btn danger" id="delOkBtn" disabled>确认删除</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
+  .btn.sm{padding:6px 10px;font-size:12px;border-radius:10px;}
+  .btn.sm svg{width:14px;height:14px;}
+
