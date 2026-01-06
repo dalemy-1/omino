@@ -213,17 +213,31 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
 
 /* ===== Payout modal compact table (scoped) ===== */
 #payoutModal .payout-modal-table{font-size:12px; line-height:1.25; table-layout:fixed;}
+#payoutModal .payout-modal-table th, #payoutModal .payout-modal-table td{padding:6px 6px;}
+#payoutModal .payout-modal-table th:nth-child(1), #payoutModal .payout-modal-table td:nth-child(1){width:150px;}
+#payoutModal .payout-modal-table th:nth-child(2), #payoutModal .payout-modal-table td:nth-child(2){width:110px;}
+#payoutModal .payout-modal-table th:nth-child(3), #payoutModal .payout-modal-table td:nth-child(3){width:90px;}
+#payoutModal .payout-modal-table th:nth-child(4), #payoutModal .payout-modal-table td:nth-child(4){width:70px;}
+#payoutModal .payout-modal-table th:nth-child(5), #payoutModal .payout-modal-table td:nth-child(5){width:50px;}
+#payoutModal .payout-modal-table th:nth-child(6), #payoutModal .payout-modal-table td:nth-child(6){width:78px;}
+#payoutModal .payout-modal-table th:nth-child(7), #payoutModal .payout-modal-table td:nth-child(7){width:70px;}
+#payoutModal .payout-modal-table th:nth-child(8), #payoutModal .payout-modal-table td:nth-child(8){width:84px;}
+#payoutModal .payout-modal-table th:nth-child(9), #payoutModal .payout-modal-table td:nth-child(9){width:54px;}
+#payoutModal .payout-modal-table th:nth-child(10), #payoutModal .payout-modal-table td:nth-child(10){width:92px;}
+#payoutModal .payout-modal-table th:nth-child(11), #payoutModal .payout-modal-table td:nth-child(11){width:80px;}
+#payoutModal .payout-modal-table th:nth-child(12), #payoutModal .payout-modal-table td:nth-child(12){width:96px;}
+#payoutModal .payout-modal-table td .mono{font-size:12px;}
 #payoutModal .payout-modal-table th, #payoutModal .payout-modal-table td{padding:6px 8px; vertical-align:top;}
 #payoutModal .payout-modal-table .wrap{white-space:normal; word-break:break-word;}
 #payoutModal .payout-modal-table input{width:100%; font-size:12px; padding:6px 8px;}
 #payoutModal .payout-modal-table th{position:sticky; top:0; background:#fff; z-index:2;}
-#payoutModal .payout-modal-table-wrap{min-width:1280px;}
+#payoutModal .payout-modal-table-wrap{min-width:0; width:100%;}
 #payoutModal .col-hide{display:none!important;}
 #payoutModal td.copyable{user-select:all;}
 
 
 /* --- payout modal density (only affects payout modal) --- */
-#payoutModal .box{ max-width: 1200px; }
+#payoutModal .box{ max-width: 96vw; width:96vw; }
 #payoutModal .modal-title{ font-size:14px; }
 #payoutModal .card{ padding:10px !important; }
 #payoutModal .payout-modal-table th,
@@ -286,6 +300,17 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
 .payout-modal-table .clip4l{ max-width:72px; }
 .payout-modal-table .clip4{ max-width:56px; }
 .payout-modal-table input{ height:28px; padding:4px 6px; font-size:12px; }
+
+
+/* === Payout modal density & width tweaks (payout-only) === */
+#payoutModal .modal-content{max-width:1400px !important; width:96vw !important; padding-left:14px; padding-right:14px;}
+#payoutModal .modal-header{padding-bottom:8px;}
+#payoutModal .modal-content .card{margin-top:8px;}
+#payoutModal table{table-layout:fixed;}
+#payoutModal th,#payoutModal td{padding:6px 6px; font-size:12px; line-height:1.15;}
+#payoutModal input[type="number"]{height:30px; padding:4px 8px; font-size:12px;}
+#payoutModal .payout-col-prod,#payoutModal .payout-col-seller,#payoutModal .payout-col-review{max-width:72px; width:72px;}
+#payoutModal .payout-col-prod .ellipsis,#payoutModal .payout-col-seller .ellipsis,#payoutModal .payout-col-review .ellipsis{display:block; max-width:72px;}
 
 </style>
 <style>
@@ -761,7 +786,7 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
 
   <!-- 返款弹窗（布局参考收款结算） -->
   <div class="modal" id="payoutModal" style="display:none">
-    <div class="modal-content" style="max-width:1100px">
+    <div class="modal-content" style="max-width:96vw; width:96vw; max-width:1400px">
       <div class="modal-header">
         <div>
           <div class="modal-title">批量返款（确认后生成批次并标记已返款）</div>
@@ -892,10 +917,11 @@ td.action-col .btn.danger:hover{background:#ffe4e6}
         <table>
           <thead>
             <tr>
-              <th>订单号</th><th>Market</th>
-              <th class="right">金额(原币)</th><th class="right">折扣(原币)</th><th class="right">买手佣金(原币)</th><th class="right">本金(原币)</th><th class="right">FX</th>
-              <th class="right">本金应付(CNY)</th><th class="right">本金本次结算(CNY)</th>
-              <th class="right">佣金应付(CNY)</th><th class="right">佣金本次结算(CNY)</th>
+              <th>订单号</th><th>Market</th><th>产品</th><th>ASIN</th>
+              <th class="right">金额(原币)</th><th class="right">折扣(原币)</th><th class="right">买手佣金(原币)</th><th class="right">FX</th>
+              <th class="right">本金结算(CNY)</th>
+              <th class="right">佣金本次结算(CNY)</th>
+              <th class="right">=本佣(CNY)</th>
             </tr>
           </thead>
           <tbody id="settleRows"></tbody>
@@ -1037,6 +1063,7 @@ const REVIEW_TYPES = [
   {k:"FREE",    n:"免评"},
   {k:"FREE_FB", n:"免评FB"},
   {k:"STAR",    n:"免评点星"},
+  {k:"UNABLE",  n:"无法上评"},
 ];
 const FX_MARKETS = ["US","UK","DE","FR","IT","ES","CA","JP"];
 
@@ -1980,6 +2007,11 @@ function getRowTotalCNY(o){
 }
 function commissionShould(order){
   // 佣金按“回评登记弹窗”的 doneType；如果为空：按产品/订单要求；如果无产品：文字评
+  // 特例：无法上评（UNABLE）不收佣也不返佣
+  try{
+    const dt = String(order?.review?.doneType || "").trim();
+    if(dt === "UNABLE" || dt === "无法上评") return 0;
+  }catch(e){}
   const seller = U.sellerById(order.sellerId);
   if(!seller) return 0;
   let t = (order.review.doneType || "").trim();
@@ -2601,7 +2633,8 @@ const Actions = {
     const o = S.orders.find(x=>x.id===id); if(!o) return;
     UI.reviewOrderId = id;
     $("rv_order").value = o.orderId;
-    $("rv_status").value = o.review.status || "DONE";
+    const curRvStatus = o.review.status || "PENDING";
+      $("rv_status").value = (curRvStatus === "PENDING" || curRvStatus === "") ? "DONE" : curRvStatus;
     $("rv_date").value = o.review.date || U.today();
     $("rv_link").value = o.review.link || "";
     $("rv_note").value = o.review.note || "";
@@ -3078,10 +3111,14 @@ function renderSettleRows(){
 
   const mode = UI.settle.mode;
   let total = 0;
+  const productById = new Map((S.products||[]).map(p=>[p.id,p]));
 
   const rows = UI.settle.orderIds.map(oid=>{
     const o = S.orders.find(x=>x.orderId===oid);
     if(!o) return "";
+    const p = productById.get(o.productId);
+    const pName = (p && p.name) ? p.name : (o.productName || o.product || "-");
+    const pAsin = (p && p.asin) ? p.asin : (o.asin || "-");
     const fx = effectiveFx(o, UI.settle.fx);
     const editedAmt = (UI.settle.edits[oid] && UI.settle.edits[oid].amount!=null) ? U.num(UI.settle.edits[oid].amount) : null;
     const amount = editedAmt!=null ? editedAmt : U.num(o.amount);
@@ -3108,12 +3145,12 @@ function renderSettleRows(){
     return `<tr>
       <td class="mono">${esc(o.orderId)}</td>
       <td>${esc(o.market)}</td>
+      <td class="ellipsis" title="${esc(pName)}">${esc(pName)}</td>
+      <td class="mono">${esc(pAsin)}</td>
       <td class="right"><input data-oid="${esc(oid)}" data-k="amount" type="number" step="0.01" value="${esc(U.money(amount))}" style="max-width:120px"/></td>
       <td class="right"><input data-oid="${esc(oid)}" data-k="discount" type="number" step="0.01" value="${esc(U.money(discount))}" style="max-width:110px"/></td>
       <td class="right"><input data-oid="${esc(oid)}" data-k="buyerCommission" type="number" step="0.01" value="${esc(U.money(buyerCommission))}" style="max-width:110px"/></td>
-      <td class="right">${esc(U.money(pOrig))}</td>
       <td class="right">${esc(fx)}</td>
-      <td class="right">${esc(U.money(pShould))}</td>
       <td class="right">
         <input data-oid="${esc(oid)}" data-k="p" type="number" step="0.01" value="${U.money(pVal)}" ${pEditable?"":"disabled"} style="max-width:140px"/>
       </td>
@@ -3121,10 +3158,11 @@ function renderSettleRows(){
       <td class="right">
         <input data-oid="${esc(oid)}" data-k="c" type="number" step="0.01" value="${U.money(cVal)}" ${cEditable?"":"disabled"} style="max-width:140px"/>
       </td>
+      <td class="right mono">= ${esc(U.money(pVal + cVal))}</td>
     </tr>`;
   }).join("");
 
-  $("settleRows").innerHTML = rows || `<tr><td colspan="11" class="small">无可结算订单</td></tr>`;
+  $("settleRows").innerHTML = rows || `<tr><td colspan="10" class="small">无可结算订单</td></tr>`;
   $("settleTotal").textContent = U.money(total);
   if($("settleTotalTop")) $("settleTotalTop").textContent = U.money(total);
 
@@ -3648,6 +3686,11 @@ function calcPrincipalCNY(order, fxObj){
 }
 
 function getCommissionCNY(order){
+  try{
+    const dt = order?.review?.doneType || order?.review_done_type || "";
+    if(dt === "UNABLE" || dt === "无法上评") return 0;
+  }catch(e){}
+
   // 返款的“佣金(CNY)”：优先用订单/批次编辑后的值，其次用默认设置 payoutCommDefault，
   // 若默认留空则按卖家回评类型佣金（commissionShould）回退。
   try{
@@ -3678,11 +3721,11 @@ function payoutSellerName2(o){
 }
 function payoutProductName(order){
   if(!order) return "";
-  // 1) 订单自身可能已有字段
-  const direct = order.productName || order.title || order.name || "";
+  // 1) 订单自身可能已有字段（不同版本字段名兼容）
+  const direct = order.productName || order.product_title || order.productTitle || order.product_name || order.itemName || order.title || order.name || "";
   // 2) productId 反查
   const p = order.productId ? U.productById(order.productId) : null;
-  const name = (p && (p.name||p.productName)) || direct || "";
+  const name = (p && (p.name||p.productName||p.title||p.product_title)) || direct || "";
   return name;
 }
 function payoutReviewType(order){
@@ -3729,7 +3772,11 @@ function payoutFilteredOrders(){
   const sellerId = $("payoutSellerFilter")?.value || "";
   const st = $("payoutStatusFilter")?.value || "";
   const mk = $("payoutMarketFilter")?.value || "";
-  const q = ($("payoutSearch")?.value || "").trim().toLowerCase();
+  const rawQ = ($("payoutSearch")?.value || "").trim();
+  const m19 = rawQ.match(/\d{3}-\d{7}-\d{7}/);
+  const q19 = m19 ? m19[0] : "";
+  const q = (q19 || rawQ).trim().toLowerCase();
+  if(q19 && rawQ !== q19 && $("payoutSearch")){ $("payoutSearch").value = q19; }
 
   let list = (S.orders||[]).filter(o=>{
     // 返款池：仅 DONE 可返（按你确认的阶段）
@@ -3784,7 +3831,7 @@ function renderPayout(){
     const checked = UI.payoutSelected.has(o.id) ? "checked" : "";
     const ps = getPayoutStatus(o);
     const psText = ps==="paid" ? "已返款" : "已回评待打款";
-    const commCny = (S.settings.payoutCommDefault!=null) ? U.num(S.settings.payoutCommDefault) : commissionShould(o);
+    const commCny = getCommissionCNY(o);
     return `<tr>
       <td><input type="checkbox" data-payout-sel="${U.esc(o.id)}" ${checked}/></td>
       <td class="mono"><span class="copy-order" data-copy="${U.esc(o.orderId||"")}">${U.esc(o.orderId||"")}</span></td>
@@ -3923,8 +3970,42 @@ function payoutParseAndSelect(){
 }
 
 function payoutParseMarkDone(){
-  alert("该功能建议在“订单”页执行回评标记，以保持流程一致。本页面仅新增返款模块。");
-  // 不做自动标记，避免影响原有逻辑
+  // 解析粘贴框中的订单号（支持整行文本），将命中的订单快速标记为已回评 DONE
+  // 仅影响本地数据（S.orders），不会触碰其它模块结构
+  const box = $("payoutPaste");
+  const raw = box ? (box.value||"") : "";
+  const ids = U.extractOrderIds(raw);
+  if(!ids.length){
+    alert("未识别到订单号（请粘贴包含 111-2222222-3333333 的文本，每行一个或混合文本）。");
+    return;
+  }
+  let changed = 0;
+  const today = new Date();
+  const y = today.getFullYear();
+  const m = String(today.getMonth()+1).padStart(2,'0');
+  const d = String(today.getDate()).padStart(2,'0');
+  const doneDate = `${y}/${m}/${d}`;
+  (S.orders||[]).forEach(o=>{
+    const oid = String(o?.id||"");
+    const ono = String(o?.orderNo||o?.order_no||o?.order_id||"");
+    if(ids.includes(oid) || (ono && ids.includes(ono))){
+      // 兼容旧结构：review/status/doneType
+      if(!o.review) o.review = {};
+      o.review.status = "DONE";
+      // doneType 若已存在则保留，否则给一个默认“自动”
+      if(!o.review.doneType) o.review.doneType = "自动";
+      if(!o.review.doneDate) o.review.doneDate = doneDate;
+      changed++;
+    }
+  });
+  if(changed===0){
+    alert(`识别 ${ids.length} 个订单号，但未命中任何订单。`);
+    return;
+  }
+  // 持久化（复用系统已有保存）
+  try{ saveState(); }catch(e){}
+  alert(`已标记 DONE：${changed} 单`);
+  renderAll();
 }
 
 function openPayoutModal(){
@@ -4120,6 +4201,22 @@ function payoutModalRecalcRow(tr){
   tr.querySelector('[data-v="fx"]').textContent = fxv.toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
   tr.querySelector('[data-v="principalCny"]').textContent = principalCny.toFixed(2);
 
+  // 无法上评：不收佣也不返佣（佣金相关输入锁定为 0）
+  try{
+    const dt = String(order?.review?.doneType||"").trim();
+    if(dt==="UNABLE" || dt==="无法上评"){
+      const commCnyEl = tr.querySelector('input[data-f="commCny"]');
+      const commPayEl = tr.querySelector('input[data-f="commPay"]');
+      if(commCnyEl){ commCnyEl.value = "0.00"; commCnyEl.disabled = true; }
+      if(commPayEl){ commPayEl.value = "0.00"; commPayEl.disabled = true; }
+    }else{
+      const commCnyEl = tr.querySelector('input[data-f="commCny"]');
+      const commPayEl = tr.querySelector('input[data-f="commPay"]');
+      if(commCnyEl) commCnyEl.disabled = false;
+      if(commPayEl) commPayEl.disabled = false;
+    }
+  }catch(e){}
+
   payoutModalRecalcTotal();
   payoutModalRunPrecheck();
 }
@@ -4262,8 +4359,16 @@ function collectPayoutModalLines(){
     const principalCny = U.num(tr.querySelector('[data-v="principalCny"]').textContent);
 
     const principalPayCny = U.num(tr.querySelector('input[data-f="principalPay"]').value);
-    const commShouldCny = U.num(tr.querySelector('input[data-f="commCny"]').value);
-    const commPayCny = U.num(tr.querySelector('input[data-f="commPay"]').value);
+    let commShouldCny = U.num(tr.querySelector('input[data-f="commCny"]').value);
+    let commPayCny = U.num(tr.querySelector('input[data-f="commPay"]').value);
+    // 无法上评：不收佣也不返佣（强制佣金=0，避免被默认佣金覆盖）
+    try{
+      const dt = String(o?.review?.doneType||"").trim();
+      if(dt==="UNABLE" || dt==="无法上评"){
+        commShouldCny = 0;
+        commPayCny = 0;
+      }
+    }catch(e){}
     const totalPayCny = principalPayCny + commPayCny;
 
     lines.push({
@@ -5133,6 +5238,15 @@ function ensurePayoutSingleModal(){
 
   $("payoutSingleClose").onclick = ()=>{ $("payoutSingleModal").style.display="none"; };
   $("payoutSingleCalc").onclick = ()=>{ payoutSingleRecalc(); };
+  // 自动计算：修改任意字段立即更新合计（无需点“重新计算”）
+  ["payoutSingleAmount","payoutSingleDiscount","payoutSingleBuyerFee","payoutSingleFx","payoutSingleCommCny"].forEach(id=>{
+    const el = $(id);
+    if(!el) return;
+    el.oninput = ()=>{ payoutSingleRecalc(); };
+    el.onchange = ()=>{ payoutSingleRecalc(); };
+  });
+  // “重新计算”按钮保留兜底，但默认弱化
+  $("payoutSingleCalc").style.opacity = 0.6;
   $("payoutSingleConfirm").onclick = ()=>{ payoutSingleConfirm(); };
 }
 
@@ -5239,8 +5353,9 @@ function openSinglePayoutModal(orderUuid){
 
     const fx = payoutFxFor(o.currency||"", o.market||"");
     $("payoutSingleFx").value = U.num(fx).toFixed(4).replace(/0+$/,"").replace(/\.$/,"");
-    const commCny = (S.settings.payoutCommDefault!=null) ? U.num(S.settings.payoutCommDefault) : commissionShould(o);
+    const commCny = getCommissionCNY(o);
     $("payoutSingleCommCny").value = U.num(commCny).toFixed(2);
+    try{ $("payoutSingleCommCny").disabled = (String(o?.review?.doneType||"").trim()==="UNABLE"); }catch(e){}
 
     payoutSingleRecalc();
     ["payoutSingleAmount","payoutSingleDiscount","payoutSingleBuyerFee","payoutSingleFx","payoutSingleCommCny"].forEach(id=>{ const el=$(id); if(el) el.oninput = payoutSingleRecalc; });
