@@ -542,7 +542,7 @@ function getCloudClientOrNull(){
   }
 
   // Supabase client 单例（避免同一页面多次创建 GoTrueClient 导致警告/潜在不确定行为）
-  // 仅用于 ops_snapshots 快照读写，不需要 Auth 会话。
+  // 仅用于 ops_cloud_snapshots_v1 快照读写，不需要 Auth 会话。
   const key = (cfg.url || "") + "||" + (cfg.anon || "");
   if(!window.__OPS_SB_CLIENT__ || window.__OPS_SB_CLIENT_KEY__ !== key){
     try{
@@ -829,7 +829,7 @@ async function cloudStatus(){
   }
   const { client } = sb;
   try{
-    const { data, error } = await client.from("ops_snapshots").select("app_key,hash,updated_at,created_at,payload").eq("app_key", cfg.appKey).maybeSingle();
+    const { data, error } = await client.from("ops_cloud_snapshots_v1").select("app_key,hash,updated_at,created_at,payload").eq("app_key", cfg.appKey).maybeSingle();
     if(error) throw error;
     if(!data){
       alert("云端暂无快照（app_key=" + cfg.appKey + "）。");
@@ -885,7 +885,7 @@ async function cloudPush(opts){
     // Step 1: pull cloud snapshot (best-effort)
     let cloud = null;
     try{
-      const { data: row, error: e } = await client.from("ops_snapshots")
+      const { data: row, error: e } = await client.from("ops_cloud_snapshots_v1")
         .select("app_key,hash,payload,counts,updated_at,created_at")
         .eq("app_key", cfg.appKey).maybeSingle();
       if(e) throw e;
@@ -919,7 +919,7 @@ async function cloudPush(opts){
       updated_at: nowIso
     };
 
-    const { error } = await client.from("ops_snapshots").upsert(row, { onConflict: "app_key" });
+    const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict: "app_key" });
     if(error) throw error;
 
     console.log(`[PUSH] 推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${mergedHash}，local_src=${local.source}）`);
@@ -945,7 +945,7 @@ async function cloudPull(){
     toast("云端拉取中…");
 
     const { data, error } = await client
-      .from("ops_snapshots")
+      .from("ops_cloud_snapshots_v1")
       .select("payload,hash,updated_at,created_at,app_key")
       .eq("app_key", cfg.appKey)
       .maybeSingle();
@@ -8239,7 +8239,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     if(!wrap) return;
     const { client, cfg } = wrap;
     try{
-      const { data, error } = await client.from("ops_snapshots")
+      const { data, error } = await client.from("ops_cloud_snapshots_v1")
         .select("payload,hash,updated_at,created_at")
         .eq("app_key", cfg.appKey)
         .maybeSingle();
@@ -8276,13 +8276,13 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     const hash = String(Date.now());
     const row = { app_key: cfg.appKey, payload, hash, updated_at: new Date().toISOString() };
     try{
-      const { error } = await client.from("ops_snapshots").upsert(row, { onConflict:"app_key" });
+      const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
       if(error) throw error;
 
       // history copy (best effort)
       try{
         const histKey = cfg.appKey + "__H__" + new Date().toISOString().replace(/[:.]/g,"-");
-        await client.from("ops_snapshots").insert({ app_key: histKey, payload, hash, updated_at: row.updated_at });
+        await client.from("ops_cloud_snapshots_v1").insert({ app_key: histKey, payload, hash, updated_at: row.updated_at });
       }catch(_e){}
 
       toast("云端推送成功：卖家"+c.sellers+" 产品"+c.products+" 订单"+c.orders+" 批次"+c.batches+"（hash="+hash+"）");
@@ -8296,7 +8296,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     if(!wrap) return;
     const { client, cfg } = wrap;
     try{
-      const { data, error } = await client.from("ops_snapshots")
+      const { data, error } = await client.from("ops_cloud_snapshots_v1")
         .select("payload,hash,updated_at,created_at")
         .eq("app_key", cfg.appKey)
         .maybeSingle();
@@ -8542,7 +8542,7 @@ function syncMainStateFromDOM(){
       return;
     }
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data){
         alert("云端暂无快照（app_key="+cfg.app_key+"）。");
@@ -8594,7 +8594,7 @@ function syncMainStateFromDOM(){
       // hash: reuse existing simple hash if present
       const hash = String(Date.now());
       const row = { app_key: cfg.app_key, payload: payloadStr, hash };
-      const { error } = await client.from("ops_snapshots").upsert(row, { onConflict:"app_key" });
+      const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
       if(error) throw error;
       toast(`云端推送成功：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${hash}）`);
     }catch(e){
@@ -8611,7 +8611,7 @@ function syncMainStateFromDOM(){
       return;
     }
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
       let p = null;
@@ -8717,7 +8717,7 @@ function syncMainStateFromDOM(){
   }
 
   async function _decodePayload(payloadField){
-    // payloadField is whatever stored in ops_snapshots.payload (string)
+    // payloadField is whatever stored in ops_cloud_snapshots_v1.payload (string)
     if(!payloadField) return null;
     let env = null;
     try{ env = JSON.parse(payloadField); }catch(_e){ env = null; }
@@ -8771,7 +8771,7 @@ function syncMainStateFromDOM(){
 
     // Remote
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data){
         alert(
@@ -8821,7 +8821,7 @@ function syncMainStateFromDOM(){
       const pack = await _encodePayload(ns);
       const hash = String(Date.now());
       const row = { app_key: cfg.app_key, payload: JSON.stringify(pack.env), hash };
-      const { error } = await client.from("ops_snapshots").upsert(row, { onConflict:"app_key" });
+      const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
       if(error) throw error;
 
       toast(`云端推送成功：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${hash}）`);
@@ -8837,7 +8837,7 @@ function syncMainStateFromDOM(){
     if(!cfg || !cfg.app_key){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
 
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
@@ -9190,7 +9190,7 @@ What V30 does:
     var lc = { sellers: pickCount(ln.sellers), products: pickCount(ln.products), orders: pickCount(ln.orders), batches: pickCount(ln.batches) };
 
     try{
-      var res = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      var res = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(res.error) throw res.error;
       if(!res.data){
         alert("云端暂无快照（app_key="+cfg.app_key+"）。\n\n本地数据源："+loc.src+"\n本地内容统计：卖家"+lc.sellers+" 产品"+lc.products+" 订单"+lc.orders+" 批次"+lc.batches);
@@ -9234,7 +9234,7 @@ What V30 does:
       var env = await encodePayload(loc.state || {});
       var hash = String(Date.now());
       var row = { app_key: cfg.app_key, payload: JSON.stringify(env), hash: hash };
-      var up = await client.from("ops_snapshots").upsert(row, { onConflict:"app_key" });
+      var up = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
       if(up.error) throw up.error;
       toastSafe("云端推送成功：卖家"+sc+" 产品"+pc+" 订单"+oc+" 批次"+bc+"（hash="+hash+"）");
     }catch(e){
@@ -9249,7 +9249,7 @@ What V30 does:
     if(!cfg || !cfg.app_key){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
 
     try{
-      var res = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      var res = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(res.error) throw res.error;
       if(!res.data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
@@ -9584,7 +9584,7 @@ async function cloudStatusFixed(){
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
     const { client: sb, cfg } = cloud;
     try{
-      const { data, error } = await sb.from('ops_snapshots').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
+      const { data, error } = await sb.from('ops_cloud_snapshots_v1').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data) return alert('云端无快照（该 app_key 尚未推送过）。');
       const payload = data.payload || {};
@@ -9623,7 +9623,7 @@ async function cloudStatusFixed(){
     const payload = { v:1, state: local.data || {}, meta:{ source: local.source || 'unknown', pushed_at: new Date().toISOString() } };
 
     try{
-      const { error } = await sb.from('ops_snapshots').upsert(
+      const { error } = await sb.from('ops_cloud_snapshots_v1').upsert(
         { app_key: cfg.app_key, hash, payload },
         { onConflict:'app_key' }
       );
@@ -9644,7 +9644,7 @@ async function cloudStatusFixed(){
     const { client: sb, cfg } = cloud;
 
     try{
-      const { data, error } = await sb.from('ops_snapshots').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
+      const { data, error } = await sb.from('ops_cloud_snapshots_v1').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data) return alert('云端无快照（该 app_key 尚未推送过）。');
       const payload = data.payload || {};
@@ -9697,7 +9697,7 @@ async function cloudStatusFixed(){
 /* ===================== CLOUD_FINAL_BIND (force fixed datasource + capture click) =====================
 Goal:
 - No matter how many legacy scripts rebind onclick (V23/V25/V30/...), cloud buttons always use ONE logic:
-  Read IndexedDB main DB (ops_v642_main/kv/main_state_v1) -> push/pull/status with Supabase ops_snapshots.
+  Read IndexedDB main DB (ops_v642_main/kv/main_state_v1) -> push/pull/status with Supabase ops_cloud_snapshots_v1.
 - Use capture-phase listeners + stopImmediatePropagation to prevent later handlers from running.
 ====================================================================================================== */
 (async function(){
@@ -9813,7 +9813,7 @@ Goal:
     };
 
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
 
       if(!data){
@@ -9878,7 +9878,7 @@ Goal:
     try{
       const hash = String(Date.now());
       const row = { app_key: cfg.app_key, payload: JSON.stringify(s), hash };
-      const { error } = await client.from("ops_snapshots").upsert(row, { onConflict:"app_key" });
+      const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
       if(error) throw error;
 
       toastSafe("云端推送成功：卖家"+sc+" 产品"+pc+" 订单"+oc+" 批次"+bc+"（hash="+hash+"）");
@@ -9894,7 +9894,7 @@ Goal:
     if(!cfg || !cfg.app_key){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
 
     try{
-      const { data, error } = await client.from("ops_snapshots").select("*").eq("app_key", cfg.app_key).maybeSingle();
+      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
       if(error) throw error;
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
@@ -9973,7 +9973,7 @@ Goal:
 ====================================================================================== */
 (async function(){
   const LOGP = "[AUTO-PUSH]";
-  const TABLE = "ops_snapshots";
+  const TABLE = "ops_cloud_snapshots_v1";
   const MAIN_DB = "ops_v642_main";
   const MAIN_STORE = "kv";
   const MAIN_KEY = "main_state_v1";
@@ -10362,12 +10362,12 @@ Goal:
   // Goals:
   // 1) One button binding set (override old handlers)
   // 2) Canonical local snapshot first: localStorage['ops_rebuild_v6_4_2_state']
-  // 3) One cloud table: ops_snapshots (onConflict: app_key)
+  // 3) One cloud table: ops_cloud_snapshots_v1 (onConflict: app_key)
   // 4) Optional same-origin proxy: /api/sync/*
   // =========================
 
   var CANONICAL_LS_KEY = 'ops_rebuild_v6_4_2_state';
-  var CLOUD_TABLE = 'ops_snapshots';
+  var CLOUD_TABLE = 'ops_cloud_snapshots_v1';
 
   // Legacy/compat keys (read)
   var LS_KEYS = {
