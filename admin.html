@@ -657,106 +657,6 @@ function _countSnapshot(p){
   const batches = getArr("batches","settlementBatches","payoutBatches","batchList");
   return { sc:sellers.length, pc:products.length, oc:orders.length, bc:batches.length };
 }
-
-// -------------------------
-// Plan A merge + hash helpers
-// -------------------------
-function simpleHash(str){
-  // FNV-1a 32-bit
-  let h = 0x811c9dc5;
-  for(let i=0;i<str.length;i++){
-    h ^= str.charCodeAt(i);
-    h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
-  }
-  return String(h);
-}
-function _getIdFromItem(it){
-  if(!it || typeof it!=="object") return null;
-  return it.id || it.order_id || it.product_id || it.seller_id || it.batch_id || null;
-}
-function _getTs(it){
-  if(!it || typeof it!=="object") return 0;
-  const v = it.updatedAt || it.updated_at || it.modifiedAt || it.modified_at || it.createdAt || it.created_at || it.ts || it.time || 0;
-  if(typeof v==="number") return v;
-  const t = Date.parse(v);
-  return isNaN(t) ? 0 : t;
-}
-function _mergeListById(localArr, cloudArr){
-  const out = [];
-  const map = new Map();
-  const push = (it, src)=>{
-    const id = _getIdFromItem(it);
-    if(!id){
-      out.push(it);
-      return;
-    }
-    const prev = map.get(String(id));
-    if(!prev){
-      map.set(String(id), it);
-      out.push(it);
-      return;
-    }
-    const prevTs = _getTs(prev);
-    const curTs = _getTs(it);
-    if(curTs >= prevTs){
-      // replace in out
-      const idx = out.indexOf(prev);
-      if(idx>=0) out[idx]=it;
-      map.set(String(id), it);
-    }
-  };
-  (cloudArr||[]).forEach(it=>push(it,"cloud"));
-  (localArr||[]).forEach(it=>push(it,"local"));
-  return out;
-}
-function mergeSnapshotsPlanA(localSnap, cloudSnap){
-  const L = localSnap && typeof localSnap==="object" ? localSnap : {};
-  const C = cloudSnap && typeof cloudSnap==="object" ? cloudSnap : {};
-  // Start from cloud as base to preserve any extra fields.
-  const merged = JSON.parse(JSON.stringify(C));
-
-  const listKeys = [
-    ["sellers","sellerList","seller_items"],
-    ["products","productList","product_items"],
-    ["orders","orderList","order_items"],
-    ["batches","settlementBatches","payout_batches"]
-  ];
-
-  for(const keys of listKeys){
-    const k = keys[0];
-    const getArr = (obj)=>{
-      for(const kk of keys){
-        const v = obj && obj[kk];
-        if(Array.isArray(v)) return { key: kk, arr: v };
-      }
-      return { key: null, arr: null };
-    };
-    const ca = getArr(C);
-    const la = getArr(L);
-    const cloudArr = ca.arr || [];
-    const localArr = la.arr || [];
-    if(cloudArr.length===0 && localArr.length===0) continue;
-
-    const mergedArr = _mergeListById(localArr, cloudArr);
-    // write to canonical key k for stability
-    merged[k] = mergedArr;
-    // also keep original key if existed in cloud to avoid breaking old UI
-    if(ca.key && ca.key!==k) merged[ca.key] = mergedArr;
-    if(la.key && la.key!==k) merged[la.key] = mergedArr;
-  }
-
-  // If local has newer "meta" version/time fields, keep them (best-effort)
-  for(const mk of ["version","ver","schemaVersion","updatedAt","updated_at"]){
-    if(L[mk] && !merged[mk]) merged[mk] = L[mk];
-  }
-  return merged;
-}
-function _mergeSnapshotsFallback(localSnap, cloudSnap){
-  // simple union: cloud as base, list union by id
-  return mergeSnapshotsPlanA(localSnap, cloudSnap);
-}
-
-
 async function getLocalSnapshotPreferIDB(){
   // Strategy:
   // 1) If in-memory snapshot has data -> use it
@@ -852,85 +752,50 @@ async function cloudStatus(){
   }
 }
 
-async function cloudPush(opts){
+async function cloudPush(){
   const sb = getCloudClientOrNull();
-  if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
+  if(!sb){ cloudPromptAndSave(); return; }
   const { client, cfg } = sb;
-
-  const force = !!(opts && opts.force);
-
   try{
     const local = await getLocalSnapshotPreferIDB();
     if(!local.ok){
       alert("无法获取本地数据快照：\n" + (local.reason||"unknown"));
-      return { ok:false, reason:"no_local_snapshot" };
+      return;
     }
     const finalPayload = local.payload || {};
-    const counts = local.counts || _countSnapshot(finalPayload);
-    const sc = counts.sc||0, pc = counts.pc||0, oc = counts.oc||0, bc = counts.bc||0;
+    const { sc, pc, oc, bc } = local.counts || _countSnapshot(finalPayload);
 
-    // Plan A safety gate: block "empty local" unless forced
-    if(!force && sc===0 && pc===0 && oc===0 && bc===0){
+    if(sc===0 && pc===0 && oc===0 && bc===0){
       const ok = confirm(
-        "安全保护：当前本地数据为 0（卖家/产品/订单/批次均为空）。\n\n"
-        + "数据来源：" + local.source + "\n\n"
-        + "为避免误覆盖云端，本次推送已被拦截。\n\n"
-        + "如你确认这是正确的空库初始化，请按住 Shift 再点击“云端推送”进行强制推送。"
+        "警告：当前本地数据为 0（卖家/产品/订单/批次均为空）。\n\n" +
+        "数据来源：" + local.source + "\n\n" +
+        "继续“云端推送”会覆盖云端快照为“空”，可能导致无法恢复。\n\n仍要继续推送吗？"
       );
-      if(!ok) return { ok:false, reason:"blocked_empty_local" };
-      // 用户点了确认，但仍不强制；这里保持拦截，防止误操作
-      return { ok:false, reason:"blocked_empty_local" };
+      if(!ok) return;
     }
 
-    // Step 1: pull cloud snapshot (best-effort)
-    let cloud = null;
+    const hash = Date.now();
+    // upsert main snapshot
+    const { data: existing, error: e1 } = await client.from("ops_snapshots").select("app_key").eq("app_key", cfg.appKey).maybeSingle();
+    if(e1) throw e1;
+    if(existing){
+      const { error } = await client.from("ops_snapshots").update({ payload: finalPayload, hash, updated_at: new Date().toISOString() }).eq("app_key", cfg.appKey);
+      if(error) throw error;
+    }else{
+      const { error } = await client.from("ops_snapshots").insert({ app_key: cfg.appKey, payload: finalPayload, hash, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }
+
+    // write a history row (best-effort)
     try{
-      const { data: row, error: e } = await client.from("ops_snapshots")
-        .select("app_key,hash,payload,counts,updated_at,created_at")
-        .eq("app_key", cfg.appKey).maybeSingle();
-      if(e) throw e;
-      cloud = row || null;
-    }catch(_e){ cloud = null; }
+      const histKey = cfg.appKey + "__H__" + new Date().toISOString().replace(/[:.]/g,"-");
+      await client.from("ops_snapshots").insert({ app_key: histKey, payload: finalPayload, hash, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+    }catch(_e){}
 
-    // Step 2: merge (Plan A: union by id; prefer newer updatedAt)
-    const localSnap = finalPayload || {};
-    const cloudSnap = (cloud && cloud.payload) ? cloud.payload : null;
-
-    const merged = (cloudSnap && typeof mergeSnapshotsPlanA==="function")
-      ? mergeSnapshotsPlanA(localSnap, cloudSnap)
-      : (cloudSnap ? _mergeSnapshotsFallback(localSnap, cloudSnap) : localSnap);
-
-    const mergedCounts = _countSnapshot(merged);
-    const mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(merged)) : Date.now();
-
-    // If we have cloud hash and merged has same hash, skip push
-    if(cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
-      console.log(`[PUSH] 无需推送：合并后 hash 未变化（hash=${mergedHash}）`);
-      return { ok:true, skipped:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
-    }
-
-    // Step 3: upsert merged snapshot
-    const nowIso = new Date().toISOString();
-    const row = {
-      app_key: cfg.appKey,
-      hash: mergedHash,
-      payload: merged,
-      counts: mergedCounts,
-      updated_at: nowIso
-    };
-
-    const { error } = await client.from("ops_snapshots").upsert(row, { onConflict: "app_key" });
-    if(error) throw error;
-
-    console.log(`[PUSH] 推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${mergedHash}，local_src=${local.source}）`);
-    toast(`云端推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}`,"ok");
-    return { ok:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
+    toast(`云端推送成功：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（来源=${local.source}）`);
   }catch(e){
     console.error(e);
-    const msg = (e && (e.message||e.details||e.hint)) ? (e.message||e.details||e.hint) : String(e);
-    toast("云端推送失败：" + msg,"err");
-    alert("云端推送失败：\n" + msg);
-    return { ok:false, reason:"push_failed", error: msg };
+    alert("云端推送失败：\n" + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -10175,45 +10040,60 @@ Goal:
     const payload = JSON.stringify(payloadObj);
     const hash = fnv1a(payload);
 
+    const sc=pickCount(env.sellers), pc=pickCount(env.products), oc=pickCount(env.orders), bc=pickCount(env.batches);
+
     const row = {
       app_key: appKey,
       payload: payload,
       hash: hash,
-      updated_at: nowIso()
+      meta: {
+        note: note || "push",
+        counts: { sellers:sc, products:pc, orders:oc, batches:bc },
+        ts: nowIso()
+      }
     };
 
-    const { error } = await client.from(TABLE).upsert(row, { onConflict: "app_key" });
-    if(error) throw error;
-
+    await client.from(TABLE).upsert(row, { onConflict: "app_key" });
     _lastPushedHash = hash;
-    const counts = { sellers: pickCount(env.sellers), products: pickCount(env.products), orders: pickCount(env.orders), batches: pickCount(env.batches) };
-    return { hash, counts };
+    return { hash, counts: row.meta.counts };
   }
-
 
   async function safeMergeAndPush(opts){
     const force = !!(opts && opts.force);
-    if(typeof window.cloudPush!=="function"){
-      warn("cloudPush 未就绪，跳过。");
+    const wrap = getCloudWrap();
+    if(!wrap){ warn("未配置云端或 Supabase SDK 未就绪，跳过。"); return; }
+    const { client, cfg } = wrap;
+    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
+    if(!appKey){ warn("缺少 app_key，跳过。"); return; }
+
+    const loc = await getLocalSnapshot();
+    const s = loc.state || {};
+    const sc=pickCount(s.sellers), pc=pickCount(s.products), oc=pickCount(s.orders), bc=pickCount(s.batches);
+
+    if(sc===0 && pc===0 && oc===0 && bc===0){
+      if(force){
+        warn("强制推送：本地为 0，将覆盖云端快照（仍不会删除云端历史，但会更新当前 app_key 行）。");
+      }else{
+        log("触发失败：本地快照为空，已按安全策略跳过合并推送（需要手动强制才允许覆盖）");
+        return;
+      }
+    }
+
+    // Pull cloud, merge, then push merged if changed
+    const cloud = await fetchCloudSnapshot(client, appKey);
+    const merged = cloud.exists ? mergeStates(s, cloud.state) : normState(s);
+    const mergedPayload = JSON.stringify({ env: merged });
+    const mergedHash = fnv1a(mergedPayload);
+
+    if(mergedHash && (mergedHash === cloud.hash || mergedHash === _lastPushedHash)){
+      log("无需推送：合并后 hash 未变化（hash="+mergedHash+"）");
       return;
     }
-    try{
-      const res = await window.cloudPush({ force });
-      if(res && res.ok){
-        if(res.hash) _lastPushedHash = res.hash;
-        if(res.skipped){
-          log(`无需推送：合并后 hash 未变化（hash=${res.hash}）`);
-        }else{
-          log(`推送成功：卖家${res.counts.sc} 产品${res.counts.pc} 订单${res.counts.oc} 批次${res.counts.bc}（hash=${res.hash}）`);
-        }
-      }else{
-        warn("推送失败或被安全策略拦截。");
-      }
-    }catch(e){
-      err("推送异常", e);
-    }
-  }
 
+    const res = await pushSnapshot(client, appKey, merged, cloud.exists ? "merge_push" : "first_push");
+    log("推送成功：卖家"+res.counts.sellers+" 产品"+res.counts.products+" 订单"+res.counts.orders+" 批次"+res.counts.batches+"（hash="+res.hash+"，local_src="+loc.src+"）");
+    try{ toastSafe("云端推送成功（Plan A 合并）：订单"+res.counts.orders+"（hash="+res.hash+"）"); }catch(e){}
+  }
 
   async function cloudStatus(){
     const wrap = getCloudWrap(); if(!wrap) return;
@@ -10351,522 +10231,6 @@ Goal:
   }catch(e){
     err("FINAL SYNC 初始化失败", e);
   }
-})();
-</script>
-<script>
-(function(){
-  'use strict';
-
-  // ========= Sync Patch v6.4.2 (Plan A Safe Merge Push) =========
-  // Drop-in patch: paste this block near end of admin.html (before </body>).
-  // It overrides cloud buttons + implements robust push/pull/status with strict error handling.
-  // No top-level await. No multiline string literals without \n escapes.
-
-  var PATCH_TAG = 'SYNC_PATCH_V642_PLAN_A_R1';
-  var AUTO_INTERVAL_MS = 60 * 1000;
-
-  // ---------- Small utilities ----------
-  function nowISO(){ return new Date().toISOString(); }
-  function safeStr(x){ try { return String(x); } catch(_) { return ''; } }
-  function toast(msg){
-    try{
-      if (window.toast && typeof window.toast === 'function') return window.toast(msg);
-    }catch(_){}
-    try{
-      // fallback simple toast
-      var el = document.getElementById('__sync_patch_toast');
-      if(!el){
-        el = document.createElement('div');
-        el.id='__sync_patch_toast';
-        el.style.cssText='position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:99999;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.25);max-width:80vw;font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial;';
-        document.body.appendChild(el);
-      }
-      el.textContent = msg;
-      el.style.display='block';
-      clearTimeout(el.__t);
-      el.__t=setTimeout(function(){ el.style.display='none'; }, 3200);
-    }catch(_2){
-      alert(msg);
-    }
-  }
-  function log(msg){
-    try{ console.log('[AUTO-PUSH] ['+nowISO()+'] '+msg); }catch(_){}
-  }
-  function warn(msg){
-    try{ console.warn('[AUTO-PUSH] ['+nowISO()+'] '+msg); }catch(_){}
-  }
-  function err(msg, e){
-    try{ console.error('[AUTO-PUSH] ['+nowISO()+'] '+msg, e||''); }catch(_){}
-  }
-
-  // ---------- Config (supports multiple key names for backward compatibility) ----------
-  var LS_KEYS = {
-    url: ['OPS_SYNC_CLOUD_URL','OPS_CLOUD_URL','CLOUD_URL','SUPABASE_URL','SYNC_SUPABASE_URL'],
-    anon: ['OPS_SYNC_ANON_KEY','OPS_CLOUD_ANON_KEY','CLOUD_ANON_KEY','SUPABASE_ANON_KEY','SYNC_SUPABASE_ANON_KEY'],
-    app: ['OPS_SYNC_APP_KEY','OPS_CLOUD_APP_KEY','APP_KEY','SYNC_APP_KEY','OPS_APP_KEY']
-  };
-
-  function lsGetAny(keys){
-    for(var i=0;i<keys.length;i++){
-      var v = localStorage.getItem(keys[i]);
-      if(v && v.trim()) return v.trim();
-    }
-    return '';
-  }
-  function lsSetFirst(keys, value){
-    if(!value) return;
-    localStorage.setItem(keys[0], value);
-  }
-  function getConfig(){
-    return {
-      url: lsGetAny(LS_KEYS.url),
-      anon: lsGetAny(LS_KEYS.anon),
-      app: lsGetAny(LS_KEYS.app) || 'ops_v642'
-    };
-  }
-
-  // ---------- Supabase client ----------
-  function ensureSupabaseLoaded(){
-    return !!(window.supabase && typeof window.supabase.createClient === 'function');
-  }
-
-  function getClient(cfg){
-    if(!ensureSupabaseLoaded()){
-      throw new Error('supabase_umd_not_loaded');
-    }
-    return window.supabase.createClient(cfg.url, cfg.anon, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'sb-auth-token-syncpatch' }
-});
-  }
-
-  // ---------- IndexedDB helpers ----------
-  function idbGet(dbName, storeName, key){
-    return new Promise(function(resolve, reject){
-      try{
-        var req = indexedDB.open(dbName);
-        req.onerror = function(){ reject(req.error || new Error('idb_open_error')); };
-        req.onsuccess = function(){
-          var db = req.result;
-          try{
-            var tx = db.transaction(storeName, 'readonly');
-            var st = tx.objectStore(storeName);
-            var gr = st.get(key);
-            gr.onerror = function(){ reject(gr.error || new Error('idb_get_error')); };
-            gr.onsuccess = function(){ resolve(gr.result); };
-          }catch(e){
-            reject(e);
-          }finally{
-            // do not close immediately; let tx finish
-            setTimeout(function(){ try{ db.close(); }catch(_){ } }, 50);
-          }
-        };
-      }catch(e){ reject(e); }
-    });
-  }
-
-  // ---------- Snapshot normalization ----------
-  function normalizeSnapshot(raw){
-    // accepted shapes:
-    // 1) { sellers:[], products:[], orders:[], batches:[] }
-    // 2) { S: { sellers... } } or { state: {...} }
-    // 3) legacy: { sellersById: {...} } etc -> not handled; will return empty arrays
-    if(!raw || typeof raw !== 'object') return { sellers:[], products:[], orders:[], batches:[] };
-
-    var s = raw;
-    if(raw.S && typeof raw.S === 'object') s = raw.S;
-    if(raw.state && typeof raw.state === 'object') s = raw.state;
-
-    var out = {
-      sellers: Array.isArray(s.sellers) ? s.sellers : [],
-      products: Array.isArray(s.products) ? s.products : [],
-      orders: Array.isArray(s.orders) ? s.orders : [],
-      batches: Array.isArray(s.batches) ? s.batches : (Array.isArray(s.settlementBatches)? s.settlementBatches : [])
-    };
-    return out;
-  }
-
-  async function getLocalSnapshot(){
-    // priority: IndexedDB main_state_v1 -> localStorage -> window.S
-    // IDB: ops_v642_main / kv / main_state_v1
-    try{
-      var v = await idbGet('ops_v642_main', 'kv', 'main_state_v1');
-      if(v && typeof v === 'object'){
-        return { snapshot: normalizeSnapshot(v), src: 'IndexedDB(ops_v642_main/kv/main_state_v1)' };
-      }
-    }catch(_){}
-
-    try{
-      var ls = localStorage.getItem('ops_rebuild_v6_4_2_state');
-      if(ls){
-        var obj = JSON.parse(ls);
-        return { snapshot: normalizeSnapshot(obj), src: 'localStorage(ops_rebuild_v6_4_2_state)' };
-      }
-    }catch(_2){}
-
-    try{
-      if(window.S && typeof window.S === 'object'){
-        return { snapshot: normalizeSnapshot(window.S), src: 'window.S' };
-      }
-    }catch(_3){}
-
-    return { snapshot: { sellers:[], products:[], orders:[], batches:[] }, src: 'empty' };
-  }
-
-  function countsOf(snap){
-    snap = snap || { sellers:[], products:[], orders:[], batches:[] };
-    return {
-      sellers: (snap.sellers||[]).length,
-      products: (snap.products||[]).length,
-      orders: (snap.orders||[]).length,
-      batches: (snap.batches||[]).length
-    };
-  }
-
-  // ---------- Hash (stable-ish) ----------
-  function stableStringify(obj){
-    // light stable stringify: sort object keys recursively
-    var seen = new WeakSet();
-    function _s(x){
-      if(x === null) return 'null';
-      var t = typeof x;
-      if(t === 'number' || t === 'boolean') return String(x);
-      if(t === 'string') return JSON.stringify(x);
-      if(t !== 'object') return JSON.stringify(String(x));
-      if(seen.has(x)) return '"[Circular]"';
-      seen.add(x);
-      if(Array.isArray(x)){
-        return '[' + x.map(_s).join(',') + ']';
-      }
-      var keys = Object.keys(x).sort();
-      var parts = [];
-      for(var i=0;i<keys.length;i++){
-        var k = keys[i];
-        parts.push(JSON.stringify(k)+':'+_s(x[k]));
-      }
-      return '{' + parts.join(',') + '}';
-    }
-    return _s(obj);
-  }
-
-  function fnv1a32(str){
-    var h = 0x811c9dc5;
-    for(var i=0;i<str.length;i++){
-      h ^= str.charCodeAt(i);
-      h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
-    }
-    return h >>> 0;
-  }
-
-  function calcHash(snapshot){
-    var s = stableStringify(snapshot);
-    return fnv1a32(s).toString(16);
-  }
-
-  // ---------- Merge (Plan A union, prefer newer updatedAt) ----------
-  function indexById(arr){
-    var m = new Map();
-    for(var i=0;i<(arr||[]).length;i++){
-      var it = arr[i];
-      if(it && (it.id || it._id)){
-        m.set(it.id || it._id, it);
-      }
-    }
-    return m;
-  }
-  function pickNewer(a,b){
-    if(!a) return b;
-    if(!b) return a;
-    var ta = a.updatedAt || a.updated_at || a.modifiedAt || a.createdAt || a.created_at || 0;
-    var tb = b.updatedAt || b.updated_at || b.modifiedAt || b.createdAt || b.created_at || 0;
-    // compare as string iso works for same format; fallback numeric
-    try{
-      if(typeof ta === 'string' && typeof tb === 'string'){
-        return (tb > ta) ? b : a;
-      }
-      return (Number(tb) > Number(ta)) ? b : a;
-    }catch(_){
-      return a;
-    }
-  }
-  function mergeEntity(localArr, cloudArr){
-    var ml = indexById(localArr||[]);
-    var mc = indexById(cloudArr||[]);
-    // union keys
-    var keys = new Set();
-    ml.forEach(function(_,k){ keys.add(k); });
-    mc.forEach(function(_,k){ keys.add(k); });
-    var out = [];
-    keys.forEach(function(k){
-      out.push(pickNewer(mc.get(k), ml.get(k))); // prefer newer; pickNewer expects (a,b) but we compare timestamps inside
-    });
-    // keep items without id (append from local if any)
-    for(var i=0;i<(cloudArr||[]).length;i++){
-      var it = cloudArr[i];
-      if(it && !(it.id || it._id)) out.push(it);
-    }
-    for(var j=0;j<(localArr||[]).length;j++){
-      var it2 = localArr[j];
-      if(it2 && !(it2.id || it2._id)) out.push(it2);
-    }
-    return out;
-  }
-
-  function mergeSnapshots(localSnap, cloudSnap){
-    localSnap = normalizeSnapshot(localSnap);
-    cloudSnap = normalizeSnapshot(cloudSnap);
-    return {
-      sellers: mergeEntity(localSnap.sellers, cloudSnap.sellers),
-      products: mergeEntity(localSnap.products, cloudSnap.products),
-      orders: mergeEntity(localSnap.orders, cloudSnap.orders),
-      batches: mergeEntity(localSnap.batches, cloudSnap.batches)
-    };
-  }
-
-  // ---------- Cloud API ----------
-  var TABLE = 'ops_snapshots';
-
-  async function cloudPull(){
-    var cfg = getConfig();
-    if(!cfg.url || !cfg.anon || !cfg.app){
-      throw new Error('cloud_not_configured');
-    }
-    var client = getClient(cfg);
-    var res = await client.from(TABLE).select('app_key,data,hash,updated_at').eq('app_key', cfg.app).maybeSingle();
-    if(res.error) throw res.error;
-    return res.data || null;
-  }
-
-  async function cloudUpsert(row){
-    var cfg = getConfig();
-    var client = getClient(cfg);
-    // NOTE: do NOT include unknown columns such as "meta".
-    var res = await client.from(TABLE).upsert(row, { onConflict: 'app_key' }).select('app_key,hash,updated_at').maybeSingle();
-    if(res.error) throw res.error;
-    return res.data || null;
-  }
-
-  async function cloudStatusDialog(){
-    try{
-      var cfg = getConfig();
-      var local = await getLocalSnapshot();
-      var lc = countsOf(local.snapshot);
-      var cloud = null;
-      var cloudCounts = { sellers:0, products:0, orders:0, batches:0 };
-      var cloudHash = '';
-      var cloudUpdated = '';
-      var cloudExist = 'NO';
-      try{
-        cloud = await cloudPull();
-        if(cloud && cloud.data){
-          cloudExist='YES';
-          cloudHash = safeStr(cloud.hash||'');
-          cloudUpdated = safeStr(cloud.updated_at||'');
-          cloudCounts = countsOf(normalizeSnapshot(cloud.data));
-        }
-      }catch(e){
-        cloudExist='ERROR';
-      }
-
-      var msg =
-        '本地来源: '+local.src+'\\n'+
-        '本地统计: 卖家'+lc.sellers+' 产品'+lc.products+' 订单'+lc.orders+' 批次'+lc.batches+'\\n\\n'+
-        '云端存在: '+cloudExist+'\\n'+
-        (cloudExist==='YES' ? ('云端 hash: '+cloudHash+'\\n云端 updated_at: '+cloudUpdated+'\\n云端统计: 卖家'+cloudCounts.sellers+' 产品'+cloudCounts.products+' 订单'+cloudCounts.orders+' 批次'+cloudCounts.batches) : '')+
-        (cloudExist==='ERROR' ? '云端读取失败（请检查云端设置/权限/网络）。' : '');
-      alert(msg);
-    }catch(e){
-      alert('云端状态读取失败：'+(e && e.message ? e.message : String(e)));
-    }
-  }
-
-  async function cloudPush(opts){
-    opts = opts || {};
-    var forced = !!opts.force;
-    var cfg = getConfig();
-    if(!cfg.url || !cfg.anon || !cfg.app){
-      toast('未设置云端（请先点“云端设置”）。');
-      throw new Error('cloud_not_configured');
-    }
-
-    var local = await getLocalSnapshot();
-    var localSnap = local.snapshot;
-    var lc = countsOf(localSnap);
-
-    if(!forced && (lc.sellers+lc.products+lc.orders+lc.batches) === 0){
-      warn('触发失败：本地快照为空，已按安全策略跳过合并推送（需要手动强制才允许覆盖）');
-      throw new Error('local_empty_blocked');
-    }
-
-    // pull + merge + push (Plan A)
-    var cloudRow = null;
-    try{ cloudRow = await cloudPull(); }catch(_){ cloudRow = null; }
-    var cloudSnap = cloudRow && cloudRow.data ? normalizeSnapshot(cloudRow.data) : { sellers:[], products:[], orders:[], batches:[] };
-    var merged = mergeSnapshots(localSnap, cloudSnap);
-    var mergedHash = calcHash(merged);
-
-    // if hash unchanged and not forced -> skip
-    var prevHash = cloudRow ? safeStr(cloudRow.hash||'') : '';
-    if(!forced && prevHash && prevHash === mergedHash){
-      log('无需推送：合并后 hash 未变化（hash='+mergedHash+'）。');
-      return { skipped:true, hash: mergedHash, local_src: local.src, counts: countsOf(merged) };
-    }
-
-    var row = {
-      app_key: cfg.app,
-      data: merged,
-      hash: mergedHash,
-      updated_at: nowISO()
-    };
-
-    var saved = await cloudUpsert(row);
-    var cc = countsOf(merged);
-    toast('云端推送成功：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches+'（hash='+mergedHash+'）');
-    log('推送成功：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches+'（hash='+mergedHash+'，local_src='+local.src+'）');
-    return { skipped:false, saved:saved, hash: mergedHash, local_src: local.src, counts: cc };
-  }
-
-  async function cloudPullAndApply(){
-    // Optional: pulling cloud does not auto overwrite local by default in Plan A patch.
-    // We keep it read-only unless you explicitly confirm.
-    var cfg = getConfig();
-    if(!cfg.url || !cfg.anon || !cfg.app){
-      toast('未设置云端（请先点“云端设置”）。');
-      throw new Error('cloud_not_configured');
-    }
-    var cloudRow = await cloudPull();
-    if(!cloudRow || !cloudRow.data){
-      toast('云端无快照可拉取。');
-      return;
-    }
-    var cloudSnap = normalizeSnapshot(cloudRow.data);
-    var cc = countsOf(cloudSnap);
-
-    var ok = confirm('确认从云端拉取并写入本地？\\n\\n注意：此操作会用“云端快照”覆盖本地主快照（建议先导出 JSON 备份）。\\n\\n云端统计：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches);
-    if(!ok) return;
-
-    // write to IndexedDB main kv if available, else localStorage
-    try{
-      // write IDB ops_v642_main/kv/main_state_v1
-      await new Promise(function(resolve, reject){
-        try{
-          var req = indexedDB.open('ops_v642_main');
-          req.onerror=function(){ reject(req.error||new Error('idb_open_error')); };
-          req.onsuccess=function(){
-            var db=req.result;
-            try{
-              var tx=db.transaction('kv','readwrite');
-              var st=tx.objectStore('kv');
-              var put=st.put(cloudSnap, 'main_state_v1');
-              put.onerror=function(){ reject(put.error||new Error('idb_put_error')); };
-              tx.oncomplete=function(){ try{ db.close(); }catch(_){ } resolve(true); };
-              tx.onerror=function(){ reject(tx.error||new Error('idb_tx_error')); };
-            }catch(e){
-              try{ db.close(); }catch(_2){}
-              reject(e);
-            }
-          };
-        }catch(e){ reject(e); }
-      });
-      toast('已从云端拉取并写入本地（IndexedDB）。刷新页面生效。');
-    }catch(e2){
-      try{
-        localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify({ sellers: cloudSnap.sellers, products: cloudSnap.products, orders: cloudSnap.orders, batches: cloudSnap.batches }));
-        toast('已从云端拉取并写入本地（localStorage）。刷新页面生效。');
-      }catch(e3){
-        toast('拉取成功但写入本地失败：'+(e3 && e3.message ? e3.message : String(e3)));
-      }
-    }
-  }
-
-  function openCloudSettings(){
-    var cfg = getConfig();
-    var url = prompt('Supabase Project URL（例如 https://xxxx.supabase.co）', cfg.url || '');
-    if(url === null) return;
-    var anon = prompt('Supabase anon key', cfg.anon || '');
-    if(anon === null) return;
-    var app = prompt('app_key（同一套系统建议固定，例如 ops_v642）', cfg.app || 'ops_v642');
-    if(app === null) return;
-
-    lsSetFirst(LS_KEYS.url, url.trim());
-    lsSetFirst(LS_KEYS.anon, anon.trim());
-    lsSetFirst(LS_KEYS.app, app.trim());
-
-    toast('云端设置已保存。');
-  }
-
-  // ---------- Button wiring (capture to override old handlers) ----------
-  function bindByText(text, handler){
-    var btns = Array.prototype.slice.call(document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]'));
-    for(var i=0;i<btns.length;i++){
-      var el = btns[i];
-      var t = (el.textContent||el.value||'').trim();
-      if(t === text){
-        el.addEventListener('click', function(ev){
-          try{ ev.preventDefault(); ev.stopPropagation(); if(ev.stopImmediatePropagation) ev.stopImmediatePropagation(); }catch(_){}
-          handler(ev);
-        }, true);
-      }
-    }
-  }
-
-  function initBindings(){
-    bindByText('云端设置', function(){ openCloudSettings(); });
-    bindByText('云端状态', function(){ cloudStatusDialog(); });
-    bindByText('云端拉取', function(){ cloudPullAndApply().catch(function(e){ err('云端拉取失败', e); toast('云端拉取失败：'+(e&&e.message?e.message:String(e))); }); });
-    bindByText('云端推送', function(ev){
-      var force = !!(ev && ev.shiftKey);
-      cloudPush({ force: force }).catch(function(e){
-        // do not show "success" on failure
-        warn('推送失败或被安全策略拦截。');
-        toast('推送失败：'+(e && e.message ? e.message : String(e)));
-      });
-    });
-
-    // expose for debugging
-    window.__syncPatch = {
-      tag: PATCH_TAG,
-      getConfig: getConfig,
-      status: cloudStatusDialog,
-      push: cloudPush,
-      pull: cloudPullAndApply,
-      getLocalSnapshot: getLocalSnapshot
-    };
-  }
-
-  // ---------- Auto push ----------
-  var autoTimer = null;
-  function startAutoPush(){
-    if(autoTimer) return;
-    autoTimer = setInterval(function(){
-      try{
-        var cfg = getConfig();
-        if(!cfg.url || !cfg.anon || !cfg.app){
-          return; // not configured
-        }
-        cloudPush({ force:false }).catch(function(e){
-          // quiet warning in console
-          warn('推送失败或被安全策略拦截。');
-        });
-      }catch(_){}
-    }, AUTO_INTERVAL_MS);
-    log('自动推送已启动（Plan A，安全合并推送；间隔 '+Math.round(AUTO_INTERVAL_MS/1000)+'s）。');
-  }
-
-  function boot(){
-    try{
-      initBindings();
-      startAutoPush();
-    }catch(e){
-      err('sync patch boot failed', e);
-    }
-  }
-
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', boot);
-  }else{
-    boot();
-  }
-
 })();
 </script>
 
