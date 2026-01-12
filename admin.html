@@ -643,47 +643,20 @@ function _normalizeSnapshot(payload){
   }
   return p || null;
 }
-function _tryJson(v){
-  if(typeof v !== "string") return v;
-  try{ return JSON.parse(v); }catch(_){ return v; }
-}
-function _unwrapSnapshot(x){
-  if(!x) return x;
-  // wrapper: {v, state:{ok, items:[{key, value}...]}, meta}
-  if(x.state && Array.isArray(x.state.items)){
-    const it = x.state.items.find(i=>i && (i.key==="main_state_v1" || i.key==="ops_rebuild_v6_4_2_state" || i.key==="main_state" || i.key==="state"));
-    let v = it ? (it.value ?? it) : x;
-    v = _tryJson(v);
-    if(v && typeof v==="object" && "value" in v) v = _tryJson(v.value);
-    if(v && typeof v==="object" && "value" in v) v = _tryJson(v.value);
-    return v;
-  }
-  // kv wrapper: {key, value}
-  if(typeof x==="object" && "value" in x && !("sellers" in x) && !("orders" in x) && !("products" in x)){
-    const v = _tryJson(x.value);
-    if(v && typeof v==="object") return v;
-  }
-  return _tryJson(x);
-}
-function _countAny(v){
-  if(!v) return 0;
-  if(Array.isArray(v)) return v.length;
-  if(typeof v==="object") return Object.keys(v).length;
-  return 0;
-}
 function _countSnapshot(p){
-  const s = _unwrapSnapshot(p) || {};
-  const pick = (...keys)=>{
+  p = _normalizeSnapshot(p);
+  const getArr = (...keys)=>{
     for(const k of keys){
-      if(s && Object.prototype.hasOwnProperty.call(s,k)) return s[k];
+      const v = p && p[k];
+      if(Array.isArray(v)) return v;
     }
-    return null;
+    return [];
   };
-  const sellers = pick("sellers","sellerList","seller_items","sellerMap","sellersById");
-  const products = pick("products","productList","product_items","productMap","productsById");
-  const orders = pick("orders","orderList","order_items","orderMap","ordersById");
-  const batches = pick("batches","settlementBatches","payoutBatches","batchList","batchesById");
-  return { sc:_countAny(sellers), pc:_countAny(products), oc:_countAny(orders), bc:_countAny(batches) };
+  const sellers = getArr("sellers","sellerList","seller_items");
+  const products = getArr("products","productList","product_items");
+  const orders = getArr("orders","orderList","order_items");
+  const batches = getArr("batches","settlementBatches","payoutBatches","batchList");
+  return { sc:sellers.length, pc:products.length, oc:orders.length, bc:batches.length };
 }
 
 // -------------------------
