@@ -10309,14 +10309,22 @@ async function cloudPullFINAL(){
     return [];
   }
 
-  function normState(s){
-    const p = (s && typeof s==="object") ? s : {};
-    return {
-      sellers: normArray(p.sellers),
-      products: normArray(p.products),
-      orders: normArray(p.orders),
-      batches: normArray(p.batches || p.batchList || p.settleBatches || p.settlementBatches || p.payoutBatches || p.payout_batches)
-    };
+  function normState(obj){
+    obj = (obj && typeof obj==="object") ? obj : {};
+    const out = {};
+    // tolerate legacy field names
+    out.sellers  = Array.isArray(obj.sellers)  ? obj.sellers  : (Array.isArray(obj.sellerList)?obj.sellerList:[]);
+    out.products = Array.isArray(obj.products) ? obj.products : (Array.isArray(obj.productList)?obj.productList:[]);
+    out.orders   = Array.isArray(obj.orders)   ? obj.orders   : (Array.isArray(obj.orderList)?obj.orderList:[]);
+    out.batches  = Array.isArray(obj.batches)  ? obj.batches  :
+                   (Array.isArray(obj.batchList)?obj.batchList:
+                   (Array.isArray(obj.settleBatches)?obj.settleBatches:
+                   (Array.isArray(obj.settlementBatches)?obj.settlementBatches:
+                   (Array.isArray(obj.payoutBatches)?obj.payoutBatches:
+                   (Array.isArray(obj.payout_batches)?obj.payout_batches:[])))));
+    // preserve other keys for compatibility
+    for(const k in obj){ if(!(k in out)) out[k]=obj[k]; }
+    return out;
   }
 
   function fnv1a(str){
