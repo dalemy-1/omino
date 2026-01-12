@@ -699,8 +699,18 @@ function _normalizeSnapshot(payload){
     }
   }
 
+  // Normalize map-form collections into arrays for consistent counting/merging
+  try{
+    if(p && typeof p==="object"){
+      if(p.sellers && !Array.isArray(p.sellers) && typeof p.sellers==="object") p.sellers = Object.values(p.sellers);
+      if(p.products && !Array.isArray(p.products) && typeof p.products==="object") p.products = Object.values(p.products);
+      if(p.orders && !Array.isArray(p.orders) && typeof p.orders==="object") p.orders = Object.values(p.orders);
+      if(p.batches && !Array.isArray(p.batches) && typeof p.batches==="object") p.batches = Object.values(p.batches);
+    }
+  }catch(e){}
   return p || {};
 }
+
 function _getIdFromItem(it){
   if(!it || typeof it!=="object") return null;
   return it.id || it.order_id || it.product_id || it.seller_id || it.batch_id || null;
