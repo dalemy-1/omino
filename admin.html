@@ -805,7 +805,7 @@ async function getLocalSnapshotPreferIDB(){
   // NOTE: We intentionally do NOT trust localStorage for large datasets (15k+ orders).
   const mem = (typeof state!=="undefined" && state) ? state : (typeof S!=="undefined" && S ? S : null);
   if(mem){
-    const cm = _countSnapshot(mem);
+    const cm = _countSnapshot(unwrapState(mem));
     if(cm.sc||cm.pc||cm.oc||cm.bc) return { ok:true, source:"mem", payload:mem, counts:cm };
   }
 
@@ -817,7 +817,7 @@ async function getLocalSnapshotPreferIDB(){
     const raw = localStorage.getItem("ops_rebuild_v6_4_2_state");
     if(raw){
       const parsed = JSON.parse(raw);
-      const cl = _countSnapshot(parsed||{});
+      const cl = _countSnapshot(unwrapState(parsed||{}));
       if(cl.sc||cl.pc||cl.oc||cl.bc){
         return { ok:true, source:"ls:ops_rebuild_v6_4_2_state", payload:parsed, counts:cl };
       }
@@ -842,7 +842,7 @@ async function getLocalSnapshotPreferIDB(){
       if(!picked.ok) continue;
 
       const p = _normalizeSnapshot(picked.payload);
-      const c = _countSnapshot(p);
+      const c = _countSnapshot(unwrapState(p));
       const size = (()=>{ try{return JSON.stringify(p||{}).length;}catch(e){return 0;} })();
 
       // require at least one array count OR non-trivial size
@@ -857,7 +857,18 @@ async function getLocalSnapshotPreferIDB(){
 
   if(best) return { ok:true, ...best };
 
-  return { ok:true, source:"mem(empty)", payload: mem || {}, counts:_countSnapshot(mem||{}) };
+  // Fallback: 若本地“快照库”为空（例如刚换新版本/清空过快照），仍应从主库 main_state_v1 读取真实数据作为推送来源。
+  try{
+    const ps = await _readPrimaryState();
+    if(ps && (ps.sellers||ps.products||ps.orders||ps.batches)){
+      const payload = { v: 1, state: ps, meta: { source: "idb-primary", pushed_at: new Date().toISOString() } };
+      return { ok:true, source:"idb:ops_v642_main/kv/main_state_v1", payload, counts:_countSnapshot(unwrapState(ps)) };
+    }
+  }catch(e){
+    // ignore and fall back to mem(empty)
+  }
+
+  return { ok:true, source:"mem(empty)", payload: mem || {}, counts:_countSnapshot(unwrapState(mem||{})) };
 }
 
 async function cloudStatus(){
@@ -878,7 +889,7 @@ async function cloudStatus(){
     }
     let payload = data.payload || {};
     payload = _normalizeSnapshot(payload);
-    const c = _countSnapshot(payload);
+    const c = _countSnapshot(unwrapState(payload));
     const size = (()=>{ try{return JSON.stringify(payload).length;}catch(e){return 0;} })();
     const msg =
       "云端快照状态\n\n" +
@@ -909,8 +920,8 @@ async function cloudPush(opts){
     }
     let finalPayload = local.payload || {};
     finalPayload = _normalizeSnapshot(finalPayload);
-    let counts = local.counts || _countSnapshot(finalPayload);
-    if(!(counts.sc||counts.pc||counts.oc||counts.bc)) counts = _countSnapshot(finalPayload);
+    let counts = local.counts || _countSnapshot(unwrapState(finalPayload));
+    if(!(counts.sc||counts.pc||counts.oc||counts.bc)) counts = _countSnapshot(unwrapState(finalPayload));
     const sc = counts.sc||0, pc = counts.pc||0, oc = counts.oc||0, bc = counts.bc||0;
 
     // Plan A safety gate: block "empty local" unless forced
@@ -944,7 +955,7 @@ async function cloudPush(opts){
       ? mergeSnapshotsPlanA(localSnap, cloudSnap)
       : (cloudSnap ? _mergeSnapshotsFallback(localSnap, cloudSnap) : localSnap);
 
-    const mergedCounts = _countSnapshot(merged);
+    const mergedCounts = _countSnapshot(unwrapState(merged));
     const mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(merged)) : Date.now();
 
     // If we have cloud hash and merged has same hash, skip push
@@ -9614,7 +9625,7 @@ async function cloudStatusFixed(){
   async function getLocalSnapshotPreferIDB(){
     const { state, source } = await _readPrimaryState();
     const data = state || {};
-    const counts = (typeof _countSnapshot === 'function') ? _countSnapshot(data) : {sellers:0,products:0,orders:0,batches:0};
+    const counts = (typeof _countSnapshot === 'function') ? _countSnapshot(unwrapState(data)) : {sellers:0,products:0,orders:0,batches:0};
     return { ok:true, data, counts, source };
   }
 
@@ -9633,7 +9644,7 @@ async function cloudStatusFixed(){
       if(!data) return alert('云端无快照（该 app_key 尚未推送过）。');
       const payload = data.payload || {};
       const state = _normalizeState(payload.state || payload) || {};
-      const c = (typeof _countSnapshot === 'function') ? _countSnapshot(state) : {sellers:0,products:0,orders:0,batches:0};
+      const c = (typeof _countSnapshot === 'function') ? _countSnapshot(unwrapState(state)) : {sellers:0,products:0,orders:0,batches:0};
       alert(
         '云端快照状态\n\n' +
         'app_key: ' + data.app_key + '\n' +
@@ -9694,7 +9705,7 @@ async function cloudStatusFixed(){
       const payload = data.payload || {};
       const state = _normalizeState(payload.state || payload);
       if(!state) return alert('云端快照 payload 为空或无法解析。');
-      const c = (typeof _countSnapshot === 'function') ? _countSnapshot(state) : {sellers:0,products:0,orders:0,batches:0};
+      const c = (typeof _countSnapshot === 'function') ? _countSnapshot(unwrapState(state)) : {sellers:0,products:0,orders:0,batches:0};
 
       const ok = confirm(
         '将云端快照覆盖到本地（IndexedDB/LocalStorage）。\n\n' +
@@ -10037,6 +10048,15 @@ Goal:
   function err(msg, e){
     try{ console.error(`${LOGP} [${nowIso()}] ${msg}`, e); }catch(_){}
   }
+
+  // 统一解包：兼容 payload = {v, state, meta} 或直接 state
+  function unwrapState(x){
+    try{
+      if(x && typeof x === "object" && x.state && typeof x.state === "object") return x.state;
+    }catch(_){}
+    return x;
+  }
+
   function toastSafe(msg, kind){
     try{ if(typeof toast==="function") return toast(msg, kind); }catch(e){}
     try{ console.log("[TOAST]", msg); }catch(e){}
