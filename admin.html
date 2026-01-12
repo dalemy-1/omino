@@ -9784,11 +9784,19 @@ Goal:
     return out;
   }
 
+  function _unwrapKV(x){
+    if(!x || typeof x!=='object') return x;
+    // common shapes: {key, value} or {id, value}
+    if('value' in x && (('key' in x) || ('id' in x) || ('k' in x))) return x.value;
+    return x;
+  }
+
   async function readMainFromIDB(){
     // Prefer existing idbGet if present
     try{
       if(typeof idbGet === "function"){
-        const v = await idbGet(MAIN_KEY);
+        const raw = await idbGet(MAIN_KEY);
+        const v = _unwrapKV(raw);
         if(v) return { src: "IndexedDB(idbGet): "+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY, state: v };
       }
     }catch(e){}
@@ -9805,7 +9813,11 @@ Goal:
             const st = tx.objectStore(MAIN_STORE);
             const g = st.get(MAIN_KEY);
             g.onerror = ()=>resolve({ src:"IndexedDB(get error): "+(g.error?g.error.message:""), state:null });
-            g.onsuccess = ()=>resolve({ src:"IndexedDB: "+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY, state:g.result||null });
+            g.onsuccess = ()=>{
+            const raw = g.result||null;
+            const v = _unwrapKV(raw);
+            resolve({ src:"IndexedDB: "+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY, state:v||null });
+          };
           }catch(e){
             resolve({ src:"IndexedDB(tx error): "+(e && e.message?e.message:String(e)), state:null });
           }
