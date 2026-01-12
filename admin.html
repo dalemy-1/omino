@@ -10609,7 +10609,13 @@ Goal:
     setLSPrimary('OPS_CLOUD_ANON_KEY', String(anon).trim());
     setLSPrimary('OPS_CLOUD_APP_KEY', String(app).trim());
 
-    toast('云端设置已保存。');
+    
+    // legacy兼容：同时写入 OPS_CLOUD_CFG_V1 供旧逻辑读取
+    try{
+      const legacyCfg = { url: String(url||'').trim(), anonKey: String(anon||'').trim(), appKey: String(app||'').trim(), updated_at: new Date().toISOString() };
+      setLSPrimary('OPS_CLOUD_CFG_V1', JSON.stringify(legacyCfg));
+    }catch(e){}
+toast('云端设置已保存。');
   }
 
   // ---------- Cloud API (proxy-first, then direct REST) ----------
