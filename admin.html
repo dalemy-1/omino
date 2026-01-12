@@ -9961,74 +9961,36 @@ Goal:
   }
 
   async function readMainFromIDB(){
-    // Prefer existing idbGet if present
+    // IMPORTANT: do NOT rely on global idbGet() here because this file contains multiple idbGet implementations.
+    // Always read from the real database: ops_v642_main / kv / main_state_v1.
     try{
-      if(typeof idbGet === "function"){
-        const v = await idbGet(MAIN_KEY);
-        if(v) return { src: "IndexedDB(idbGet): "+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY, state: v };
-      }
-    }catch(e){}
-
-    // Raw IndexedDB open fallback
-    return await new Promise((resolve)=>{
-      try{
+      const obj = await new Promise((resolve, reject)=>{
         const req = indexedDB.open(MAIN_DB);
-        req.onerror = ()=>resolve({ src:"IndexedDB(open error): "+(req.error?req.error.message:""), state:null });
+        req.onerror = ()=>reject(req.error || new Error("open failed"));
         req.onsuccess = ()=>{
-          const db = req.result;
           try{
+            const db = req.result;
             const tx = db.transaction(MAIN_STORE, "readonly");
             const st = tx.objectStore(MAIN_STORE);
             const g = st.get(MAIN_KEY);
-            g.onerror = ()=>resolve({ src:"IndexedDB(get error): "+(g.error?g.error.message:""), state:null });
-            g.onsuccess = ()=>resolve({ src:"IndexedDB: "+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY, state:g.result||null });
-          }catch(e){
-            resolve({ src:"IndexedDB(tx error): "+(e && e.message?e.message:String(e)), state:null });
-          }
+            g.onerror = ()=>reject(g.error || new Error("get failed"));
+            g.onsuccess = ()=>resolve(g.result || null);
+          }catch(e){ reject(e); }
         };
-      }catch(e){
-        resolve({ src:"IndexedDB exception: "+(e && e.message?e.message:String(e)), state:null });
-      }
-    });
-  }
-
-  async function readLocalState(){
-    const a = await readMainFromIDB();
-    if(a && a.state) return { src:a.src, state: normState(a.state) };
-
-    // fallback: global S
-    try{
-      if(typeof S !== "undefined" && S){
-        return { src:"Memory(S)", state: normState(S) };
-      }
+      });
+      if(obj) return { src:"IndexedDB("+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY+") raw", state: obj };
     }catch(e){}
-
-    // fallback: localStorage
+    // Fallback: if there is a generic KV reader helper, try it
     try{
-      const raw = localStorage.getItem(LS_FALLBACK_KEY);
-      if(raw){
-        const obj = JSON.parse(raw);
-        return { src:"localStorage("+LS_FALLBACK_KEY+")", state: normState(obj) };
-      }
-    }catch(e){}
-
-    return { src:"(none)", state: normState(null) };
-  }
-
-  function getCloudWrap(opts){
-    opts = opts||{};
-    const quiet = !!opts.quiet;
-    try{
-      if(typeof getCloudClientOrNull === "function"){
-        const w = getCloudClientOrNull();
-        if(w && typeof w.from === "function"){
-          const cfg = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : null;
-          return { client:w, cfg };
+      if(typeof _idbGetAnyKv==="function"){
+        const res = await _idbGetAnyKv(MAIN_DB, MAIN_STORE);
+        if(res && res.payload){
+          let v = res.payload;
+          if(v && v.value && (v.key===MAIN_KEY || String(v.key).trim()===MAIN_KEY)) v = v.value;
+          if(v) return { src:"IndexedDB("+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY+") via _idbGetAnyKv", state: v };
         }
-        if(w && w.client) return w;
       }
     }catch(e){}
-    if(!quiet) alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
     return null;
   }
 
