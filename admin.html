@@ -10309,22 +10309,14 @@ async function cloudPullFINAL(){
     return [];
   }
 
-  function normState(obj){
-    obj = (obj && typeof obj==="object") ? obj : {};
-    const out = {};
-    // tolerate legacy field names
-    out.sellers  = Array.isArray(obj.sellers)  ? obj.sellers  : (Array.isArray(obj.sellerList)?obj.sellerList:[]);
-    out.products = Array.isArray(obj.products) ? obj.products : (Array.isArray(obj.productList)?obj.productList:[]);
-    out.orders   = Array.isArray(obj.orders)   ? obj.orders   : (Array.isArray(obj.orderList)?obj.orderList:[]);
-    out.batches  = Array.isArray(obj.batches)  ? obj.batches  :
-                   (Array.isArray(obj.batchList)?obj.batchList:
-                   (Array.isArray(obj.settleBatches)?obj.settleBatches:
-                   (Array.isArray(obj.settlementBatches)?obj.settlementBatches:
-                   (Array.isArray(obj.payoutBatches)?obj.payoutBatches:
-                   (Array.isArray(obj.payout_batches)?obj.payout_batches:[])))));
-    // preserve other keys for compatibility
-    for(const k in obj){ if(!(k in out)) out[k]=obj[k]; }
-    return out;
+  function normState(s){
+    const p = (s && typeof s==="object") ? s : {};
+    return {
+      sellers: normArray(p.sellers),
+      products: normArray(p.products),
+      orders: normArray(p.orders),
+      batches: normArray(p.batches || p.batchList || p.settleBatches || p.settlementBatches || p.payoutBatches || p.payout_batches)
+    };
   }
 
   function fnv1a(str){
@@ -11546,6 +11538,257 @@ toast('云端设置已保存。');
       batches:(cloud.state.batches||[]).length
     }};
   };
+})();
+</script>
+
+
+<!-- === CLEAN SYNC MODULE (Plan A, REST-first, single source of truth) === -->
+<script>
+(function(){
+  'use strict';
+
+  const CANON_DB = 'ops_v642_main';
+  const CANON_STORE = 'kv';
+  const CANON_KEY = 'main_state_v1';
+  const CLOUD_TABLE = 'ops_cloud_snapshots_v1';
+  const CFG_KEY = 'OPS_CLOUD_CFG_V1';
+
+  function nowISO(){ return new Date().toISOString(); }
+
+  function uiAlert(msg){
+    try{
+      if (window.toast && typeof window.toast === 'function') return window.toast(msg);
+      if (window.U && typeof window.U.toast === 'function') return window.U.toast(msg);
+    }catch(_){}
+    alert(msg);
+  }
+
+  function readCfg(){
+    // Prefer unified cfg; fall back to legacy keys if present
+    const pick = (k)=>{ try{ const v=localStorage.getItem(k); return v && v.trim() ? v.trim() : ''; }catch(_){ return ''; } };
+    let cfg = null;
+    try{
+      const raw = localStorage.getItem(CFG_KEY);
+      if(raw) cfg = JSON.parse(raw);
+    }catch(_){}
+    cfg = cfg && typeof cfg==='object' ? cfg : {};
+    const url = (cfg.url || pick('OPS_SUPABASE_URL') || pick('OPS_CLOUD_URL') || pick('SUPABASE_URL')).trim();
+    const anon = (cfg.anon || cfg.anon_key || pick('OPS_SUPABASE_ANON_KEY') || pick('OPS_CLOUD_ANON_KEY') || pick('SUPABASE_ANON_KEY')).trim();
+    const app = (cfg.app || cfg.app_key || pick('OPS_CLOUD_APP_KEY') || pick('OPS_APP_KEY') || 'dalemy').trim();
+    const out = { url, anon, app };
+    // self-heal
+    try{ localStorage.setItem(CFG_KEY, JSON.stringify(out)); }catch(_){}
+    return out;
+  }
+
+  function openCanonDB(){
+    return new Promise((resolve,reject)=>{
+      const req = indexedDB.open(CANON_DB);
+      req.onupgradeneeded = (e)=>{
+        const db = req.result;
+        if(!db.objectStoreNames.contains(CANON_STORE)) db.createObjectStore(CANON_STORE, { keyPath: 'key' });
+      };
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error || new Error('indexedDB open failed'));
+    });
+  }
+
+  async function idbKvGet(key){
+    const db = await openCanonDB();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction(CANON_STORE,'readonly');
+      const st = tx.objectStore(CANON_STORE);
+      const r = st.get(key);
+      r.onsuccess = ()=> resolve(r.result || null);
+      r.onerror = ()=> reject(r.error || new Error('idb get failed'));
+    });
+  }
+  async function idbKvPut(record){
+    const db = await openCanonDB();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction(CANON_STORE,'readwrite');
+      const st = tx.objectStore(CANON_STORE);
+      const r = st.put(record);
+      r.onsuccess = ()=> resolve(true);
+      r.onerror = ()=> reject(r.error || new Error('idb put failed'));
+    });
+  }
+
+  function unwrapState(x){
+    let cur = x;
+    for(let i=0;i<8;i++){
+      if(!cur || typeof cur!=='object') break;
+      if(cur.value && typeof cur.value==='object'){ cur = cur.value; continue; }
+      if(cur.payload && typeof cur.payload==='object'){ cur = cur.payload; continue; }
+      if(cur.state && typeof cur.state==='object'){ cur = cur.state; continue; }
+      if(cur.items && typeof cur.items==='object'){ cur = cur.items; continue; }
+      if(cur.env && typeof cur.env==='object'){ cur = cur.env; continue; }
+      break;
+    }
+    return cur || {};
+  }
+
+  function pickArray(obj, keys){
+    for(const k of keys){
+      const v = obj && obj[k];
+      if(Array.isArray(v)) return v;
+    }
+    return [];
+  }
+
+  function normalizeState(raw){
+    const s = unwrapState(raw);
+    const sellers = pickArray(s, ['sellers','sellerList','seller_list','vendors','vendorList']);
+    const products = pickArray(s, ['products','productList','product_list','itemsProducts','productItems']);
+    const orders = pickArray(s, ['orders','orderList','order_list','orderItems','itemsOrders']);
+    const batches = pickArray(s, ['batches','batchList','batch_list','settleBatches','settlementBatches','payoutBatches','payout_batches']);
+    return { sellers, products, orders, batches, _rawKeys: Object.keys(s||{}) };
+  }
+
+  async function sha256Hex(str){
+    const enc = new TextEncoder().encode(str);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    const arr = Array.from(new Uint8Array(buf));
+    return arr.map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,8);
+  }
+
+  function restHeaders(anon){
+    return {
+      'apikey': anon,
+      'Authorization': 'Bearer ' + anon,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    };
+  }
+
+  async function restSelect(cfg){
+    const base = cfg.url.replace(/\/+$/,'');
+    const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=eq.${encodeURIComponent(cfg.app)}&limit=1`;
+    const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
+    const text = await r.text();
+    if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,200)}`);
+    const arr = JSON.parse(text || '[]');
+    return arr[0] || null;
+  }
+
+  async function restUpsert(cfg, row){
+    const base = cfg.url.replace(/\/+$/,'');
+    const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
+    const r = await fetch(url, {
+      method:'POST',
+      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify([row])
+    });
+    const text = await r.text();
+    if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
+    // return representation array or empty
+    try{ const arr = JSON.parse(text || '[]'); return arr[0] || null; }catch(_){ return null; }
+  }
+
+  async function readLocalCanonical(){
+    const rec = await idbKvGet(CANON_KEY);
+    return rec || null;
+  }
+
+  async function getLocalStateForPush(){
+    const rec = await readLocalCanonical();
+    const raw = rec ? (rec.value ?? rec.payload ?? rec) : null;
+    const norm = normalizeState(raw || {});
+    return { rec, raw, norm };
+  }
+
+  async function cloudStatus(){
+    const cfg = readCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app){
+      uiAlert('请先云端设置并保存（URL / anon / app_key）。');
+      return;
+    }
+    const local = await getLocalStateForPush();
+    let cloud = null;
+    try{ cloud = await restSelect(cfg); }catch(e){ uiAlert('云端状态失败：' + e.message); return; }
+
+    let cloudNorm = { sellers:[], products:[], orders:[], batches:[] };
+    if(cloud && cloud.payload){
+      cloudNorm = normalizeState(cloud.payload);
+    }
+    const lines = [
+      `本地来源: IndexedDB(${CANON_DB}/${CANON_STORE}/${CANON_KEY})`,
+      `本地统计: 卖家${local.norm.sellers.length} 产品${local.norm.products.length} 订单${local.norm.orders.length} 批次${local.norm.batches.length}`,
+      '',
+      `云端存在: ${cloud ? 'YES' : 'NO'}`,
+      cloud ? `云端 hash: ${cloud.hash||''}` : '',
+      cloud ? `云端 updated_at: ${cloud.updated_at||''}` : '',
+      cloud ? `云端统计: 卖家${cloudNorm.sellers.length} 产品${cloudNorm.products.length} 订单${cloudNorm.orders.length} 批次${cloudNorm.batches.length}` : ''
+    ].filter(Boolean).join('\n');
+    uiAlert(lines);
+  }
+
+  async function cloudPush(manual=true){
+    const cfg = readCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
+    const local = await getLocalStateForPush();
+    // If still zero, we show raw keys for diagnosis in console
+    if((local.norm.sellers.length + local.norm.products.length + local.norm.orders.length + local.norm.batches.length) === 0){
+      console.warn('[CLEAN-SYNC] local state normalized to empty. keys=', local.norm._rawKeys, 'rec=', local.rec);
+    }
+    const payload = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
+    const hash = await sha256Hex(JSON.stringify(payload));
+    const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload };
+    await restUpsert(cfg, row);
+    return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash };
+  }
+
+  async function cloudPull(){
+    const cfg = readCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
+    const cloud = await restSelect(cfg);
+    if(!cloud || !cloud.payload) throw new Error('云端无快照（payload 为空）');
+    const norm = normalizeState(cloud.payload);
+    const record = { key: CANON_KEY, value: { sellers: norm.sellers, products: norm.products, orders: norm.orders, batches: norm.batches }, updated_at: nowISO() };
+    await idbKvPut(record);
+    return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: cloud.hash };
+  }
+
+  function bind(){
+    const $ = (id)=> document.getElementById(id);
+    const bCfg = $('btnCloudCfg');
+    const bPush = $('btnCloudPush');
+    const bPull = $('btnCloudPull');
+    const bStatus = $('btnCloudStatus');
+
+    if(bStatus) bStatus.onclick = ()=> cloudStatus().catch(e=>uiAlert('云端状态失败：'+e.message));
+    if(bPush) bPush.onclick = async ()=>{
+      try{
+        const r = await cloudPush(true);
+        uiAlert(`推送成功：卖家${r.counts.sellers} 产品${r.counts.products} 订单${r.counts.orders} 批次${r.counts.batches}（hash=${r.hash}）`);
+      }catch(e){ uiAlert('云端推送失败：'+e.message); }
+    };
+    if(bPull) bPull.onclick = async ()=>{
+      try{
+        const r = await cloudPull();
+        uiAlert(`拉取成功：卖家${r.counts.sellers} 产品${r.counts.products} 订单${r.counts.orders} 批次${r.counts.batches}（hash=${r.hash||''}）`);
+        try{ location.reload(); }catch(_){}
+      }catch(e){ uiAlert('云端拉取失败：'+e.message); }
+    };
+
+    // Force override global hooks used by AUTO-PUSH/legacy patches
+    window.cloudStatus = cloudStatus;
+    window.cloudPush = async (opts={})=>{
+      const manual = !(opts && opts.quiet===true); // quiet usually means auto
+      const r = await cloudPush(manual);
+      return r;
+    };
+    window.cloudPull = cloudPull;
+
+    // hard-disable any existing auto push scheduler if present
+    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(_){}
+  }
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', bind);
+  }else{
+    bind();
+  }
 })();
 </script>
 
