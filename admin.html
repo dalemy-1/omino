@@ -10359,7 +10359,68 @@ Goal:
     return null;
   }
 
-  async function fetchCloudSnapshot(client, appKey){
+  
+  // ===== Supabase REST fallback (when supabase-js client is unavailable) =====
+  function _restBase(cfg){
+    return String(cfg.url||"").replace(/\/+$/,'') + "/rest/v1/";
+  }
+  function _restHeaders(cfg, extra){
+    const h = {
+      "apikey": String(cfg.anon||""),
+      "Authorization": "Bearer " + String(cfg.anon||""),
+      "Content-Type": "application/json"
+    };
+    if(extra) for(const k in extra) h[k]=extra[k];
+    return h;
+  }
+  async function _restSelectOne(cfg, table, appKey){
+    const url = _restBase(cfg) + encodeURIComponent(table)
+      + "?select=app_key,payload,hash,updated_at"
+      + "&app_key=eq." + encodeURIComponent(appKey)
+      + "&limit=1";
+    const r = await fetch(url, { method:"GET", headers:_restHeaders(cfg) });
+    if(!r.ok){
+      const t = await r.text().catch(()=> "");
+      throw new Error("rest_select_failed " + r.status + " " + t);
+    }
+    const arr = await r.json().catch(()=> []);
+    const row = Array.isArray(arr) ? (arr[0]||null) : (arr||null);
+    return row;
+  }
+  async function _restUpsert(cfg, table, row){
+    const url = _restBase(cfg) + encodeURIComponent(table) + "?on_conflict=app_key";
+    const r = await fetch(url, {
+      method:"POST",
+      headers:_restHeaders(cfg, {"Prefer":"resolution=merge-duplicates,return=minimal"}),
+      body: JSON.stringify(row)
+    });
+    if(!r.ok){
+      const t = await r.text().catch(()=> "");
+      throw new Error("rest_upsert_failed " + r.status + " " + t);
+    }
+    return true;
+  }
+  function _clientHasFrom(x){ return !!(x && typeof x.from==="function"); }
+async function fetchCloudSnapshot(client, appKey, cfgFallback){
+    // If supabase-js client is missing, fall back to PostgREST directly
+    if(!_clientHasFrom(client)){
+      const cfg = cfgFallback || (client && client.cfg) || null;
+      if(!cfg || !cfg.url || !cfg.anon) throw new Error("cloud_cfg_missing_for_rest");
+      const data = await _restSelectOne(cfg, TABLE, appKey);
+      if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
+      let obj = null;
+      if(data.payload==null){
+        obj = null;
+      }else if(typeof data.payload==="string"){
+        try{ obj = JSON.parse(data.payload); }catch(e){ obj = null; }
+      }else if(typeof data.payload==="object"){
+        obj = data.payload;
+      }else{ obj = null; }
+      if(obj && obj.env) obj = obj.env;
+      const st = normState(obj);
+      return { exists:true, state: st, hash: data.hash || null, updated_at: data.updated_at || null };
+    }
+
     const { data, error } = await client.from(TABLE).select("*").eq("app_key", appKey).maybeSingle();
     if(error) throw error;
     if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
@@ -10413,7 +10474,10 @@ Goal:
     return { sellers, products, orders, batches };
   }
 
-  async function pushSnapshot(client, appKey, state, note){
+  async function pushSnapshot(client, appKey, state, note, cfgFallback){
+    // If supabase-js client is missing, fall back to PostgREST directly
+    const __cfg_for_rest = cfgFallback || (client && client.cfg) || null;
+
     const env = normState(state);
     const payloadObj = { env };
     const payload = JSON.stringify(payloadObj);
@@ -10426,8 +10490,13 @@ Goal:
       updated_at: nowIso()
     };
 
-    const { error } = await client.from(TABLE).upsert(row, { onConflict: "app_key" });
-    if(error) throw error;
+    if(_clientHasFrom(client)){
+      const { error } = await client.from(TABLE).upsert(row, { onConflict: "app_key" });
+      if(error) throw error;
+    }else{
+      if(!__cfg_for_rest || !__cfg_for_rest.url || !__cfg_for_rest.anon) throw new Error("cloud_cfg_missing_for_rest");
+      await _restUpsert(__cfg_for_rest, TABLE, row);
+    }
 
     _lastPushedHash = hash;
     const counts = { sellers: pickCount(env.sellers), products: pickCount(env.products), orders: pickCount(env.orders), batches: pickCount(env.batches) };
@@ -10467,7 +10536,7 @@ Goal:
     try{
       const loc = await getLocalSnapshot();
       const ls = loc.state || {};
-      const cloud = await fetchCloudSnapshot(client, appKey);
+      const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
 
       const lc = { sellers:pickCount(ls.sellers), products:pickCount(ls.products), orders:pickCount(ls.orders), batches:pickCount(ls.batches) };
       const cc = { sellers:pickCount(cloud.state.sellers), products:pickCount(cloud.state.products), orders:pickCount(cloud.state.orders), batches:pickCount(cloud.state.batches) };
@@ -10524,7 +10593,7 @@ Goal:
           const { client, cfg } = wrap;
           const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
           if(!appKey){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
-          const cloud = await fetchCloudSnapshot(client, appKey);
+          const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
           if(!cloud.exists){ alert("云端无快照。"); return; }
           // write to main IDB
           if(typeof idbSet==="function"){
@@ -11337,19 +11406,18 @@ toast('云端设置已保存。');
       if(!ok) throw new Error("云端未就绪：Supabase SDK 未加载（可能被网络/插件拦截）");
     }
     const wrap = (typeof getCloudWrap==="function") ? getCloudWrap({quiet}) : null;
-    if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
-      // Try to provide a clearer reason
-      const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : null;
-      if(!cfg2) throw new Error("云端未配置：请先点【云端设置】填写 URL / anon / app_key");
-      throw new Error("云端未就绪：Supabase client 不可用（初始化失败或被旧逻辑覆盖）");
-    }
+    const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || null;
+    const client = (wrap && wrap.client) ? wrap.client : (wrap && wrap.from ? wrap : null);
+
+    if(!cfg2){    }
+
     const { client, cfg } = wrap;
     const appKey = getAppKey(cfg);
     if(!appKey) throw new Error("云端未配置：缺少 app_key（请点【云端设置】）");
 
     const loc = (typeof getLocalSnapshot==="function") ? await getLocalSnapshot() : {state:null,src:"(unknown)"};
     const localState = (typeof normState==="function") ? normState(loc.state) : (loc.state||{});
-    const cloud = await fetchCloudSnapshot(client, appKey);
+    const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
     const cloudState = cloud.state || { sellers:[], products:[], orders:[], batches:[] };
 
     // Safety: prevent empty local from overwriting non-empty cloud unless force
@@ -11372,7 +11440,7 @@ toast('云端设置已保存。');
       bc: (merged.batches||[]).length
     };
 
-    const out = await pushSnapshot(client, appKey, merged, "planA_push");
+    const out = await pushSnapshot(client, appKey, merged, "planA_push", cfg2);
     return { ok:true, skipped:false, hash: out.hash || null, counts };
   }
 
@@ -11383,7 +11451,7 @@ toast('云端设置已保存。');
   window.__planA_debug = async function(){
     const wrap = getCloudWrap(); if(!wrap) return null;
     const appKey = getAppKey(wrap.cfg);
-    const cloud = await fetchCloudSnapshot(wrap.client, appKey);
+    const cloud = await fetchCloudSnapshot(wrap.client, appKey, wrap.cfg);
     return { appKey, hash: cloud.hash, updated_at: cloud.updated_at, counts:{
       sellers:(cloud.state.sellers||[]).length,
       products:(cloud.state.products||[]).length,
