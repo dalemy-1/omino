@@ -11215,5 +11215,79 @@ toast('云端设置已保存。');
 })();
 </script>
 
+
+<script>
+/* ===== Plan A FINAL OVERRIDE (single-file) =====
+   Purpose: force all Push/Status to use the same payload schema (env:{sellers,products,orders,batches})
+   and the same Supabase client instance (getCloudWrap()).
+*/
+(function(){
+  function n(x){ return (x==null) ? 0 : (Array.isArray(x)?x.length: (typeof x==="object"?Object.keys(x).length:0)); }
+  function totalCounts(st){
+    return (n(st.sellers)+n(st.products)+n(st.orders)+n(st.batches));
+  }
+  function getAppKey(cfg){
+    return (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
+  }
+  async function planACloudPush(opts){
+    opts = opts||{};
+    const force = !!opts.force;
+    const quiet = !!opts.quiet;
+
+    const wrap = (typeof getCloudWrap==="function") ? getCloudWrap() : null;
+    if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
+      throw new Error("云端未就绪：Supabase client 不可用");
+    }
+    const { client, cfg } = wrap;
+    const appKey = getAppKey(cfg);
+    if(!appKey) throw new Error("云端未配置：缺少 app_key（请点【云端设置】）");
+
+    const loc = (typeof getLocalSnapshot==="function") ? await getLocalSnapshot() : {state:null,src:"(unknown)"};
+    const localState = (typeof normState==="function") ? normState(loc.state) : (loc.state||{});
+    const cloud = await fetchCloudSnapshot(client, appKey);
+    const cloudState = cloud.state || { sellers:[], products:[], orders:[], batches:[] };
+
+    // Safety: prevent empty local from overwriting non-empty cloud unless force
+    const localEmpty = totalCounts(localState)===0;
+    const cloudNonEmpty = totalCounts(cloudState)>0;
+    if(!force && localEmpty && cloudNonEmpty){
+      if(!quiet && typeof toastSafe==="function"){
+        toastSafe("自动推送已按安全策略跳过：本地为空，云端非空（Shift+点击可强制覆盖）");
+      }
+      return { ok:false, skipped:true, reason:"local_empty_safety", hash: cloud.hash||null, counts:{sc:0,pc:0,oc:0,bc:0} };
+    }
+
+    // Plan A: merge (cloud-first then local) => local updates win when newer, otherwise keep cloud
+    const merged = (typeof mergeStates==="function") ? mergeStates(localState, cloudState) : localState;
+
+    const counts = {
+      sc: (merged.sellers||[]).length,
+      pc: (merged.products||[]).length,
+      oc: (merged.orders||[]).length,
+      bc: (merged.batches||[]).length
+    };
+
+    const out = await pushSnapshot(client, appKey, merged, "planA_push");
+    return { ok:true, skipped:false, hash: out.hash || null, counts };
+  }
+
+  // Hard override: ensure the button handler always hits Plan A implementation
+  window.cloudPush = planACloudPush;
+
+  // Expose a lightweight debug helper
+  window.__planA_debug = async function(){
+    const wrap = getCloudWrap(); if(!wrap) return null;
+    const appKey = getAppKey(wrap.cfg);
+    const cloud = await fetchCloudSnapshot(wrap.client, appKey);
+    return { appKey, hash: cloud.hash, updated_at: cloud.updated_at, counts:{
+      sellers:(cloud.state.sellers||[]).length,
+      products:(cloud.state.products||[]).length,
+      orders:(cloud.state.orders||[]).length,
+      batches:(cloud.state.batches||[]).length
+    }};
+  };
+})();
+</script>
+
 </body>
 </html>
