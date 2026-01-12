@@ -763,6 +763,87 @@ function _countSnapshot(p){
   return { sc:sellers.length, pc:products.length, oc:orders.length, bc:batches.length };
 }
 
+function _fmtCounts(c){
+  c = c || {sc:0,pc:0,oc:0,bc:0};
+  return `卖家${c.sc} 产品${c.pc} 订单${c.oc} 批次${c.bc}`;
+}
+function _diffCounts(lc, cc){
+  lc = lc || {sc:0,pc:0,oc:0,bc:0};
+  cc = cc || {sc:0,pc:0,oc:0,bc:0};
+  const ds = lc.sc - cc.sc;
+  const dp = lc.pc - cc.pc;
+  const doo = lc.oc - cc.oc;
+  const db = lc.bc - cc.bc;
+  return { ds, dp, doo, db };
+}
+function _fmtDiff(d){
+  d = d || {ds:0,dp:0,doo:0,db:0};
+  const f = (x)=> (x===0 ? "0" : (x>0? `+${x}` : `${x}`));
+  return `Δ卖家${f(d.ds)} Δ产品${f(d.dp)} Δ订单${f(d.doo)} Δ批次${f(d.db)}`;
+}
+async function _preflightCompareCloud(){
+  const localSnap = (typeof getLocalSnapshotPreferIDB==="function")
+    ? await getLocalSnapshotPreferIDB()
+    : ((typeof state!=="undefined" && state) ? state : (typeof S!=="undefined" ? S : null));
+  const lc = _countSnapshot(localSnap);
+
+  let cloud = null;
+  let cc = {sc:0,pc:0,oc:0,bc:0};
+  try{
+    const sb = (typeof getCloudClientOrNull==="function") ? getCloudClientOrNull(true) : null;
+    if(sb && sb.cfg && sb.cfg.appKey){
+      const got = await fetchCloudSnapshot(sb.client, sb.cfg.appKey, sb.cfg);
+      cloud = got;
+      if(got && got.exists) cc = _countSnapshot(got.state);
+    }else{
+      cloud = { exists:false, hash:null, updated_at:null, state:null };
+    }
+  }catch(e){
+    cloud = { exists:false, hash:null, updated_at:null, state:null, error: String(e && (e.message||e) || e) };
+  }
+  const d = _diffCounts(lc, cc);
+  return { localSnap, lc, cloud, cc, diff:d };
+}
+function _confirmForcePull(pref){
+  const c = pref || {};
+  const lc = c.lc || {sc:0,pc:0,oc:0,bc:0};
+  const cc = c.cc || {sc:0,pc:0,oc:0,bc:0};
+  const diff = c.diff || _diffCounts(lc, cc);
+  const cloudInfo = (c.cloud && c.cloud.exists)
+    ? `云端：hash=${c.cloud.hash||""} updated_at=${c.cloud.updated_at||""}`
+    : `云端：无快照`;
+  const msg = `【强制拉取】将覆盖本地数据（IndexedDB）。
+
+本地：${_fmtCounts(lc)}
+云端：${_fmtCounts(cc)}
+${_fmtDiff(diff)}
+${cloudInfo}
+
+建议：先「导出 JSON」备份本地。
+
+确认继续强制拉取吗？`;
+  return confirm(msg);
+}
+function _confirmForcePush(pref){
+  const c = pref || {};
+  const lc = c.lc || {sc:0,pc:0,oc:0,bc:0};
+  const cc = c.cc || {sc:0,pc:0,oc:0,bc:0};
+  const diff = c.diff || _diffCounts(lc, cc);
+  const cloudInfo = (c.cloud && c.cloud.exists)
+    ? `云端：hash=${c.cloud.hash||""} updated_at=${c.cloud.updated_at||""}`
+    : `云端：无快照`;
+  const msg = `【强制推送】将无视“hash 未变化”并写入云端（仍会先合并）。
+
+本地：${_fmtCounts(lc)}
+云端：${_fmtCounts(cc)}
+${_fmtDiff(diff)}
+${cloudInfo}
+
+确认继续强制推送吗？`;
+  return confirm(msg);
+}
+
+
 // -------------------------
 // Plan A merge + hash helpers
 // -------------------------
@@ -1009,6 +1090,10 @@ async function cloudPush(opts){
     // Step 2: merge (Plan A: union by id; prefer newer updatedAt)
     const localSnap = finalPayload || {};
     const cloudSnap = (cloud && cloud.payload) ? cloud.payload : null;
+    const cloudCounts = (cloud && cloud.counts && typeof cloud.counts==="object")
+      ? { sc:+(cloud.counts.sc||0), pc:+(cloud.counts.pc||0), oc:+(cloud.counts.oc||0), bc:+(cloud.counts.bc||0) }
+      : (cloudSnap ? _countSnapshot(cloudSnap) : {sc:0,pc:0,oc:0,bc:0});
+
 
     const merged = (cloudSnap && typeof mergeSnapshotsPlanA==="function")
       ? mergeSnapshotsPlanA(localSnap, cloudSnap)
@@ -1017,8 +1102,20 @@ async function cloudPush(opts){
     const mergedCounts = _countSnapshot(merged);
     const mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(merged)) : Date.now();
 
-    // If we have cloud hash and merged has same hash, skip push
-    if(cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
+    // Force push confirmation (show local vs cloud counts) — only when force=true
+    if(force){
+      const pref = {
+        lc: { sc, pc, oc, bc },
+        cc: cloudCounts,
+        cloud: { exists: !!cloud, hash: cloud && cloud.hash, updated_at: cloud && cloud.updated_at },
+        diff: _diffCounts({ sc, pc, oc, bc }, cloudCounts)
+      };
+      if(!_confirmForcePush(pref)) return { ok:false, cancelled:true };
+    }
+
+
+    // If we have cloud hash and merged has same hash, skip push (unless force)
+    if(!force && cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
       console.log(`[PUSH] 无需推送：合并后 hash 未变化（hash=${mergedHash}）`);
       return { ok:true, skipped:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
     }
@@ -1055,12 +1152,31 @@ async function cloudPull(opts){
   const sb = getCloudClientOrNull();
   if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
   const { client, cfg } = sb;
-  if(!force){
-    if(!confirm(`从云端拉取会覆盖本地当前数据。
+  {
+    // Preflight compare (local vs cloud) for safer decision-making
+    let pref = null;
+    try{ pref = await _preflightCompareCloud(); }catch(_e){ pref = null; }
+
+    if(!force){
+      const lc = pref && pref.lc ? pref.lc : _countSnapshot((typeof S!=="undefined")?S:null);
+      const cc = pref && pref.cc ? pref.cc : {sc:0,pc:0,oc:0,bc:0};
+      const cloudInfo = (pref && pref.cloud && pref.cloud.exists)
+        ? `云端：hash=${pref.cloud.hash||""} updated_at=${pref.cloud.updated_at||""}`
+        : `云端：无快照`;
+      const msg = `从云端拉取会覆盖本地当前数据。
+
+本地：${_fmtCounts(lc)}
+云端：${_fmtCounts(cc)}
+${_fmtDiff(_diffCounts(lc, cc))}
+${cloudInfo}
 
 建议：先点「导出 JSON」本地存一份备份。
 
-确定要继续吗？`)) return { ok:false, cancelled:true };
+确定要继续吗？`;
+      if(!confirm(msg)) return { ok:false, cancelled:true };
+    }else{
+      if(!_confirmForcePull(pref)) return { ok:false, cancelled:true };
+    }
   }
 
   try{
