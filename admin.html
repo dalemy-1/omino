@@ -410,17 +410,52 @@ const CLOUD_CFG_KEY = "OPS_CLOUD_CFG_V1";
 function getCloudCfg(){
   try{
     const o = JSON.parse(localStorage.getItem(CLOUD_CFG_KEY) || "null") || {};
-    // 兼容字段：app_key / appKey（双向补齐）
-    const ak = String((o.app_key || o.appKey || o.appkey || o.app || "") || "").trim();
+
+    // ---- Fallback: read component keys written by other patches/overrides ----
+    const first = (keys)=>{
+      for(const k of keys){
+        const v = (localStorage.getItem(k)||"").trim();
+        if(v) return v;
+      }
+      return "";
+    };
+
+    const urlKeys = [
+      "OPS_CLOUD_URL","OPS_SUPABASE_URL","SUPABASE_URL","NEXT_PUBLIC_SUPABASE_URL","SUPABASE_PROJECT_URL","supabase_url","SUPABASE_URL_V2"
+    ];
+    const anonKeys = [
+      "OPS_CLOUD_ANON_KEY","OPS_CLOUD_ANON","OPS_SUPABASE_ANON_KEY","SUPABASE_ANON_KEY","NEXT_PUBLIC_SUPABASE_ANON_KEY","SUPABASE_KEY","SUPABASE_ANON","anon"
+    ];
+    const appKeys = [
+      "OPS_CLOUD_APP_KEY","OPS_CLOUD_APPKEY","OPS_CLOUD_APPKEY_V1","OPS_APP_KEY","OPS_SYNC_APP_KEY","OPS_SYNC_APPKEY","APP_KEY","app_key","appKey"
+    ];
+
+    // Normalize app_key/appKey
+    const ak = String((o.app_key || o.appKey || o.appkey || o.app || "") || "").trim() || first(appKeys);
     if(ak){
       if(!o.app_key) o.app_key = ak;
       if(!o.appKey) o.appKey = ak;
+    }
+
+    // Fill url/anon if missing
+    if(!o.url) o.url = first(urlKeys);
+    if(!o.anon) o.anon = first(anonKeys);
+
+    // Also accept legacy field names if present
+    if(!o.url && (o.supabase_url||o.project_url)) o.url = (o.supabase_url||o.project_url);
+    if(!o.anon && (o.anonKey||o.anon_key||o.key)) o.anon = (o.anonKey||o.anon_key||o.key);
+
+    // Persist back if we successfully recovered missing fields
+    if(o.url && o.anon && (o.app_key||o.appKey)){
+      try{ localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify(o)); }catch(_e){}
     }
     return o;
   }catch(e){
     return {};
   }
 }
+
+
 function setCloudCfg(cfg){
   try{
     const o = cfg || {};
