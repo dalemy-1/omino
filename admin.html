@@ -8269,11 +8269,12 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     return 0;
   }
   function counts(payload){
+    const s = unwrapState(payload) || {};
     return {
-      sellers: countAny(payload, ["sellers","sellerList","sellerRows","vendors"]),
-      products: countAny(payload, ["products","productList","productRows","items"]),
-      orders: countAny(payload, ["orders","orderList","orderRows"]),
-      batches: countAny(payload, ["batches","batchList","settleBatches","settlementBatches","payoutBatches"])
+      sellers: countAny(s, ["sellers","sellerList"]),
+      products: countAny(s, ["products","productList"]),
+      orders: countAny(s, ["orders","orderList"]),
+      batches: countAny(s, ["batches","batchList","settleBatches","settlementBatches","payoutBatches"])
     };
   }
 
@@ -10064,9 +10065,31 @@ Goal:
   // 统一解包：兼容 payload = {v, state, meta} 或直接 state
   function unwrapState(x){
     try{
-      if(x && typeof x === "object" && x.state && typeof x.state === "object") return x.state;
+      // 1) direct state
+      if(x && typeof x==="object"){
+        // payload wrapper: {v, state:{ok, items:[{key, value:{key,value:STATE}}]}}
+        if(x.state && typeof x.state==="object"){
+          const s = x.state;
+          if(Array.isArray(s.items) && s.items.length){
+            // prefer main_state_v1
+            const it = s.items.find(i=>i && (i.key==="main_state_v1" || i.key==="main_state" || (""+i.key).includes("main_state"))) || s.items[0];
+            let v = it && (it.value ?? it);
+            if(v && typeof v==="object" && "value" in v) v = v.value;
+            if(v && typeof v==="object" && "value" in v && v.value && typeof v.value==="object") v = v.value;
+            return v || {};
+          }
+          // sometimes state is stored directly under x.state
+          if("sellers" in s || "products" in s || "orders" in s || "batches" in s) return s;
+        }
+        // snapshot wrapper: {payload:{...}}
+        if(x.payload && typeof x.payload==="object"){
+          return unwrapState(x.payload);
+        }
+        // raw state object
+        if("sellers" in x || "products" in x || "orders" in x || "batches" in x) return x;
+      }
     }catch(_){}
-    return x;
+    return (x && x.state) ? x.state : x;
   }
 
   function toastSafe(msg, kind){
