@@ -11405,13 +11405,14 @@ toast('云端设置已保存。');
       const ok = await ensureSupabaseSDK();
       if(!ok) throw new Error("云端未就绪：Supabase SDK 未加载（可能被网络/插件拦截）");
     }
-    const wrap = (typeof getCloudWrap==="function") ? getCloudWrap({quiet}) : null;
+    const wrap = (typeof getCloudWrap==="function") ? getCloudWrap({quiet, forceRebuild:true}) : null;
     const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || null;
-    const client = (wrap && wrap.client) ? wrap.client : (wrap && wrap.from ? wrap : null);
 
-    if(!cfg2){    }
-
-    const { client, cfg } = wrap;
+    if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
+      throw new Error("云端未就绪：Supabase client 不可用（初始化失败或被旧逻辑覆盖）");
+    }
+    const client = wrap.client;
+    const cfg = wrap.cfg || cfg2 || null;
     const appKey = getAppKey(cfg);
     if(!appKey) throw new Error("云端未配置：缺少 app_key（请点【云端设置】）");
 
