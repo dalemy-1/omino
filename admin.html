@@ -619,56 +619,87 @@ function _pickSnapshotFromKvItems(items, preferKey){
   return best ? { ok:true, key:best.key, payload:best.value } : { ok:false, reason:"no kv" };
 }
 function _normalizeSnapshot(payload){
-  // Robustly unwrap kv-wrapped snapshots (common shapes: {key, value:{...}}, {value:{key,value:{...}}}, {state:{...}}, {data:{...}})
+  // Robustly unwrap snapshots from various wrappers, including IndexedDB KV dumps.
+  // Goal: return a canonical state object that contains sellers/products/orders/batches arrays (or equivalent list fields).
+
+  const hasArr = (obj,k)=>obj && typeof obj==="object" && Array.isArray(obj[k]);
+
+  const looksLikeSnapshot = (obj)=>{
+    return hasArr(obj,"sellers") || hasArr(obj,"products") || hasArr(obj,"orders") || hasArr(obj,"batches") ||
+           hasArr(obj,"sellerList") || hasArr(obj,"productList") || hasArr(obj,"orderList") || hasArr(obj,"batchList");
+  };
+
+  const unwrapKvItems = (kv, preferKey)=>{
+    // Shapes:
+    //  A) {ok:true, items:[{key, value}, ...]}
+    //  B) {v:1, state:{ok:true, items:[...]}, meta:{...}}
+    // Each item can be {key, value:{key,value:{...}}} or {key, value:{...}}
+    if(!kv || typeof kv!=="object") return null;
+
+    const bag = (kv.items && Array.isArray(kv.items)) ? kv :
+                (kv.state && kv.state.items && Array.isArray(kv.state.items)) ? kv.state :
+                null;
+    if(!bag) return null;
+
+    const items = bag.items || [];
+    if(!items.length) return null;
+
+    let pick = null;
+    if(preferKey){
+      pick = items.find(it=>it && (it.key===preferKey || it.k===preferKey)) || null;
+    }
+    if(!pick) pick = items[0];
+
+    if(!pick) return null;
+
+    let v = (pick.value!==undefined) ? pick.value : (pick.v!==undefined ? pick.v : null);
+
+    // unwrap nested {key,value:{...}}
+    for(let i=0;i<6;i++){
+      if(!v || typeof v!=="object") break;
+      if(looksLikeSnapshot(v)) return v;
+      if(v.value && typeof v.value==="object"){ v = v.value; continue; }
+      if(v.data && typeof v.data==="object"){ v = v.data; continue; }
+      break;
+    }
+    return v;
+  };
+
+  // First: direct snapshot?
+  if(looksLikeSnapshot(payload)) return payload;
+
+  // Second: KV items wrapper (our IDB reader produces this)
+  const kvUnwrapped = unwrapKvItems(payload, "main_state_v1");
+  if(kvUnwrapped && looksLikeSnapshot(kvUnwrapped)) return kvUnwrapped;
+
+  // Third: generic iterative unwrapping
   let p = payload;
-  for(let i=0;i<6;i++){
+  for(let i=0;i<8;i++){
     if(!p || typeof p!=="object") break;
 
-    // if p already looks like a snapshot
-    const hasArr = (k)=>Array.isArray(p[k]);
-    if(hasArr("sellers") || hasArr("products") || hasArr("orders") || hasArr("batches") ||
-       hasArr("sellerList") || hasArr("productList") || hasArr("orderList") || hasArr("batchList")){
-      return p;
+    if(looksLikeSnapshot(p)) return p;
+
+    // If current object is an IDB KV bag, try unwrap (without requiring preferKey)
+    const maybeKv = unwrapKvItems(p, null);
+    if(maybeKv && typeof maybeKv==="object"){
+      p = maybeKv;
+      continue;
     }
 
-    // unwrap common wrappers
     if(p.value && typeof p.value==="object"){ p = p.value; continue; }
-    if(p.state && typeof p.state==="object"){ p = p.state; continue; }
     if(p.data && typeof p.data==="object"){ p = p.data; continue; }
-
-    // idb-keyval style: {key, value}
-    if(p.key && p.value && typeof p.value==="object"){ p = p.value; continue; }
-
-    break;
-  }
-  return p || null;
-}
-function _countSnapshot(p){
-  const getArr = (...keys)=>{
-    for(const k of keys){
-      const v = p && p[k];
-      if(Array.isArray(v)) return v;
+    // Avoid unwrapping into {ok:true,items:[...]} blindly; handle via unwrapKvItems above.
+    if(p.state && typeof p.state==="object"){
+      // Only unwrap if it looks like a snapshot, otherwise keep searching via unwrapKvItems.
+      if(looksLikeSnapshot(p.state)) { p = p.state; continue; }
+      const maybe = unwrapKvItems(p, "main_state_v1");
+      if(maybe && typeof maybe==="object"){ p = maybe; continue; }
+      p = p.state;
+      continue;
     }
-    return [];
-  };
-  const sellers = getArr("sellers","sellerList","seller_items");
-  const products = getArr("products","productList","product_items");
-  const orders = getArr("orders","orderList","order_items");
-  const batches = getArr("batches","settlementBatches","payoutBatches","batchList");
-  return { sc:sellers.length, pc:products.length, oc:orders.length, bc:batches.length };
-}
-
-// -------------------------
-// Plan A merge + hash helpers
-// -------------------------
-function simpleHash(str){
-  // FNV-1a 32-bit
-  let h = 0x811c9dc5;
-  for(let i=0;i<str.length;i++){
-    h ^= str.charCodeAt(i);
-    h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
   }
-  return String(h);
+
+  return p || {};
 }
 function _getIdFromItem(it){
   if(!it || typeof it!=="object") return null;
@@ -835,7 +866,8 @@ async function cloudStatus(){
       alert("云端暂无快照（app_key=" + cfg.appKey + "）。");
       return;
     }
-    const payload = data.payload || {};
+    let payload = data.payload || {};
+    payload = _normalizeSnapshot(payload);
     const c = _countSnapshot(payload);
     const size = (()=>{ try{return JSON.stringify(payload).length;}catch(e){return 0;} })();
     const msg =
@@ -865,8 +897,10 @@ async function cloudPush(opts){
       alert("无法获取本地数据快照：\n" + (local.reason||"unknown"));
       return { ok:false, reason:"no_local_snapshot" };
     }
-    const finalPayload = local.payload || {};
-    const counts = local.counts || _countSnapshot(finalPayload);
+    let finalPayload = local.payload || {};
+    finalPayload = _normalizeSnapshot(finalPayload);
+    let counts = local.counts || _countSnapshot(finalPayload);
+    if(!(counts.sc||counts.pc||counts.oc||counts.bc)) counts = _countSnapshot(finalPayload);
     const sc = counts.sc||0, pc = counts.pc||0, oc = counts.oc||0, bc = counts.bc||0;
 
     // Plan A safety gate: block "empty local" unless forced
