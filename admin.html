@@ -10122,12 +10122,13 @@ Goal:
     }
 
     try{
-      const hash = String(Date.now());
-      const row = { app_key: cfg.app_key, payload: JSON.stringify(s), hash };
-      const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
-      if(error) throw error;
-
-      toastSafe("云端推送成功：卖家"+sc+" 产品"+pc+" 订单"+oc+" 批次"+bc+"（hash="+hash+"）");
+      const r = await cloudPushAPI({ force:true, quiet:false });
+      if(r && r.ok){
+        const note = r.chunked ? "（分块推送）" : "";
+        toastSafe("云端推送成功"+note+"：卖家"+sc+" 产品"+pc+" 订单"+oc+" 批次"+bc+"（hash="+(r.hash||"")+"）");
+      }else{
+        alert("云端推送失败：\n"+(r && (r.error||r.note) ? (r.error||r.note) : "unknown"));
+      }
     }catch(e){
       console.error(e);
       alert("云端推送失败：\n"+(e && e.message ? e.message : String(e)));
@@ -10179,10 +10180,71 @@ Goal:
       }
     }
 
-    const hash = (typeof U!=='undefined' && U.hashString) ? U.hashString(JSON.stringify(s)) : String(Date.now());
-    const row = { app_key: cfg.app_key, payload: s, hash, updated_at: new Date().toISOString() };
+    
+    const payloadStr = JSON.stringify(s);
+    const hash = (typeof U!=='undefined' && U.hashString) ? U.hashString(payloadStr) : String(Date.now());
+    const updated_at = new Date().toISOString();
 
-    if(client && typeof client.from==='function'){
+    // Large payload protection: chunked push (manifest + chunks) to avoid statement timeout (e.g. 57014)
+    const CHUNK_SIZE = 220000; // chars per chunk (safe for PostgREST + server timeout)
+    const useChunk = payloadStr.length > CHUNK_SIZE * 3; // only chunk when clearly large
+
+    async function restDeleteChunks(){
+      const base = String(cfg.url).replace(/\/+$/,'');
+      const pattern = cfg.app_key + "__chunk__%";
+      const url = base + '/rest/v1/ops_cloud_snapshots_v1?app_key=like.' + encodeURIComponent(pattern);
+      const res = await fetch(url, {
+        method:'DELETE',
+        headers:{
+          'apikey': cfg.anon,
+          'Authorization': 'Bearer ' + cfg.anon
+        }
+      });
+      // ignore 204/200; if forbidden, we just skip cleanup
+      if(!res.ok && res.status!==404){
+        await res.text().catch(()=> '');
+      }
+    }
+
+    async function pushChunked(){
+      // Best-effort cleanup old chunks (not required for correctness)
+      try{ await restDeleteChunks(); }catch(_){}
+
+      const chunks = [];
+      const total = Math.ceil(payloadStr.length / CHUNK_SIZE);
+      for(let i=0;i<total;i++){
+        const part = payloadStr.slice(i*CHUNK_SIZE, (i+1)*CHUNK_SIZE);
+        const key = cfg.app_key + "__chunk__" + String(i+1).padStart(5,'0');
+        chunks.push({ app_key:key, payload: part, hash, updated_at });
+      }
+      const manifest = {
+        __chunked__: true,
+        version: 1,
+        hash,
+        updated_at,
+        chunk_count: total,
+        chunk_size: CHUNK_SIZE,
+        counts: { sc, pc, oc, bc }
+      };
+      const manifestRow = { app_key: cfg.app_key, payload: JSON.stringify(manifest), hash, updated_at };
+
+      // Push chunks first, then manifest finalize (so pull won't see incomplete set as often)
+      for(const r of chunks){ await restUpsert(r); }
+      if(client && typeof client.from==='function'){
+        const { error } = await client.from('ops_cloud_snapshots_v1').upsert(manifestRow, { onConflict:'app_key' });
+        if(error) throw error;
+      }else{
+        await restUpsert(manifestRow);
+      }
+      return { ok:true, hash, chunked:true, counts:{ sc, pc, oc, bc }, src: loc.src };
+    }
+
+    if(useChunk){
+      return await pushChunked();
+    }
+
+    const row = { app_key: cfg.app_key, payload: payloadStr, hash, updated_at };
+if(client && typeof client.from==='function'){
       const { error } = await client.from('ops_cloud_snapshots_v1').upsert(row, { onConflict:'app_key' });
       if(error) throw error;
     }else{
@@ -10198,15 +10260,84 @@ async function cloudPullFINAL(){
     if(!cfg || !cfg.app_key){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
 
     try{
-      const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
-      if(error) throw error;
+      
+      async function restGetOne(appKey){
+        const base = String(cfg.url).replace(/\/+$/,'');
+        const url = base + '/rest/v1/ops_cloud_snapshots_v1?select=*&app_key=eq.' + encodeURIComponent(appKey);
+        const res = await fetch(url, {
+          method:'GET',
+          headers:{
+            'apikey': cfg.anon,
+            'Authorization': 'Bearer ' + cfg.anon
+          }
+        });
+        if(!res.ok){
+          const txt = await res.text().catch(()=> '');
+          throw new Error('rest_select_failed ' + res.status + ' ' + txt);
+        }
+        const arr = await res.json().catch(()=> []);
+        return (arr && arr[0]) ? arr[0] : null;
+      }
+
+      async function restListChunks(){
+        const base = String(cfg.url).replace(/\/+$/,'');
+        const pattern = cfg.app_key + "__chunk__%";
+        const url = base + '/rest/v1/ops_cloud_snapshots_v1?select=app_key,payload,hash,updated_at&app_key=like.' + encodeURIComponent(pattern) + '&order=app_key.asc';
+        const res = await fetch(url, {
+          method:'GET',
+          headers:{
+            'apikey': cfg.anon,
+            'Authorization': 'Bearer ' + cfg.anon
+          }
+        });
+        if(!res.ok){
+          const txt = await res.text().catch(()=> '');
+          throw new Error('rest_list_chunks_failed ' + res.status + ' ' + txt);
+        }
+        return await res.json().catch(()=> []);
+      }
+
+      let data = null;
+      // Prefer REST (more stable across environments), fallback to client if needed
+      try{
+        data = await restGetOne(cfg.app_key);
+      }catch(e){
+        if(client && typeof client.from==='function'){
+          const r = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
+          if(r && r.error) throw r.error;
+          data = r ? r.data : null;
+        }else{
+          throw e;
+        }
+      }
+
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
       let obj = null;
       try{ obj = data.payload ? JSON.parse(data.payload) : null; }catch(e){ obj = null; }
       if(obj && obj.env) obj = obj.env; //兼容旧封装
 
+      // Chunked payload support (manifest + chunks)
+      if(obj && obj.__chunked__){
+        const manifest = obj;
+        const rows = await restListChunks();
+        if(!rows || rows.length===0){
+          alert("云端快照为分块模式，但未找到分块数据。请重试拉取或重新推送一次。");
+          return;
+        }
+        let full = "";
+        for(const r of rows){
+          if(r && typeof r.payload === "string") full += r.payload;
+        }
+        try{ obj = JSON.parse(full); }catch(e){
+          alert("分块数据合并后解析失败。请重试拉取或重新推送一次。");
+          return;
+        }
+        if(manifest && manifest.env) obj = manifest.env; //（一般不会）
+      }
+
       if(!obj){ alert("云端快照 payload 为空或解析失败。"); return; }
+
 
       // Write to IDB main
       try{
@@ -10747,720 +10878,14 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
   }
 })();
 </script>
-<script>
-(function(){
-  'use strict';
 
-  // =========================
-  // Sync Patch (Single-file) — Plan A Safe Merge Push
-  // Goals:
-  // 1) One button binding set (override old handlers)
-  // 2) Canonical local snapshot first: localStorage['ops_rebuild_v6_4_2_state']
-  // 3) One cloud table: ops_cloud_snapshots_v1 (onConflict: app_key)
-  // 4) Optional same-origin proxy: /api/sync/*
-  // =========================
-
-  var CANONICAL_LS_KEY = 'ops_rebuild_v6_4_2_state';
-  var CLOUD_TABLE = 'ops_cloud_snapshots_v1';
-
-  // Legacy/compat keys (read)
-  var LS_KEYS = {
-    url: ['OPS_CLOUD_URL','OPS_SYNC_CLOUD_URL'],
-    anon: ['OPS_CLOUD_ANON_KEY','OPS_SYNC_ANON_KEY'],
-    app: ['OPS_CLOUD_APP_KEY','OPS_SYNC_APP_KEY','OPS_APP_KEY']
-  };
-
-  function nowIso(){ return new Date().toISOString(); }
-
-  function getLSFirst(keys){
-    for(var i=0;i<keys.length;i++){
-      var v = localStorage.getItem(keys[i]);
-      if(v && String(v).trim()) return String(v).trim();
-    }
-    return '';
-  }
-  function setLSPrimary(key, val){
-    try{ localStorage.setItem(key, val); }catch(_){}
-  }
-
-  function toast(msg){
-    try{
-      if(typeof window.toast === 'function') return window.toast(msg);
-      if(window.UI && typeof window.UI.toast === 'function') return window.UI.toast(msg);
-    }catch(_){}
-    try{ console.log('[SYNC]', msg); }catch(_){}
-    try{ alert(msg); }catch(_){}
-  }
-  function log(){
-    try{ console.log.apply(console, arguments); }catch(_){}
-  }
-  function warn(){
-    try{ console.warn.apply(console, arguments); }catch(_){}
-  }
-  function err(){
-    try{ console.error.apply(console, arguments); }catch(_){}
-  }
-
-  function safeParseJSON(s, fallback){
-    try{ return JSON.parse(s); }catch(_){ return fallback; }
-  }
-
-  function stableStringify(obj){
-    // deterministic-ish stringify for hashing
-    var seen = new WeakSet();
-    return JSON.stringify(obj, function(k,v){
-      if(v && typeof v === 'object'){
-        if(seen.has(v)) return;
-        seen.add(v);
-        if(!Array.isArray(v)){
-          var out = {};
-          Object.keys(v).sort().forEach(function(kk){ out[kk]=v[kk]; });
-          return out;
-        }
-      }
-      return v;
-    });
-  }
-
-  function djb2(str){
-    var h=5381, i=str.length;
-    while(i){ h = ((h<<5)+h) ^ str.charCodeAt(--i); }
-    return (h>>>0).toString(16);
-  }
-
-  function normalizeState(state){
-    state = state && typeof state === 'object' ? state : {};
-    // accept multiple historical shapes
-    var sellers  = state.sellers  || state.sellerList  || state.sellerItems  || [];
-    var products = state.products || state.productList || state.productItems || [];
-    var orders   = state.orders   || state.orderList   || state.orderItems   || [];
-    var batches  = state.batches  || state.settleBatches || state.payoutBatches || state.batchList || [];
-    // ensure arrays
-    sellers  = Array.isArray(sellers)  ? sellers  : [];
-    products = Array.isArray(products) ? products : [];
-    orders   = Array.isArray(orders)   ? orders   : [];
-    batches  = Array.isArray(batches)  ? batches  : [];
-    // re-pack into canonical keys but keep originals too
-    return {
-      _raw: state,
-      sellers: sellers,
-      products: products,
-      orders: orders,
-      batches: batches
-    };
-  }
-
-  function getLocalCanonical(){
-    var raw = localStorage.getItem(CANONICAL_LS_KEY);
-    var obj = safeParseJSON(raw || '', null);
-    if(!obj) return { ok:false, source: 'localStorage:'+CANONICAL_LS_KEY, state:null, counts:{sc:0,pc:0,oc:0,bc:0} };
-    var n = normalizeState(obj);
-    var counts = { sc:n.sellers.length, pc:n.products.length, oc:n.orders.length, bc:n.batches.length };
-    return { ok:true, source:'localStorage:'+CANONICAL_LS_KEY, state:obj, norm:n, counts:counts };
-  }
-
-  function mergeById(localArr, remoteArr){
-    localArr = Array.isArray(localArr)? localArr : [];
-    remoteArr = Array.isArray(remoteArr)? remoteArr : [];
-    // Determine best id field
-    var idFields = ['id','uuid','order_id','seller_id','product_id','asin','orderNo','order_no','batch_id'];
-    function getId(x){
-      if(!x || typeof x!=='object') return '';
-      for(var i=0;i<idFields.length;i++){
-        var f=idFields[i];
-        if(x[f]!=null && String(x[f]).trim()!=='') return String(x[f]);
-      }
-      return '';
-    }
-    function getUpd(x){
-      if(!x || typeof x!=='object') return 0;
-      var t = x.updated_at || x.updatedAt || x.updated || x.ts || x.time;
-      var d = Date.parse(t);
-      return isFinite(d)? d : 0;
-    }
-    var map = new Map();
-    for(var i=0;i<remoteArr.length;i++){
-      var r=remoteArr[i]; var rid=getId(r);
-      if(rid) map.set(rid, r);
-    }
-    for(var j=0;j<localArr.length;j++){
-      var l=localArr[j]; var lid=getId(l);
-      if(!lid){ continue; }
-      if(!map.has(lid)){ map.set(lid, l); continue; }
-      var cur = map.get(lid);
-      map.set(lid, getUpd(l) >= getUpd(cur) ? l : cur);
-    }
-    // keep items without id: append (local wins by ordering)
-    var out = Array.from(map.values());
-    for(var a=0;a<remoteArr.length;a++){
-      var rr=remoteArr[a]; if(!getId(rr)) out.push(rr);
-    }
-    for(var b=0;b<localArr.length;b++){
-      var ll=localArr[b]; if(!getId(ll)) out.push(ll);
-    }
-    return out;
-  }
-
-  function mergePayload(localState, remoteState){
-    var L = normalizeState(localState || {});
-    var R = normalizeState(remoteState || {});
-    var mergedRaw = Object.assign({}, R._raw || {}, L._raw || {});
-    // merge canonical arrays by id
-    mergedRaw.sellers  = mergeById(L.sellers,  R.sellers);
-    mergedRaw.products = mergeById(L.products, R.products);
-    mergedRaw.orders   = mergeById(L.orders,   R.orders);
-    mergedRaw.batches  = mergeById(L.batches,  R.batches);
-    // also try to keep historical key aliases consistent
-    mergedRaw.sellerList = mergedRaw.sellers;
-    mergedRaw.productList = mergedRaw.products;
-    mergedRaw.orderList = mergedRaw.orders;
-    mergedRaw.batchList = mergedRaw.batches;
-    return mergedRaw;
-  }
-
-  function computeCounts(state){
-    var n = normalizeState(state || {});
-    return { sc:n.sellers.length, pc:n.products.length, oc:n.orders.length, bc:n.batches.length };
-  }
-
-  function getCfg(){
-    var url = getLSFirst(LS_KEYS.url);
-    var anon = getLSFirst(LS_KEYS.anon);
-    var appKey = getLSFirst(LS_KEYS.app);
-    return { url:url, anon:anon, appKey:appKey };
-  }
-
-  function assertCfg(cfg){
-    if(!cfg.url || !cfg.anon || !cfg.appKey) return false;
-    return true;
-  }
-
-  function openCloudSettings(){
-    var cfg = getCfg();
-    var url = prompt('Supabase URL（例如 https://xxxx.supabase.co ）', cfg.url || '');
-    if(url===null) return;
-    var anon = prompt('Supabase anon key', cfg.anon || '');
-    if(anon===null) return;
-    var app = prompt('app_key（同一套系统建议固定，例如 ops_v642）', cfg.appKey || 'ops_v642');
-    if(app===null) return;
-
-    setLSPrimary('OPS_CLOUD_URL', String(url).trim());
-    setLSPrimary('OPS_CLOUD_ANON_KEY', String(anon).trim());
-    setLSPrimary('OPS_CLOUD_APP_KEY', String(app).trim());
-
-    
-    // legacy兼容：同时写入 OPS_CLOUD_CFG_V1 供旧逻辑读取
-    try{
-      const legacyCfg = { url: String(url||'').trim(), anonKey: String(anon||'').trim(), appKey: String(app||'').trim(), updated_at: new Date().toISOString() };
-      setLSPrimary('OPS_CLOUD_CFG_V1', JSON.stringify(legacyCfg));
-    }catch(e){}
-toast('云端设置已保存。');
-  }
-
-  // ---------- Cloud API (proxy-first, then direct REST) ----------
-  function hasSameOriginProxy(){
-    // If your Vercel project provides /api/sync/ping, we prefer it.
-    return true;
-  }
-
-  function apiFetchProxy(path, body){
-    return fetch(path, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify(body || {})
-    }).then(function(r){ return r.json().then(function(j){ return { ok:r.ok, status:r.status, json:j }; }); });
-  }
-
-  function restHeaders(cfg){
-    return {
-      'Content-Type':'application/json',
-      'apikey': cfg.anon,
-      'Authorization': 'Bearer ' + cfg.anon
-    };
-  }
-
-  function restFetch(cfg, method, path, body){
-    return fetch(cfg.url.replace(/\/+$/,'') + path, {
-      method: method,
-      headers: restHeaders(cfg),
-      body: body==null ? undefined : JSON.stringify(body)
-    }).then(function(r){
-      return r.text().then(function(t){
-        var j = safeParseJSON(t, null);
-        return { ok:r.ok, status:r.status, text:t, json:j };
-      });
-    });
-  }
-
-  function cloudPullDirect(cfg){
-    var qs = '?select=app_key,hash,counts,updated_at,payload&app_key=eq.' + encodeURIComponent(cfg.appKey) + '&limit=1';
-    return restFetch(cfg, 'GET', '/rest/v1/' + CLOUD_TABLE + qs, null).then(function(res){
-      if(!res.ok) throw new Error('cloud_pull_failed status=' + res.status + ' ' + (res.text||''));
-      var rows = Array.isArray(res.json) ? res.json : [];
-      if(!rows.length) return { ok:true, row:null };
-      return { ok:true, row:rows[0] };
-    });
-  }
-
-  function cloudUpsertDirect(cfg, row){
-    // Upsert via REST
-    var path = '/rest/v1/' + CLOUD_TABLE + '?on_conflict=app_key';
-    var headers = restHeaders(cfg);
-    headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
-    return fetch(cfg.url.replace(/\/+$/,'') + path, {
-      method:'POST',
-      headers: headers,
-      body: JSON.stringify([row])
-    }).then(function(r){
-      return r.text().then(function(t){
-        var j = safeParseJSON(t, null);
-        return { ok:r.ok, status:r.status, text:t, json:j };
-      });
-    }).then(function(res){
-      if(!res.ok) throw new Error('cloud_push_failed status=' + res.status + ' ' + (res.text||''));
-      return res;
-    });
-  }
-
-  function cloudPull(cfg){
-    // Try proxy first if present, else direct.
-    if(hasSameOriginProxy()){
-      return apiFetchProxy('/api/sync/pull', { app_key: cfg.appKey }).then(function(r){
-        if(r.ok && r.json && r.json.ok){
-          return { ok:true, row:r.json.row || null, via:'proxy' };
-        }
-        // fallback to direct
-        return cloudPullDirect(cfg).then(function(x){ x.via='direct'; return x; });
-      }).catch(function(){
-        return cloudPullDirect(cfg).then(function(x){ x.via='direct'; return x; });
-      });
-    }
-    return cloudPullDirect(cfg).then(function(x){ x.via='direct'; return x; });
-  }
-
-  function cloudPushMerged(cfg, localState, force){
-    // Plan A: pull remote, merge, upsert
-    return cloudPull(cfg).then(function(remote){
-      var remoteState = remote && remote.row ? (remote.row.payload || {}) : {};
-      var merged = mergePayload(localState, remoteState);
-      var mergedCounts = computeCounts(merged);
-      var mergedHash = djb2(stableStringify({ payload: merged, counts: mergedCounts, app_key: cfg.appKey }));
-      var row = {
-        app_key: cfg.appKey,
-        hash: mergedHash,
-        payload: merged,
-        counts: mergedCounts,
-        updated_at: nowIso()
-      };
-      return Promise.resolve().then(function(){
-        if(hasSameOriginProxy()){
-          return apiFetchProxy('/api/sync/push', { app_key: cfg.appKey, row: row, force: !!force }).then(function(r){
-            if(r.ok && r.json && r.json.ok){
-              return { ok:true, via:'proxy', row: row, remote: remote };
-            }
-            // fallback to direct
-            return cloudUpsertDirect(cfg, row).then(function(){ return { ok:true, via:'direct', row: row, remote: remote }; });
-          }).catch(function(){
-            return cloudUpsertDirect(cfg, row).then(function(){ return { ok:true, via:'direct', row: row, remote: remote }; });
-          });
-        }
-        return cloudUpsertDirect(cfg, row).then(function(){ return { ok:true, via:'direct', row: row, remote: remote }; });
-      });
-    });
-  }
-
-  function cloudStatus(){
-    var cfg = getCfg();
-    if(!assertCfg(cfg)){
-      toast('云端未配置：请先点“云端设置”。');
-      return Promise.resolve({ ok:false, reason:'cloud_not_configured' });
-    }
-    var local = getLocalCanonical();
-    return cloudPull(cfg).then(function(remote){
-      var remoteRow = remote && remote.row ? remote.row : null;
-      var remoteCounts = remoteRow && remoteRow.counts ? remoteRow.counts : null;
-      var lines = [];
-      lines.push('【本地】来源：' + local.source);
-      lines.push('  sellers=' + local.counts.sc + ' products=' + local.counts.pc + ' orders=' + local.counts.oc + ' batches=' + local.counts.bc);
-      lines.push('【云端】表：' + CLOUD_TABLE + '（via=' + (remote.via||'unknown') + '）');
-      if(remoteRow){
-        lines.push('  updated_at=' + (remoteRow.updated_at||''));
-        lines.push('  hash=' + (remoteRow.hash||''));
-        if(remoteCounts){
-          lines.push('  sellers=' + (remoteCounts.sc||0) + ' products=' + (remoteCounts.pc||0) + ' orders=' + (remoteCounts.oc||0) + ' batches=' + (remoteCounts.bc||0));
-        }
-      }else{
-        lines.push('  （云端暂无该 app_key 的快照）');
-      }
-      alert(lines.join('\n'));
-      return { ok:true, cfg:cfg, local:local, remote:remoteRow };
-    }).catch(function(e){
-      err(e);
-      toast('云端状态读取失败：' + (e && e.message ? e.message : String(e)));
-      return { ok:false, error:String(e) };
-    });
-  }
-
-  function cloudPullToLocal(){
-    var cfg = getCfg();
-    if(!assertCfg(cfg)){
-      toast('云端未配置：请先点“云端设置”。');
-      return Promise.resolve({ ok:false, reason:'cloud_not_configured' });
-    }
-    return cloudPull(cfg).then(function(remote){
-      if(!remote || !remote.row || !remote.row.payload){
-        toast('云端暂无快照可拉取。');
-        return { ok:true, applied:false };
-      }
-      var payload = remote.row.payload;
-      setLSPrimary(CANONICAL_LS_KEY, JSON.stringify(payload));
-      toast('云端拉取完成：已写入本地主快照（建议刷新页面）。');
-      return { ok:true, applied:true };
-    }).catch(function(e){
-      err(e);
-      toast('云端拉取失败：' + (e && e.message ? e.message : String(e)));
-      return { ok:false, error:String(e) };
-    });
-  }
-
-  function cloudPush(force){
-    var cfg = getCfg();
-    if(!assertCfg(cfg)){
-      toast('云端未配置：请先点“云端设置”。');
-      return Promise.resolve({ ok:false, reason:'cloud_not_configured' });
-    }
-    var local = getLocalCanonical();
-    if(!local.ok){
-      toast('本地主快照为空：请先点“同步主数据”，再推送。');
-      return Promise.resolve({ ok:false, reason:'local_snapshot_missing' });
-    }
-    var total = (local.counts.sc||0)+(local.counts.pc||0)+(local.counts.oc||0)+(local.counts.bc||0);
-    if(total<=0 && !force){
-      toast('安全策略：本地统计为 0，已阻止推送。若确认要覆盖云端，请按住 Shift 再点“云端推送”。');
-      return Promise.resolve({ ok:false, reason:'local_snapshot_empty' });
-    }
-
-    return cloudPushMerged(cfg, local.state, !!force).then(function(res){
-      var c = res.row.counts;
-      toast('云端推送成功：卖家'+c.sc+' 产品'+c.pc+' 订单'+c.oc+' 批次'+c.bc+'（'+(res.via||'')+'）');
-      return { ok:true, result:res };
-    }).catch(function(e){
-      err(e);
-      toast('云端推送失败：' + (e && e.message ? e.message : String(e)));
-      return { ok:false, error:String(e) };
-    });
-  }
-
-  // ---------- Button wiring (capture to override old handlers) ----------
-  function bindByText(btnText, handler){
-    var nodes = Array.prototype.slice.call(
-      document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]')
-    );
-    for(var i=0;i<nodes.length;i++){
-      var el = nodes[i];
-      var t = (el.textContent || el.value || '').trim();
-      if(t === btnText){
-        el.addEventListener('click', function(ev){
-          try{
-            ev.preventDefault();
-            ev.stopPropagation();
-            if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-          }catch(_){}
-          handler(ev);
-        }, true);
-      }
-    }
-  }
-
-  function initBindings(){
-    bindByText('云端设置', function(){ openCloudSettings(); });
-    bindByText('云端状态', function(){ cloudStatus(); });
-    bindByText('云端拉取', function(){ cloudPullToLocal(); });
-    bindByText('云端推送', function(ev){ cloudPush(ev && ev.shiftKey); });
-  }
-
-  // ---------- Auto push ----------
-  var AUTO_INTERVAL_MS = 60 * 1000;
-  var autoTimer = null;
-  function startAutoPush(){
-    var flag = (localStorage.getItem('OPS_CLOUD_AUTOPUSH') || '').trim();
-    if(flag !== '1') return; // default off
-    if(autoTimer) return;
-    autoTimer = setInterval(function(){
-      try{
-        cloudPush(false).then(function(){ /* noop */ });
-      }catch(_){}
-    }, AUTO_INTERVAL_MS);
-    log('[AUTO-PUSH] enabled, interval=' + Math.round(AUTO_INTERVAL_MS/1000) + 's');
-  }
-
-  function boot(){
-    try{
-      initBindings();
-      startAutoPush();
-      log('[SYNC PATCH] loaded. canonical=' + CANONICAL_LS_KEY + ', table=' + CLOUD_TABLE);
-    }catch(e){
-      err('sync patch boot failed', e);
-    }
-  }
-
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', boot);
-  }else{
-    boot();
-  }
-
-})();
-</script>
+<!-- [REMOVED] legacy SYNC PATCH script (conflicted with Plan A authoritative IDB state) -->
 
 
-<script>
-/* ====== CLOUD SYNC OVERRIDE (single-file, stable) ======
-   - Forces table: ops_cloud_snapshots_v1
-   - Uses REST fetch (no schema cache surprises)
-   - Writes columns: payload, hash, updated_at, app_key
-   - Button binding uses capture + stopImmediatePropagation to override old handlers
-======================================================== */
-(function(){
-  const TABLE = "ops_cloud_snapshots_v1";
-  const LS_URL_KEYS  = ["OPS_SUPABASE_URL","SUPABASE_URL","supabase_url","SUPABASE_URL_V2"];
-  const LS_ANON_KEYS = ["OPS_SUPABASE_ANON","SUPABASE_ANON_KEY","SUPABASE_ANON","supabase_anon","supabase_anon_key"];
-  const LS_APP_KEYS  = ["OPS_APP_KEY","OPS_SUPABASE_APP","APP_KEY","app_key","ops_app_key"];
-  const CANONICAL_LS_KEY = "ops_rebuild_v6_4_2_state";
 
-  function lsGetFirst(keys){
-    for(const k of keys){
-      try{ const v = localStorage.getItem(k); if(v && String(v).trim()) return String(v).trim(); }catch(_){}
-    }
-    return "";
-  }
-  function getCfg(){
-    return { url: lsGetFirst(LS_URL_KEYS), anon: lsGetFirst(LS_ANON_KEYS), app_key: lsGetFirst(LS_APP_KEYS) };
-  }
-  function okCfg(c){ return !!(c && c.url && c.anon && c.app_key); }
 
-  function jparse(s, fallback){ try{ return JSON.parse(s); }catch(_){ return fallback; } }
-  function normalizeState(state){
-    state = state && typeof state === "object" ? state : {};
-    const sellers  = Array.isArray(state.sellers)  ? state.sellers  : (Array.isArray(state.sellerList)?state.sellerList:[]);
-    const products = Array.isArray(state.products) ? state.products : (Array.isArray(state.productList)?state.productList:[]);
-    const orders   = Array.isArray(state.orders)   ? state.orders   : (Array.isArray(state.orderList)?state.orderList:[]);
-    const batches  = Array.isArray(state.batches)  ? state.batches  : (Array.isArray(state.batchList)?state.batchList:[]);
-    return { sellers, products, orders, batches, _raw: state };
-  }
-  function countSnap(payload){
-    const n = normalizeState(payload||{});
-    return { sc:n.sellers.length, pc:n.products.length, oc:n.orders.length, bc:n.batches.length };
-  }
+<!-- [REMOVED] legacy CLOUD SYNC OVERRIDE script (duplicate entrypoints) -->
 
-  function toast(msg){
-    // prefer existing toast if present
-    try{
-      if(typeof window.toast === "function") return window.toast(msg);
-    }catch(_){}
-    alert(msg);
-  }
-
-  function bindByText(text, handler){
-    const nodes = Array.from(document.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit']"));
-    nodes.forEach(el=>{
-      const t = (el.textContent || el.value || "").trim();
-      if(t === text){
-        el.addEventListener("click", function(ev){
-          try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation && ev.stopImmediatePropagation(); }catch(_){}
-          handler(ev);
-        }, true);
-      }
-    });
-  }
-
-  async function rest(method, path, cfg, body){
-    const url = cfg.url.replace(/\/+$/,"") + "/rest/v1/" + path.replace(/^\/+/,"");
-    const headers = {
-      "apikey": cfg.anon,
-      "Authorization": "Bearer " + cfg.anon,
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    };
-    const opt = { method, headers };
-    if(body !== undefined){
-      opt.body = JSON.stringify(body);
-      headers["Prefer"] = "return=representation,resolution=merge-duplicates";
-    }
-    const res = await fetch(url, opt);
-    const txt = await res.text();
-    let json = null;
-    try{ json = txt ? JSON.parse(txt) : null; }catch(_){ json = txt; }
-    if(!res.ok){
-      const err = (json && (json.message||json.error)) ? (json.message||json.error) : (txt||res.statusText);
-      throw new Error(err);
-    }
-    return json;
-  }
-
-  async function cloudGet(cfg){
-    const q = `${TABLE}?select=*&app_key=eq.${encodeURIComponent(cfg.app_key)}`;
-    const rows = await rest("GET", q, cfg);
-    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
-    return row;
-  }
-
-  function getLocalPayloadPrefer(){
-    // Prefer canonical localStorage snapshot if present; else fall back to window.state/S if present
-    const raw = localStorage.getItem(CANONICAL_LS_KEY);
-    const obj = raw ? jparse(raw, null) : null;
-    if(obj && typeof obj === "object") return { payload: obj, source: "localStorage("+CANONICAL_LS_KEY+")" };
-    // fallbacks
-    try{
-      if(window.S && typeof window.S === "object") return { payload: window.S, source:"window.S" };
-      if(window.state && typeof window.state === "object") return { payload: window.state, source:"window.state" };
-    }catch(_){}
-    return { payload: null, source: "none" };
-  }
-
-  async function pushOnce(force){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”填写 Supabase URL / anon key / app_key。");
-      return;
-    }
-    const local = getLocalPayloadPrefer();
-    if(!local.payload){
-      toast("本地快照为空：请先点“同步主数据”，再推送。");
-      return;
-    }
-    const localCounts = countSnap(local.payload);
-    if(!force && (localCounts.sc+localCounts.pc+localCounts.oc+localCounts.bc) === 0){
-      toast("安全策略：本地统计为 0，已阻止覆盖云端。若确认要推空覆盖，请按住 Shift 再点“云端推送”。");
-      return;
-    }
-
-    const remote = await cloudGet(cfg);
-    const remotePayload = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-
-    // merge: prefer local if remote missing; otherwise basic union by arrays of objects with id (fallback)
-    let merged = local.payload;
-    if(remotePayload && typeof remotePayload === "object"){
-      // use existing merge if present
-      if(typeof window.mergeSnapshotsPlanA === "function"){
-        merged = window.mergeSnapshotsPlanA(local.payload, remotePayload);
-      }else{
-        const nL = normalizeState(local.payload);
-        const nR = normalizeState(remotePayload);
-        const byId = (arr)=> {
-          const m = new Map();
-          arr.forEach(x=>{ if(x && x.id!=null) m.set(String(x.id), x); });
-          return m;
-        };
-        const mergeArr = (a,b)=>{
-          const ma = byId(a), mb = byId(b);
-          const out = new Map(mb); // start cloud
-          for(const [k,v] of ma) out.set(k,v); // local overrides
-          // include no-id rows
-          const noId = [].concat(b.filter(x=>!(x&&x.id!=null)), a.filter(x=>!(x&&x.id!=null)));
-          return Array.from(out.values()).concat(noId);
-        };
-        merged = {
-          sellers: mergeArr(nL.sellers, nR.sellers),
-          products: mergeArr(nL.products, nR.products),
-          orders: mergeArr(nL.orders, nR.orders),
-          batches: mergeArr(nL.batches, nR.batches)
-        };
-      }
-    }
-
-    const mergedCounts = countSnap(merged);
-    const hash = String(Date.now());
-
-    const row = {
-      app_key: cfg.app_key,
-      payload: merged,
-      hash: hash,
-      updated_at: new Date().toISOString()
-    };
-    await rest("POST", `${TABLE}?on_conflict=app_key`, cfg, row);
-
-    toast(`云端推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${hash}）`);
-  }
-
-  async function status(){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”。");
-      return;
-    }
-    const local = getLocalPayloadPrefer();
-    const lc = local.payload ? countSnap(local.payload) : {sc:0,pc:0,oc:0,bc:0};
-    const remote = await cloudGet(cfg);
-    const rp = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-    const rc = rp ? countSnap(rp) : {sc:0,pc:0,oc:0,bc:0};
-    const msg = [
-      `本地来源：${local.source}`,
-      `本地统计：卖家${lc.sc} 产品${lc.pc} 订单${lc.oc} 批次${lc.bc}`,
-      "",
-      `云端存在：${remote ? "YES" : "NO"}`,
-      `云端 hash: ${remote && remote.hash ? remote.hash : ""}`,
-      `云端 updated_at: ${remote && remote.updated_at ? remote.updated_at : ""}`,
-      `云端统计：卖家${rc.sc} 产品${rc.pc} 订单${rc.oc} 批次${rc.bc}`,
-      "",
-      `表：${TABLE}  app_key=${cfg.app_key}`
-    ].join("\n");
-    alert(msg);
-  }
-
-  async function pullToLocal(){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”。");
-      return;
-    }
-    const remote = await cloudGet(cfg);
-    const rp = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-    if(!rp){
-      toast("云端暂无快照可拉取。");
-      return;
-    }
-    localStorage.setItem(CANONICAL_LS_KEY, JSON.stringify(rp));
-    toast("云端拉取完成：已写入本地主快照（ops_rebuild_v6_4_2_state）。刷新页面后生效。");
-  }
-
-  function openSettings(){
-    const cfg = getCfg();
-    const url = prompt("Supabase URL（例如 https://xxxx.supabase.co ）", cfg.url || "");
-    if(url===null) return;
-    const anon = prompt("Supabase anon key（Project Settings → API → anon）", cfg.anon || "");
-    if(anon===null) return;
-    const app = prompt("app_key（用于区分你的数据集，例如 dalemy）", cfg.app_key || "dalemy");
-    if(app===null) return;
-    localStorage.setItem(LS_URL_KEYS[0], String(url).trim());
-    localStorage.setItem(LS_ANON_KEYS[0], String(anon).trim());
-    localStorage.setItem(LS_APP_KEYS[0], String(app).trim());
-    toast("云端配置已保存。");
-  }
-
-  function init(){
-    bindByText("云端设置", openSettings);
-    bindByText("云端推送", (ev)=>pushOnce(!!(ev && ev.shiftKey)));
-    bindByText("云端状态", status);
-    bindByText("云端拉取", pullToLocal);
-
-    // hard-disable old auto push unless explicitly enabled
-    try{
-      const v = (localStorage.getItem("OPS_CLOUD_AUTOPUSH")||"").trim();
-      if(v !== "1" && v !== "true"){
-        localStorage.setItem("OPS_CLOUD_AUTOPUSH","0");
-      }
-    }catch(_){}
-    console.log("[SYNC OVERRIDE] loaded. table="+TABLE);
-  }
-
-  if(document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded", init);
-  }else{
-    init();
-  }
-})();
-</script>
 
 
 <script>
