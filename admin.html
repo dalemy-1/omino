@@ -736,6 +736,10 @@ function _normalizeSnapshot(payload){
     if(p.state && typeof p.state==="object"){ p = p.state; continue; }
     if(p.data && typeof p.data==="object"){ p = p.data; continue; }
 
+    // env wrapper: { env: { sellers/products/orders/batches } }
+    if(p.env && typeof p.env==="object"){ p = p.env; continue; }
+
+
     // idb-keyval style: {key, value}
     if(p.key && p.value && typeof p.value==="object"){ p = p.value; continue; }
 
@@ -975,7 +979,7 @@ async function cloudPush(opts){
       alert("无法获取本地数据快照：\n" + (local.reason||"unknown"));
       return { ok:false, reason:"no_local_snapshot" };
     }
-    const finalPayload = local.payload || {};
+    const finalPayload = _normalizeSnapshot(local.payload) || {};
     const counts = local.counts || _countSnapshot(finalPayload);
     const sc = counts.sc||0, pc = counts.pc||0, oc = counts.oc||0, bc = counts.bc||0;
 
@@ -11789,6 +11793,223 @@ toast('云端设置已保存。');
   }else{
     bind();
   }
+})();
+</script>
+
+
+<script>
+/* === SYNC CONSOLIDATION (Plan A / Single-Entry) ===
+   Goals:
+   - Disable legacy AUTO-PUSH switch by default
+   - Provide a single set of global entry points: cloudStatus/cloudPush/cloudPull
+   - Add in-page sync log panel (last 30)
+*/
+(function(){
+  try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
+  const MAX_LOGS = 30;
+  const logs = [];
+  const pad2 = (n)=> (n<10?('0'+n):(''+n));
+  const ts = ()=> {
+    const d = new Date();
+    return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate())+' '+pad2(d.getHours())+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds());
+  };
+  function addLog(level, message, detail){
+    const item = { ts: ts(), level: level||'info', message: String(message||''), detail: detail==null?null:detail };
+    logs.push(item);
+    while(logs.length>MAX_LOGS) logs.shift();
+    render();
+  }
+
+  // ----- UI -----
+  let uiInited = false;
+  let btn, panel, body;
+  function ensureUI(){
+    if(uiInited) return;
+    uiInited = true;
+    body = document.body || document.documentElement;
+
+    const css = document.createElement('style');
+    css.textContent = `
+      .ops-synclog-btn{
+        position: fixed; right: 14px; bottom: 14px; z-index: 99999;
+        padding: 10px 12px; border-radius: 999px; border: 1px solid #d1d5db;
+        background: #111827; color: #fff; font-size: 12px; cursor: pointer;
+        box-shadow: 0 10px 24px rgba(0,0,0,.18);
+      }
+      .ops-synclog-panel{
+        position: fixed; right: 14px; bottom: 60px; z-index: 99999;
+        width: min(520px, calc(100vw - 28px));
+        max-height: min(520px, calc(100vh - 90px));
+        background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px;
+        box-shadow: 0 18px 40px rgba(0,0,0,.20);
+        display: none; overflow: hidden;
+      }
+      .ops-synclog-hd{
+        display:flex; align-items:center; justify-content:space-between;
+        padding: 10px 12px; border-bottom:1px solid #eef2f7;
+        background:#f9fafb; font-size: 13px; color:#111827;
+      }
+      .ops-synclog-actions{ display:flex; gap:8px; }
+      .ops-synclog-actions button{
+        padding:6px 10px; border:1px solid #e5e7eb; border-radius:10px;
+        background:#fff; cursor:pointer; font-size:12px;
+      }
+      .ops-synclog-bd{
+        padding: 10px 12px; overflow:auto; max-height: 460px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px; line-height: 1.45; color: #0f172a;
+      }
+      .ops-synclog-item{ padding: 8px 10px; border: 1px solid #eef2f7; border-radius: 10px; margin-bottom: 8px; }
+      .ops-synclog-item .meta{ color:#64748b; margin-bottom:4px; }
+      .ops-synclog-item .lvl-info{ color:#0f172a; }
+      .ops-synclog-item .lvl-warn{ color:#92400e; }
+      .ops-synclog-item .lvl-error{ color:#b91c1c; }
+      .ops-synclog-item pre{ white-space: pre-wrap; word-break: break-word; margin:6px 0 0 0; color:#334155; }
+    `;
+    document.head.appendChild(css);
+
+    btn = document.createElement('button');
+    btn.className = 'ops-synclog-btn';
+    btn.textContent = '同步日志';
+    btn.onclick = ()=> {
+      ensureUI();
+      const show = panel.style.display !== 'block';
+      panel.style.display = show ? 'block' : 'none';
+      render();
+    };
+
+    panel = document.createElement('div');
+    panel.className = 'ops-synclog-panel';
+    panel.innerHTML = `
+      <div class="ops-synclog-hd">
+        <div><b>同步日志</b> <span style="color:#64748b;font-weight:400;">(最近 ${MAX_LOGS} 条)</span></div>
+        <div class="ops-synclog-actions">
+          <button type="button" data-act="copy">复制</button>
+          <button type="button" data-act="clear">清空</button>
+          <button type="button" data-act="close">关闭</button>
+        </div>
+      </div>
+      <div class="ops-synclog-bd" id="opsSyncLogBody"></div>
+    `;
+    panel.querySelector('[data-act="close"]').onclick = ()=> panel.style.display='none';
+    panel.querySelector('[data-act="clear"]').onclick = ()=> { logs.length=0; render(); };
+    panel.querySelector('[data-act="copy"]').onclick = async ()=> {
+      try{
+        const text = logs.map(x=>{
+          const d = x.detail==null? '' : (' | ' + safeJson(x.detail));
+          return `[${x.ts}] ${x.level.toUpperCase()} ${x.message}${d}`;
+        }).join('\n');
+        await navigator.clipboard.writeText(text);
+        addLog('info','已复制日志到剪贴板');
+      }catch(e){
+        addLog('warn','复制失败', String(e && e.message || e));
+      }
+    };
+
+    body.appendChild(btn);
+    body.appendChild(panel);
+  }
+
+  function safeJson(v){
+    try{
+      if(typeof v === 'string') return v;
+      return JSON.stringify(v);
+    }catch(e){
+      try{ return String(v); }catch(_){ return '[unserializable]'; }
+    }
+  }
+
+  function render(){
+    if(!panel) return;
+    const bd = panel.querySelector('#opsSyncLogBody');
+    if(!bd) return;
+    bd.innerHTML = logs.slice().reverse().map(x=>{
+      const lvl = x.level==='error'?'lvl-error':(x.level==='warn'?'lvl-warn':'lvl-info');
+      const d = x.detail==null? '' : `<pre>${escapeHtml(safeJson(x.detail))}</pre>`;
+      return `<div class="ops-synclog-item">
+        <div class="meta">[${escapeHtml(x.ts)}] <span class="${lvl}">${escapeHtml(String(x.level).toUpperCase())}</span></div>
+        <div class="${lvl}">${escapeHtml(x.message)}</div>
+        ${d}
+      </div>`;
+    }).join('') || `<div style="color:#64748b;">暂无日志。</div>`;
+  }
+
+  function escapeHtml(s){
+    return String(s)
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'","&#39;");
+  }
+
+  // init UI lazily after DOM ready
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded', ()=>{ ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认关闭）'); });
+  }else{
+    ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认关闭）');
+  }
+
+  // ----- Wrap global entry points -----
+  function wrapAsync(name){
+    const orig = window[name];
+    if(typeof orig !== 'function'){
+      addLog('warn', `未找到 ${name}()，可能仍在加载中或已被移除`);
+      return null;
+    }
+    return async function(){
+      const args = Array.from(arguments || []);
+      const start = performance.now ? performance.now() : Date.now();
+      addLog('info', `${name} 开始`, { args });
+      try{
+        const res = await orig.apply(this, args);
+        const ms = (performance.now ? performance.now() : Date.now()) - start;
+        addLog('info', `${name} 成功`, { ms: Math.round(ms), result: summarizeResult(res) });
+        return res;
+      }catch(err){
+        const ms = (performance.now ? performance.now() : Date.now()) - start;
+        addLog('error', `${name} 失败`, { ms: Math.round(ms), error: (err && (err.stack||err.message)) || String(err) });
+        throw err;
+      }
+    };
+  }
+
+  function summarizeResult(res){
+    try{
+      if(!res) return res;
+      // normalize common shapes without assuming internal implementation
+      if(typeof res === 'object'){
+        const out = {};
+        if('local' in res) out.local = res.local;
+        if('cloud' in res) out.cloud = res.cloud;
+        if('counts' in res) out.counts = res.counts;
+        if('hash' in res) out.hash = res.hash;
+        return Object.keys(out).length ? out : res;
+      }
+      return res;
+    }catch(e){ return '[unserializable-result]'; }
+  }
+
+  // Make sure we only keep ONE set of global APIs, but do not break existing working ones.
+  function consolidate(){
+    // Ensure legacy auto-push switches are off
+    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
+    // Wrap and re-export
+    const p = wrapAsync('cloudPush');
+    const l = wrapAsync('cloudPull');
+    const s = wrapAsync('cloudStatus');
+    if(p) window.cloudPush = p;
+    if(l) window.cloudPull = l;
+    if(s) window.cloudStatus = s;
+  }
+
+  // Consolidate now and again shortly after (to catch late-loaded patches)
+  try{ consolidate(); }catch(e){}
+  setTimeout(()=>{ try{ consolidate(); }catch(e){} }, 0);
+  setTimeout(()=>{ try{ consolidate(); }catch(e){} }, 800);
+
+  // Expose log helper for debugging
+  window.__opsSyncLog = { add: addLog, list: ()=>logs.slice() };
 })();
 </script>
 
