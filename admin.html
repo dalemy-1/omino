@@ -9978,7 +9978,15 @@ Goal:
           }catch(e){ reject(e); }
         };
       });
-      if(obj) return { src:"IndexedDB("+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY+") raw", state: obj };
+      if(obj){
+        let v = obj;
+        // unwrap common KV shapes: {key,value}, {payload:{key,value}}, or direct state
+        try{
+          if(v && v.value && (v.key===MAIN_KEY || String(v.key).trim()===MAIN_KEY)) v = v.value;
+          else if(v && v.payload && v.payload.value && (v.payload.key===MAIN_KEY || String(v.payload.key).trim()===MAIN_KEY)) v = v.payload.value;
+        }catch(_){ }
+        return { src:"IndexedDB("+MAIN_DB+"/"+MAIN_STORE+"/"+MAIN_KEY+") raw", state: v };
+      }
     }catch(e){}
     // Fallback: if there is a generic KV reader helper, try it
     try{
