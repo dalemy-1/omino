@@ -530,6 +530,25 @@ function getCloudCfgOrNull(){
   return cfg;
 }
 
+// Ensure Supabase UMD SDK is available (robust for CDN blocked / slow networks)
+async function ensureSupabaseSDK(){
+  try{
+    if(window.supabase && window.supabase.createClient) return true;
+    if(window.__supabase_sdk_loading) return await window.__supabase_sdk_loading;
+    window.__supabase_sdk_loading = new Promise((resolve)=>{
+      try{
+        const s = document.createElement("script");
+        s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js";
+        s.async = true;
+        s.onload = ()=> resolve(!!(window.supabase && window.supabase.createClient));
+        s.onerror = ()=> resolve(false);
+        document.head.appendChild(s);
+      }catch(e){ resolve(false); }
+    });
+    return await window.__supabase_sdk_loading;
+  }catch(e){ return false; }
+}
+
 function getCloudClientOrNull(opts){
   const o = opts || {};
   const quiet = !!o.quiet;
@@ -11234,9 +11253,17 @@ toast('云端设置已保存。');
     const force = !!opts.force;
     const quiet = !!opts.quiet;
 
+    // Preflight: ensure SDK + config are ready
+    if(typeof ensureSupabaseSDK==="function"){
+      const ok = await ensureSupabaseSDK();
+      if(!ok) throw new Error("云端未就绪：Supabase SDK 未加载（可能被网络/插件拦截）");
+    }
     const wrap = (typeof getCloudWrap==="function") ? getCloudWrap() : null;
     if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
-      throw new Error("云端未就绪：Supabase client 不可用");
+      // Try to provide a clearer reason
+      const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : null;
+      if(!cfg2) throw new Error("云端未配置：请先点【云端设置】填写 URL / anon / app_key");
+      throw new Error("云端未就绪：Supabase client 不可用（初始化失败或被旧逻辑覆盖）");
     }
     const { client, cfg } = wrap;
     const appKey = getAppKey(cfg);
