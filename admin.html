@@ -5235,6 +5235,79 @@ $("btnHardReset").onclick = async ()=>{
   // 返款页：搜索（订单号/产品/ASIN）
   // 需求：输入/粘贴时立即只保留前 19 位（如 111-2222222-333333），并在当前返款筛选范围内自动勾选匹配订单。
   (async function(){
+
+  // --- Cloud config bootstrap (Plan A) ---
+  (function bootstrapCloudCfg(){
+    try{
+      const CFG_KEYS = ['OPS_CLOUD_CFG_V1','OPS_CLOUD_CFG','OPS_CLOUD_SUPABASE_CFG','OPS_SYNC_SUPABASE_CFG','SUPABASE_CLOUD_CFG_V1'];
+      const URL_KEYS = ['OPS_CLOUD_URL','SUPABASE_URL','NEXT_PUBLIC_SUPABASE_URL','SUPABASE_PROJECT_URL'];
+      const ANON_KEYS = ['OPS_CLOUD_ANON_KEY','OPS_CLOUD_ANON','SUPABASE_ANON_KEY','NEXT_PUBLIC_SUPABASE_ANON_KEY','SUPABASE_KEY','SUPABASE_ANON'];
+      const APP_KEYS  = ['OPS_CLOUD_APPKEY','OPS_CLOUD_APP_KEY','OPS_APP_KEY','APP_KEY','OPS_SYNC_APPKEY','OPS_SYNC_APP_KEY'];
+      const TABLE_KEYS = ['OPS_CLOUD_TABLE','OPS_SYNC_TABLE'];
+      const CANON_KEYS = ['OPS_CLOUD_CANONICAL','OPS_SYNC_CANONICAL','OPS_CANONICAL'];
+      const COL_KEYS   = ['OPS_CLOUD_COLUMN','OPS_SYNC_COLUMN','OPS_CLOUD_PAYLOAD_COLUMN'];
+
+      function firstNonEmpty(keys){
+        for(const k of keys){
+          const v = (localStorage.getItem(k)||'').trim();
+          if(v) return v;
+        }
+        return '';
+      }
+      function parseCfg(raw){
+        if(!raw) return null;
+        try{
+          const o = JSON.parse(raw);
+          if(!o || typeof o!=='object') return null;
+          return o;
+        }catch(_e){ return null; }
+      }
+      // 1) try read any existing cfg JSON
+      let found = null;
+      for(const k of CFG_KEYS){
+        const o = parseCfg(localStorage.getItem(k));
+        if(o && (o.url||o.supabase_url) && (o.anon||o.anon_key||o.key) && (o.app_key||o.appKey||o.app)){
+          found = {k, o};
+          break;
+        }
+      }
+
+      const url  = (found && (found.o.url||found.o.supabase_url)) || firstNonEmpty(URL_KEYS);
+      const anon = (found && (found.o.anon||found.o.anon_key||found.o.key)) || firstNonEmpty(ANON_KEYS);
+      const appKey = (found && (found.o.app_key||found.o.appKey||found.o.app)) || firstNonEmpty(APP_KEYS) || 'dalemy';
+
+      const table = (found && (found.o.table||found.o.table_name)) || firstNonEmpty(TABLE_KEYS) || 'ops_cloud_snapshots_v1';
+      const canonical = (found && (found.o.canonical||found.o.snapshot_key)) || firstNonEmpty(CANON_KEYS) || 'ops_rebuild_v6_4_2_state';
+      const column = (found && (found.o.column||found.o.payload_column)) || firstNonEmpty(COL_KEYS) || 'payload';
+
+      if(url && anon && appKey){
+        const normalized = {
+          v: 1,
+          url,
+          anon,
+          app_key: appKey,
+          table,
+          canonical,
+          column,
+          saved_at: new Date().toISOString(),
+          source: found ? ('migrated:'+found.k) : 'bootstrap'
+        };
+        // write to all known keys so read-path always finds it
+        for(const k of CFG_KEYS){
+          localStorage.setItem(k, JSON.stringify(normalized));
+        }
+        // also persist the components for any legacy readers
+        localStorage.setItem('OPS_CLOUD_URL', url);
+        localStorage.setItem('OPS_CLOUD_ANON_KEY', anon);
+        localStorage.setItem('OPS_CLOUD_APPKEY', appKey);
+        localStorage.setItem('OPS_CLOUD_TABLE', table);
+        localStorage.setItem('OPS_CLOUD_CANONICAL', canonical);
+        localStorage.setItem('OPS_CLOUD_COLUMN', column);
+      }
+    }catch(_e){}
+  })();
+
+
     const el = $("payoutSearch");
     if(!el) return;
     const run = debounce((q)=>{
