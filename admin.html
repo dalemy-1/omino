@@ -10121,7 +10121,65 @@ Goal:
     }
   }
 
-  async function cloudPullFINAL(){
+  
+  // ===== Expose a unified cloudPush API for AUTO-PUSH / legacy callers =====
+  // Some builds call window.cloudPush({force,quiet}) directly (e.g. AUTO-PUSH).
+  // Ensure they push the SAME datasource as the FINAL buttons: IndexedDB(main_state_v1).
+  async function cloudPushAPI(opts){
+    opts = opts||{};
+    const force = !!opts.force;
+
+    const wrap = (typeof getCloudWrap==='function') ? getCloudWrap({quiet:true, forceRebuild:true}) : getCloudWrap();
+    if(!wrap) return { ok:false, error:'no_wrap' };
+    const client = wrap.client || null;
+    const cfg = wrap.cfg || null;
+    if(!cfg || !cfg.app_key || !cfg.url || !cfg.anon){
+      return { ok:false, error:'cloud_cfg_missing' };
+    }
+
+    const loc = await readLocalState();
+    const s = loc.state || {};
+    const sc = pickCount(s.sellers), pc = pickCount(s.products), oc = pickCount(s.orders), bc = pickCount(s.batches);
+
+    // Safety: block empty overwrite unless forced
+    if(!force && sc===0 && pc===0 && oc===0 && bc===0){
+      return { ok:true, skipped:true, hash: '', counts:{ sc, pc, oc, bc }, note:'local_empty_blocked', src: loc.src };
+    }
+
+    // REST upsert fallback (avoids SDK instability)
+    async function restUpsert(row){
+      const base = String(cfg.url).replace(/\/+$/,'');
+      const url = base + '/rest/v1/ops_cloud_snapshots_v1?on_conflict=app_key';
+      const res = await fetch(url, {
+        method:'POST',
+        headers:{
+          'apikey': cfg.anon,
+          'Authorization': 'Bearer ' + cfg.anon,
+          'Content-Type':'application/json',
+          'Prefer':'resolution=merge-duplicates,return=minimal'
+        },
+        body: JSON.stringify([row])
+      });
+      if(!res.ok){
+        const txt = await res.text().catch(()=> '');
+        throw new Error('rest_upsert_failed ' + res.status + ' ' + txt);
+      }
+    }
+
+    const hash = (typeof U!=='undefined' && U.hashString) ? U.hashString(JSON.stringify(s)) : String(Date.now());
+    const row = { app_key: cfg.app_key, payload: s, hash, updated_at: new Date().toISOString() };
+
+    if(client && typeof client.from==='function'){
+      const { error } = await client.from('ops_cloud_snapshots_v1').upsert(row, { onConflict:'app_key' });
+      if(error) throw error;
+    }else{
+      await restUpsert(row);
+    }
+
+    return { ok:true, hash, counts:{ sc, pc, oc, bc }, src: loc.src };
+  }
+  window.cloudPush = cloudPushAPI;
+async function cloudPullFINAL(){
     const wrap = getCloudWrap(); if(!wrap) return;
     const { client, cfg } = wrap;
     if(!cfg || !cfg.app_key){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
