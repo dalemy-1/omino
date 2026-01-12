@@ -555,10 +555,14 @@ function getCloudClientOrNull(opts){
   try{
     const key = cfg.url + "|" + cfg.anon + "|" + cfg.app_key;
     if(!window.__cloud_client_cache) window.__cloud_client_cache = {};
+    // 缓存统一返回 {client,cfg}，避免调用方解构时报 client/cfg 为 undefined
     if(window.__cloud_client_cache[key]) return window.__cloud_client_cache[key];
-    const client = window.supabase.createClient(cfg.url, cfg.anon, { auth: { persistSession:false } });
-    window.__cloud_client_cache[key] = client;
-    return client;
+    const client = window.supabase.createClient(cfg.url, cfg.anon, {
+      auth: { persistSession:false, autoRefreshToken:false, detectSessionInUrl:false }
+    });
+    const wrap = { client, cfg };
+    window.__cloud_client_cache[key] = wrap;
+    return wrap;
   }catch(e){
     if(!quiet){
       console.error(e);
@@ -567,6 +571,7 @@ function getCloudClientOrNull(opts){
     return null;
   }
 }
+
 
 
 async function _idbOpen(dbName, version){
