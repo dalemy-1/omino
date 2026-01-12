@@ -1048,12 +1048,20 @@ async function cloudPush(opts){
   }
 }
 
-async function cloudPull(){
-  const sb = getCloudClientOrNull();
-  if(!sb){ cloudPromptAndSave(); return; }
-  const { client, cfg } = sb;
+async function cloudPull(opts){
+  opts = opts||{};
+  const force = !!opts.force;
 
-  if(!confirm("从云端拉取会覆盖本地当前数据。\n\n建议：先点「导出 JSON」本地存一份备份。\n\n确定要继续吗？")) return;
+  const sb = getCloudClientOrNull();
+  if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
+  const { client, cfg } = sb;
+  if(!force){
+    if(!confirm("从云端拉取会覆盖本地当前数据。
+
+建议：先点「导出 JSON」本地存一份备份。
+
+确定要继续吗？")) return { ok:false, cancelled:true };
+  }
 
   try{
     toast("云端拉取中…");
@@ -1110,9 +1118,12 @@ async function cloudPull(){
     const bc = (S && S.batches && S.batches.length) || 0;
 
     toast(`云端拉取完成：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${String(data.hash||"").slice(0,8)}…）`);
-  }catch(e){
+  
+    return { ok:true, hash: data.hash, counts:{ sc, pc, oc, bc } };
+}catch(e){
     console.error(e);
-    alert("云端拉取失败：\n" + (e && e.message ? e.message : String(e)));
+    try{ toast("云端拉取失败：" + (e && e.message ? e.message : String(e)),"err"); }catch(_e){ alert("云端拉取失败：\n" + (e && e.message ? e.message : String(e))); }
+    return { ok:false, error: (e && e.message ? e.message : String(e)) };
   }
 }
 
@@ -1194,7 +1205,10 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnCloudPull" title="从云端恢复并覆盖本地">云端拉取</button>
       <button class="btn" id="btnCloudStatus" title="查看云端快照状态">云端状态</button>
       <button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
-      <button class="btn" id="btnSyncMainState" title="把当前订单表格数据写入主快照，用于云端推送/拉取与导出一致">同步主数据</button>
+      <button class="btn warn" id="btnCloudPushForce" title="强制推送：即使 hash 未变化也推送（仍会合并后推送）">强制推送</button>
+      <button class="btn warn" id="btnCloudPullForce" title="强制拉取：从云端覆盖本地（会二次确认）">强制拉取</button>
+      <div id="cloudMeta" class="help" style="margin-top:6px"></div>
+      <button class="btn" id="btnSyncMainState" style="display:none" title="（已废弃）旧版本兼容入口，已收口为 IndexedDB 主快照">同步主数据</button>
       <button class="btn" id="btnLoadSample">加载示例数据</button>
       <button class="btn danger" id="btnReset">清空数据</button>
       <button class="btn danger" id="btnHardReset" title="清理本域名下所有 IndexedDB + localStorage（包含旧系统残留），用于从零开始">彻底重置</button>
@@ -8525,7 +8539,10 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     }
   }
 
-  async function cloudPull(){
+  async function cloudPull(opts){
+  opts = opts||{};
+  const force = !!opts.force;
+
     const wrap = ensureClient();
     if(!wrap) return;
     const { client, cfg } = wrap;
@@ -8552,7 +8569,8 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
       const c = counts(window.S||{});
       toast("云端拉取完成：卖家"+c.sellers+" 产品"+c.products+" 订单"+c.orders+" 批次"+c.batches+"（hash="+(data.hash||"") +"）");
     }catch(e){
-      alert("云端拉取失败：\n" + (e && e.message ? e.message : String(e)));
+      try{ toast("云端拉取失败：" + (e && e.message ? e.message : String(e)),"err"); }catch(_e){ alert("云端拉取失败：\n" + (e && e.message ? e.message : String(e))); }
+    return { ok:false, error: (e && e.message ? e.message : String(e)) };
     }
   }
 
@@ -8562,15 +8580,149 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
   window.cloudPush = cloudPush;
   window.cloudPull = cloudPull;
 
+
+  // ===== Cloud meta (why pushed/skipped, last action timestamps) =====
+  const __cloudMeta = window.__cloudMeta = window.__cloudMeta || {
+    autoEnabled: true,
+    lastAutoCheckAt: null,
+    lastAutoResult: null,
+    lastPushAt: null,
+    lastPushResult: null,
+    lastPullAt: null,
+    lastPullResult: null,
+    lastError: null,
+  };
+
+  function __fmtTs(ts){
+    if(!ts) return "-";
+    try{
+      const d = (ts instanceof Date) ? ts : new Date(ts);
+      if(isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    }catch(e){ return String(ts); }
+  }
+  function __renderCloudMeta(){
+    const el = document.getElementById("cloudMeta");
+    const toggleBtn = document.getElementById("btnAutoPushToggle");
+    if(toggleBtn){
+      const on = __cloudMeta.autoEnabled !== false;
+      toggleBtn.textContent = on ? "自动推送：开" : "自动推送：关";
+      toggleBtn.classList.toggle("danger", !on);
+    }
+    if(!el) return;
+    const on = __cloudMeta.autoEnabled !== false;
+    const ap = __cloudMeta.lastAutoResult;
+    const ps = __cloudMeta.lastPushResult;
+    const pl = __cloudMeta.lastPullResult;
+    const line1 = `自动推送：${on ? "开启" : "关闭"}｜上次检测：${__fmtTs(__cloudMeta.lastAutoCheckAt)}` + (ap && ap.skipped ? `｜跳过原因：${ap.note||ap.reason||"skipped"}` : "");
+    const line2 = `上次推送：${__fmtTs(__cloudMeta.lastPushAt)}${ps ? `｜结果：${ps.ok ? (ps.skipped ? "跳过" : "成功") : "失败"}｜卖家${(ps.counts&&ps.counts.sc)||0} 产品${(ps.counts&&ps.counts.pc)||0} 订单${(ps.counts&&ps.counts.oc)||0} 批次${(ps.counts&&ps.counts.bc)||0}` : ""}`;
+    const line3 = `上次拉取：${__fmtTs(__cloudMeta.lastPullAt)}${pl ? `｜结果：${pl.ok ? "成功" : "失败"}` : ""}` + (__cloudMeta.lastError ? `｜最近错误：${String(__cloudMeta.lastError).slice(0,120)}` : "");
+    el.textContent = [line1,line2,line3].join("  ");
+  }
+  window.__renderCloudMeta = window.__renderCloudMeta || __renderCloudMeta;
+  window.__setCloudMeta = window.__setCloudMeta || __setCloudMeta;
+
+  function __setCloudMeta(patch){
+    try{ Object.assign(__cloudMeta, patch||{}); }catch(_e){}
+    __renderCloudMeta();
+  }
+  window.__renderCloudMeta = __renderCloudMeta;
+  window.__setCloudMeta = __setCloudMeta;
   window.addEventListener("load", ()=>{
     const cfgBtn = document.getElementById("btnCloudCfg");
     const pushBtn = document.getElementById("btnCloudPush");
     const pullBtn = document.getElementById("btnCloudPull");
     const statusBtn = document.getElementById("btnCloudStatus");
-    if(cfgBtn) cfgBtn.onclick = cloudPromptAndSave;
-    if(pushBtn) pushBtn.onclick = ()=> cloudPush();
-    if(pullBtn) pullBtn.onclick = ()=> cloudPull();
-    if(statusBtn) statusBtn.onclick = ()=> cloudStatus();
+    const pushForceBtn = document.getElementById("btnCloudPushForce");
+    const pullForceBtn = document.getElementById("btnCloudPullForce");
+    const autoBtn = document.getElementById("btnAutoPushToggle");
+
+    // init auto-push flag
+    try{
+      const v = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
+      __setCloudMeta({ autoEnabled: (v===null ? true : !(v==="0" || v==="false")) });
+    }catch(_e){
+      __setCloudMeta({ autoEnabled: true });
+    }
+
+    if(cfgBtn) cfgBtn.onclick = ()=>{ cloudPromptAndSave(); __renderCloudMeta(); };
+
+    const _doPush = async (force)=>{
+      __setCloudMeta({ lastError: null, lastPushAt: new Date() });
+      try{
+        const r = (typeof safeMergeAndPush === "function")
+          ? await safeMergeAndPush({ force: !!force })
+          : await cloudPush({ force: !!force });
+        __setCloudMeta({ lastPushResult: r || { ok:false, reason:"no_result" } });
+        return r;
+      }catch(e){
+        __setCloudMeta({ lastError: e && e.message ? e.message : String(e), lastPushResult: { ok:false, error: e && e.message ? e.message : String(e) } });
+        throw e;
+      }
+    };
+
+    const _doPull = async (force)=>{
+      __setCloudMeta({ lastError: null, lastPullAt: new Date() });
+      try{
+        const r = await cloudPull({ force: !!force });
+        __setCloudMeta({ lastPullResult: r || { ok:false, reason:"no_result" } });
+        return r;
+      }catch(e){
+        __setCloudMeta({ lastError: e && e.message ? e.message : String(e), lastPullResult: { ok:false, error: e && e.message ? e.message : String(e) } });
+        throw e;
+      }
+    };
+
+    if(pushBtn) pushBtn.onclick = ()=> _doPush(false);
+    if(pushForceBtn) pushForceBtn.onclick = ()=>{
+      const ok = confirm("强制推送：即使 hash 未变化也会写入云端快照。
+
+建议：仅在你确认云端异常、或需要强制刷新云端时使用。
+
+继续？");
+      if(!ok) return;
+      _doPush(true);
+    };
+
+    if(pullBtn) pullBtn.onclick = ()=>{
+      const ok = confirm("云端拉取会覆盖本地数据（IndexedDB）。
+
+建议：先做一次“云端推送”或导出 JSON 备份。
+
+继续拉取？");
+      if(!ok) return;
+      _doPull(false);
+    };
+    if(pullForceBtn) pullForceBtn.onclick = ()=>{
+      const ok1 = confirm("强制拉取将覆盖本地数据（不可撤销）。
+
+继续？");
+      if(!ok1) return;
+      const ok2 = confirm("二次确认：确定要“强制拉取并覆盖本地”？");
+      if(!ok2) return;
+      _doPull(true);
+    };
+
+    if(statusBtn) statusBtn.onclick = async ()=>{
+      __setCloudMeta({ lastError: null });
+      try{ await cloudStatus(); }catch(e){ __setCloudMeta({ lastError: e && e.message ? e.message : String(e) }); }
+      __renderCloudMeta();
+    };
+
+    if(autoBtn) autoBtn.onclick = ()=>{
+      try{
+        const cur = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
+        const on = (cur===null ? true : !(cur==="0" || cur==="false"));
+        const next = !on;
+        localStorage.setItem("OPS_CLOUD_AUTOPUSH", next ? "1" : "0");
+        __setCloudMeta({ autoEnabled: next });
+        toast(next ? "已开启自动推送" : "已关闭自动推送");
+      }catch(e){
+        toast("切换失败：" + (e && e.message ? e.message : String(e)),"err");
+      }
+    };
+
+    __renderCloudMeta();
   });
 })();
 
@@ -8655,33 +8807,10 @@ function _writeCanonicalSnapshot(obj){
 }
 
 function syncMainStateFromDOM(){
-  try{
-    const ex = _extractOrdersFromOrdersTable();
-    if(!ex.ok){
-      alert("同步主数据失败：未找到订单表格（请先切到【订单】页并滚动到订单列表区域）。");
-      return null;
-    }
-    if(ex.orders.length === 0){
-      alert("同步主数据失败：订单表格未解析到任何订单行。");
-      return null;
-    }
-
-    const cur = _readCanonicalSnapshot() || {};
-    // Preserve other modules if present; only replace orders with extracted ones.
-    const next = Object.assign({}, cur, { orders: ex.orders });
-    _writeCanonicalSnapshot(next);
-
-    // Best-effort: keep in-memory references consistent if this build uses S/state
-    try{ if(typeof window!=="undefined" && window.S){ window.S.orders = ex.orders; } }catch(_e){}
-    try{ if(typeof window!=="undefined" && window.state){ window.state.orders = ex.orders; } }catch(_e){}
-
-    toast(`主数据已同步：订单${ex.orders.length}（已写入主快照 ops_rebuild_v6_4_2_state）`);
-    return { orders: ex.orders.length, meta: ex.meta };
-  }catch(e){
-    console.error(e);
-    alert("同步主数据失败：\n" + (e && e.message ? e.message : String(e)));
-    return null;
-  }
+  // Deprecated: Plan A 收口后以 IndexedDB 主快照为唯一权威来源（main_state_v1 / split-store）。
+  // 旧版“从 DOM 表格回写 localStorage 主快照”的逻辑已不再需要，保留仅为避免旧按钮/旧脚本报错。
+  try{ toast("已废弃：当前版本以 IndexedDB 主快照为准，无需“同步主数据”。"); }catch(_e){ alert("已废弃：当前版本以 IndexedDB 主快照为准，无需“同步主数据”。"); }
+  return { ok:false, deprecated:true };
 }
 
 // Bind the button (override any previous binding)
@@ -9874,7 +10003,10 @@ async function cloudStatusFixed(){
     }
   }
 
-  async function cloudPull(){
+  async function cloudPull(opts){
+  opts = opts||{};
+  const force = !!opts.force;
+
     const cloud = (typeof getCloudClientOrNull === 'function') ? getCloudClientOrNull() : null;
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
     const { client: sb, cfg } = cloud;
@@ -10837,9 +10969,12 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     if(_running) return;
     _running = true;
     try{
-      await safeMergeAndPush({ force:false });
+      try{ if(window.__setCloudMeta) window.__setCloudMeta({ lastAutoCheckAt: new Date() }); }catch(_e){}
+      const r = await safeMergeAndPush({ force:false, quiet:true });
+      try{ if(window.__setCloudMeta) window.__setCloudMeta({ lastAutoResult: r || { ok:false, reason:"no_result" } }); }catch(_e){}
     }catch(e){
       err("自动推送异常", e);
+      try{ if(window.__setCloudMeta) window.__setCloudMeta({ lastAutoResult: { ok:false, error: (e && e.message ? e.message : String(e)) }, lastError: (e && e.message ? e.message : String(e)) }); }catch(_e){}
     }finally{
       _running = false;
     }
@@ -10852,7 +10987,8 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
       if(v === "0" || v === "false"){ _autoEnabled = false; }
       if(v === "1" || v === "true"){ _autoEnabled = true; }
     }catch(e){}
-    if(!_autoEnabled){
+        try{ if(window.__setCloudMeta) window.__setCloudMeta({ autoEnabled: _autoEnabled }); }catch(_e){}
+if(!_autoEnabled){
       log("自动推送已禁用（localStorage: OPS_CLOUD_AUTOPUSH=0）。");
       return;
     }
@@ -11168,7 +11304,10 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash };
   }
 
-  async function cloudPull(){
+  async function cloudPull(opts){
+  opts = opts||{};
+  const force = !!opts.force;
+
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
     const cloud = await restSelect(cfg);
