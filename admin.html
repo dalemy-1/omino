@@ -10172,9 +10172,28 @@ Goal:
     const { data, error } = await client.from(TABLE).select("*").eq("app_key", appKey).maybeSingle();
     if(error) throw error;
     if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
+    // Supabase may return json/jsonb as an object (not a string). Handle both.
     let obj = null;
-    try{ obj = data.payload ? JSON.parse(data.payload) : null; }catch(e){ obj = null; }
-    if(obj && obj.env) obj = obj.env; // compat wrapper
+    try{
+      if(!data.payload) obj = null;
+      else if(typeof data.payload === "string") obj = JSON.parse(data.payload);
+      else obj = data.payload; // object (json/jsonb)
+    }catch(e){ obj = null; }
+
+    // Compat: allow {env:{...}} wrapper
+    if(obj && obj.env) obj = obj.env;
+
+    // Compat: allow {v, state:{ok:true, items:[{key, value:{key, value}}]}} wrapper (IndexedDB KV export style)
+    // Extract the inner main_state if present
+    if(obj && obj.state && obj.state.ok && Array.isArray(obj.state.items)){
+      try{
+        const it = obj.state.items.find(x => x && x.key === "main_state_v1") || obj.state.items[0];
+        const vv = it && it.value;
+        // vv can be {key, value:{...}}
+        obj = (vv && vv.value) ? vv.value : vv;
+      }catch(e){}
+    }
+
     return { exists:true, state: normState(obj), hash: data.hash || null, updated_at: data.updated_at || null };
   }
 
@@ -10215,13 +10234,13 @@ Goal:
 
   async function pushSnapshot(client, appKey, state, note){
     const env = normState(state);
-    const payloadObj = { env };
-    const payload = JSON.stringify(payloadObj);
-    const hash = fnv1a(payload);
+    // Store payload as JSON/object (recommended for jsonb column). Keep wrapper for forward compatibility.
+    const payloadObj = { v: 1, env, meta: { source: "idb", pushed_at: nowIso(), note: note || "" } };
+    const hash = fnv1a(JSON.stringify(payloadObj));
 
     const row = {
       app_key: appKey,
-      payload: payload,
+      payload: payloadObj,
       hash: hash,
       updated_at: nowIso()
     };
