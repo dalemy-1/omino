@@ -10155,7 +10155,7 @@ Goal:
     }
 
     // REST upsert fallback (avoids SDK instability)
-    async function restUpsert(row){
+    async function restUpsertRows(rows){
       const base = String(cfg.url).replace(/\/+$/,'');
       const url = base + '/rest/v1/ops_cloud_snapshots_v1?on_conflict=app_key';
       const res = await fetch(url, {
@@ -10166,16 +10166,53 @@ Goal:
           'Content-Type':'application/json',
           'Prefer':'resolution=merge-duplicates,return=minimal'
         },
-        body: JSON.stringify([row])
+        body: JSON.stringify(rows)
       });
       if(!res.ok){
-        const txt = await res.text().catch(()=> '');
+        const txt = await res.text().catch(()=>String(res.status));
         throw new Error('rest_upsert_failed ' + res.status + ' ' + txt);
       }
     }
+    async function restUpsert(row){
+      return restUpsertRows([row]);
+    }
 
-    const hash = (typeof U!=='undefined' && U.hashString) ? U.hashString(JSON.stringify(s)) : String(Date.now());
-    const row = { app_key: cfg.app_key, payload: s, hash, updated_at: new Date().toISOString() };
+    const jsonStr = JSON.stringify(s);
+    const hash = (typeof U!=='undefined' && U.hashString) ? U.hashString(jsonStr) : String(Date.now());
+    const updated_at = new Date().toISOString();
+
+    // If payload is large, store as chunked rows to avoid PostgREST statement timeout.
+    // Base row becomes a small manifest; chunks are stored as separate rows.
+    const CHUNK_SIZE = 180000; // chars per chunk (kept well below typical API limits)
+    if(jsonStr.length > CHUNK_SIZE){
+      const chunks = [];
+      for(let i=0;i<jsonStr.length;i+=CHUNK_SIZE){
+        chunks.push(jsonStr.slice(i, i+CHUNK_SIZE));
+      }
+      const n = chunks.length;
+      const rows = [];
+      rows.push({
+        app_key: cfg.app_key,
+        payload: { kind:'manifest', ver:1, n, hash, counts:{ sc, pc, oc, bc }, updated_at },
+        hash, updated_at
+      });
+      for(let i=0;i<n;i++){
+        rows.push({
+          app_key: cfg.app_key + '::chunk:' + i,
+          payload: { kind:'chunk', ver:1, i, n, hash, data: chunks[i] },
+          hash, updated_at
+        });
+      }
+      // Prefer REST to avoid supabase-js instability and large jsonb upserts.
+      // Upsert in small batches to reduce request size.
+      const BATCH = 8;
+      for(let i=0;i<rows.length;i+=BATCH){
+        await restUpsertRows(rows.slice(i, i+BATCH));
+      }
+      return { ok:true, hash, counts:{ sc, pc, oc, bc }, src: loc.src, chunked:true, chunks:n };
+    }
+
+    const row = { app_key: cfg.app_key, payload: s, hash, updated_at };
 
     if(client && typeof client.from==='function'){
       const { error } = await client.from('ops_cloud_snapshots_v1').upsert(row, { onConflict:'app_key' });
@@ -10501,6 +10538,31 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     }else{
       obj = null;
     }
+    // If stored as chunked manifest, reconstruct full payload.
+    if(obj && obj.kind==='manifest' && obj.n){
+      const n = obj.n|0;
+      const parts = new Array(n);
+      for(let i=0;i<n;i++){
+        const k = appKey + '::chunk:' + i;
+        let rowi = null;
+        if(_clientHasFrom(client)){
+          const { data: d2, error: e2 } = await client.from(TABLE).select('payload').eq('app_key', k).maybeSingle();
+          if(e2) throw e2;
+          rowi = d2;
+        }else{
+          const cfgR = cfgFallback || (client && client.cfg) || null;
+          if(!cfgR) throw new Error('cloud_cfg_missing_for_rest');
+          rowi = await _restSelectOne(cfgR, TABLE, k);
+        }
+        let p = rowi && rowi.payload;
+        if(p && typeof p === 'string'){ try{ p = JSON.parse(p);}catch(_e){} }
+        if(p && p.data != null) parts[i] = String(p.data);
+        else parts[i] = '';
+      }
+      const fullStr = parts.join('');
+      try{ obj = JSON.parse(fullStr); }catch(_e){ obj = null; }
+    }
+
     if(obj && obj.env) obj = obj.env; // compat wrapper
     return { exists:true, state: normState(obj), hash: data.hash || null, updated_at: data.updated_at || null };
   }
