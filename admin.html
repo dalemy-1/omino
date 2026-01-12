@@ -535,24 +535,51 @@ async function ensureSupabaseSDK(){
   try{
     if(window.supabase && window.supabase.createClient) return true;
     if(window.__supabase_sdk_loading) return await window.__supabase_sdk_loading;
-    window.__supabase_sdk_loading = new Promise((resolve)=>{
+
+    const tryLoad = (src)=> new Promise((resolve)=>{
       try{
         const s = document.createElement("script");
-        s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js";
+        s.src = src;
         s.async = true;
+        s.crossOrigin = "anonymous";
         s.onload = ()=> resolve(!!(window.supabase && window.supabase.createClient));
         s.onerror = ()=> resolve(false);
         document.head.appendChild(s);
       }catch(e){ resolve(false); }
     });
+
+    window.__supabase_sdk_loading = (async ()=>{
+      // Try multiple CDNs to avoid regional blocking
+      const cdns = [
+        "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js",
+        "https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/supabase/2.0.0/supabase.min.js"
+      ];
+      for(const src of cdns){
+        const ok = await tryLoad(src);
+        if(ok) return true;
+      }
+      return !!(window.supabase && window.supabase.createClient);
+    })();
+
     return await window.__supabase_sdk_loading;
   }catch(e){ return false; }
 }
 
 function getCloudClientOrNull(opts){
+
   const o = opts || {};
   const quiet = !!o.quiet;
   const cfg = getCloudCfgOrNull();
+
+  const forceReinit = !!o.forceReinit;
+
+  // Ensure SDK is available (best-effort, quiet mode friendly)
+  if(!(window.supabase && window.supabase.createClient)){
+    // Avoid await here (function is sync); just kick off loader.
+    if(typeof ensureSupabaseSDK==="function") ensureSupabaseSDK();
+  }
+
   if(!cfg){
     // 避免自动推送/定时器导致 toast 刷屏
     if(!quiet){
@@ -575,10 +602,11 @@ function getCloudClientOrNull(opts){
     const key = cfg.url + "|" + cfg.anon + "|" + cfg.app_key;
     if(!window.__cloud_client_cache) window.__cloud_client_cache = {};
     // 缓存统一返回 {client,cfg}，避免调用方解构时报 client/cfg 为 undefined
-    if(window.__cloud_client_cache[key]) return window.__cloud_client_cache[key];
+    if(!forceReinit && window.__cloud_client_cache[key]) return window.__cloud_client_cache[key];
     const client = window.supabase.createClient(cfg.url, cfg.anon, {
       auth: { persistSession:false, autoRefreshToken:false, detectSessionInUrl:false }
     });
+    if(!client || typeof client.from!=="function"){ throw new Error("supabase_createClient_invalid"); }
     const wrap = { client, cfg };
     window.__cloud_client_cache[key] = wrap;
     return wrap;
@@ -861,6 +889,15 @@ async function cloudStatus(){
   const sb = getCloudClientOrNull();
   if(!sb) return;
   const cfg = getCloudCfgOrNull();
+
+  const forceReinit = !!o.forceReinit;
+
+  // Ensure SDK is available (best-effort, quiet mode friendly)
+  if(!(window.supabase && window.supabase.createClient)){
+    // Avoid await here (function is sync); just kick off loader.
+    if(typeof ensureSupabaseSDK==="function") ensureSupabaseSDK();
+  }
+
   if(!cfg || !cfg.url || !cfg.anon || !cfg.appKey){
     toast("请先设置云端（Supabase URL / anon key / app_key）","warn");
     return;
@@ -8687,7 +8724,7 @@ function syncMainStateFromDOM(){
         if(w && w.client) return w;
       }
     }catch(_e){}
-    alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
+    if(!quiet) alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
     return null;
   }
 
@@ -8912,7 +8949,7 @@ function syncMainStateFromDOM(){
         if(w && w.client) return w;
       }
     }catch(_e){}
-    alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
+    if(!quiet) alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
     return null;
   }
 
@@ -9322,7 +9359,9 @@ What V30 does:
     return { sellers: toArr(sellers), products: toArr(products), orders: toArr(orders), batches: toArr(batches) };
   }
 
-  function getCloudWrap(){
+  function getCloudWrap(opts){
+    opts = opts||{};
+    const quiet = !!opts.quiet;
     try{
       if(typeof getCloudClientOrNull === "function"){
         var w = getCloudClientOrNull();
@@ -9333,7 +9372,7 @@ What V30 does:
         if(w && w.client) return w;
       }
     }catch(e){}
-    alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
+    if(!quiet) alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
     return null;
   }
 
@@ -9941,7 +9980,9 @@ Goal:
     return { src:"(none)", state: normState(null) };
   }
 
-  function getCloudWrap(){
+  function getCloudWrap(opts){
+    opts = opts||{};
+    const quiet = !!opts.quiet;
     try{
       if(typeof getCloudClientOrNull === "function"){
         const w = getCloudClientOrNull();
@@ -9952,7 +9993,7 @@ Goal:
         if(w && w.client) return w;
       }
     }catch(e){}
-    alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
+    if(!quiet) alert("云端未配置：请先点【云端设置】填写 Supabase URL/AnonKey/app_key。");
     return null;
   }
 
@@ -10261,7 +10302,9 @@ Goal:
     return { src:"(none)", state: normState(null) };
   }
 
-  function getCloudWrap(){
+  function getCloudWrap(opts){
+    opts = opts||{};
+    const quiet = !!opts.quiet;
     try{
       if(typeof getCloudClientOrNull==="function"){
         const w = getCloudClientOrNull();
@@ -11258,7 +11301,7 @@ toast('云端设置已保存。');
       const ok = await ensureSupabaseSDK();
       if(!ok) throw new Error("云端未就绪：Supabase SDK 未加载（可能被网络/插件拦截）");
     }
-    const wrap = (typeof getCloudWrap==="function") ? getCloudWrap() : null;
+    const wrap = (typeof getCloudWrap==="function") ? getCloudWrap({quiet}) : null;
     if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
       // Try to provide a clearer reason
       const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : null;
