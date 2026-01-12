@@ -10659,6 +10659,14 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     log("自动推送已启动（Plan A，安全合并推送；间隔 "+Math.round(AUTO_INTERVAL_MS/1000)+"s）。");
   }
 
+
+  // expose REST-capable snapshot helpers for module/override scripts
+  try{
+    if(typeof window!=='undefined'){
+      window.fetchCloudSnapshot = window.fetchCloudSnapshot || fetchCloudSnapshot;
+      window.pushSnapshot = window.pushSnapshot || pushSnapshot;
+    }
+  }catch(_e){}
   // boot
   try{
     bindButtons();
