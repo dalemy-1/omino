@@ -1193,6 +1193,7 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnCloudPush" title="把当前数据备份到云端">云端推送</button>
       <button class="btn" id="btnCloudPull" title="从云端恢复并覆盖本地">云端拉取</button>
       <button class="btn" id="btnCloudStatus" title="查看云端快照状态">云端状态</button>
+      <button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
       <button class="btn" id="btnSyncMainState" title="把当前订单表格数据写入主快照，用于云端推送/拉取与导出一致">同步主数据</button>
       <button class="btn" id="btnLoadSample">加载示例数据</button>
       <button class="btn danger" id="btnReset">清空数据</button>
@@ -11784,8 +11785,11 @@ toast('云端设置已保存。');
     };
     window.cloudPull = cloudPull;
 
-    // hard-disable any existing auto push scheduler if present
-    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(_){}
+    // AUTO-PUSH default: enabled (can be toggled via UI)
+    try{
+      const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
+      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+    }catch(_){}
   }
 
   if(document.readyState === 'loading'){
@@ -11800,12 +11804,16 @@ toast('云端设置已保存。');
 <script>
 /* === SYNC CONSOLIDATION (Plan A / Single-Entry) ===
    Goals:
-   - Disable legacy AUTO-PUSH switch by default
+   - Provide AUTO-PUSH toggle (default ON)
    - Provide a single set of global entry points: cloudStatus/cloudPush/cloudPull
    - Add in-page sync log panel (last 30)
 */
 (function(){
-  try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
+  // AUTO-PUSH default: ON (legacy patches may read OPS_CLOUD_AUTOPUSH)
+  try{
+    const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
+    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+  }catch(e){}
   const MAX_LOGS = 30;
   const logs = [];
   const pad2 = (n)=> (n<10?('0'+n):(''+n));
@@ -11909,6 +11917,32 @@ toast('云端设置已保存。');
     body.appendChild(btn);
     body.appendChild(panel);
   }
+    // Bind topbar AUTO-PUSH toggle if present
+    setTimeout(()=>{
+      try{
+        const tbtn = document.getElementById('btnAutoPushToggle');
+        if(!tbtn) return;
+        const readFlag = ()=> {
+          const v = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim().toLowerCase();
+          return (v==='1' || v==='true' || v==='yes' || v==='on');
+        };
+        const setFlag = (on)=>{
+          localStorage.setItem('OPS_CLOUD_AUTOPUSH', on ? '1' : '0');
+          tbtn.textContent = '自动推送：' + (on ? '开' : '关');
+          tbtn.classList.toggle('danger', !on);
+        };
+        // init label
+        setFlag(readFlag());
+        tbtn.onclick = ()=>{
+          const on = !readFlag();
+          setFlag(on);
+          addLog('info', 'AUTO-PUSH 已' + (on ? '开启' : '关闭'));
+          try{
+            if(window.toast && typeof window.toast==='function') window.toast('自动推送已' + (on ? '开启' : '关闭'));
+          }catch(_){}
+        };
+      }catch(_){}
+    }, 0);
 
   function safeJson(v){
     try{
@@ -11945,9 +11979,9 @@ toast('云端设置已保存。');
 
   // init UI lazily after DOM ready
   if(document.readyState==='loading'){
-    document.addEventListener('DOMContentLoaded', ()=>{ ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认关闭）'); });
+    document.addEventListener('DOMContentLoaded', ()=>{ ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认开启）'); });
   }else{
-    ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认关闭）');
+    ensureUI(); addLog('info','同步收口模块已加载（AUTO-PUSH 默认开启）');
   }
 
   // ----- Wrap global entry points -----
@@ -11992,8 +12026,7 @@ toast('云端设置已保存。');
 
   // Make sure we only keep ONE set of global APIs, but do not break existing working ones.
   function consolidate(){
-    // Ensure legacy auto-push switches are off
-    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
+    // Keep AUTO-PUSH flag as-is; only unify entry points
     // Wrap and re-export
     const p = wrapAsync('cloudPush');
     const l = wrapAsync('cloudPull');
