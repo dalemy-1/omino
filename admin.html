@@ -9994,6 +9994,44 @@ Goal:
     return null;
   }
 
+
+  async function readLocalState(){
+    // Always read the same local snapshot that Cloud Status shows.
+    // Primary: ops_v642_main/kv/main_state_v1 (raw).
+    // Fallback: localStorage legacy key.
+    let src = "";
+    let stateObj = null;
+
+    const r = await readMainFromIDB();
+    if(r && r.state){
+      src = r.src || "IndexedDB(raw)";
+      stateObj = r.state;
+    }
+
+    // Unwrap common KV shapes: {key, value} or {payload:{key,value}} or {payload:...}
+    try{
+      if(stateObj && typeof stateObj==="object"){
+        if(stateObj.payload && typeof stateObj.payload==="object") stateObj = stateObj.payload;
+        if(stateObj && stateObj.value && (stateObj.key===MAIN_KEY || String(stateObj.key||"").trim()===MAIN_KEY)){
+          stateObj = stateObj.value;
+        }
+      }
+    }catch(e){}
+
+    if(!stateObj){
+      try{
+        const raw = localStorage.getItem(LS_FALLBACK_KEY);
+        if(raw){
+          stateObj = JSON.parse(raw);
+          src = "localStorage("+LS_FALLBACK_KEY+")";
+        }
+      }catch(e){}
+    }
+
+    stateObj = normState(stateObj || {});
+    return { src, state: stateObj };
+  }
+
   async function cloudStatusFINAL(){
     const wrap = getCloudWrap(); if(!wrap) return;
     const { client, cfg } = wrap;
