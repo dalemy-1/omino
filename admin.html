@@ -10531,6 +10531,7 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
   async function cloudStatus(){
     const wrap = getCloudWrap(); if(!wrap) return;
     const { client, cfg } = wrap;
+    const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
     const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
     if(!appKey){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
     try{
@@ -10591,6 +10592,7 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
         (async function(){
           const wrap = getCloudWrap(); if(!wrap) return;
           const { client, cfg } = wrap;
+          const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
           const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
           if(!appKey){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
           const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
@@ -11408,11 +11410,13 @@ toast('云端设置已保存。');
     const wrap = (typeof getCloudWrap==="function") ? getCloudWrap({quiet, forceRebuild:true}) : null;
     const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || null;
 
-    if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
-      throw new Error("云端未就绪：Supabase client 不可用（初始化失败或被旧逻辑覆盖）");
+        // Allow REST fallback even if supabase-js client is unavailable
+    const client = (wrap && wrap.client) ? wrap.client : null;
+    const cfg = (wrap && wrap.cfg) || cfg2 || null;
+    if(!cfg || !cfg.url || !cfg.anon){
+      throw new Error("云端未配置：请先点【云端设置】并保存 URL / anon / app_key");
     }
-    const client = wrap.client;
-    const cfg = wrap.cfg || cfg2 || null;
+
     const appKey = getAppKey(cfg);
     if(!appKey) throw new Error("云端未配置：缺少 app_key（请点【云端设置】）");
 
