@@ -634,6 +634,11 @@ function _pickSnapshotFromKvItems(items, preferKey){
 function _normalizeSnapshot(payload){
   // Robustly unwrap kv-wrapped snapshots (common shapes: {key, value:{...}}, {value:{key,value:{...}}}, {state:{...}}, {data:{...}})
   let p = payload;
+  // If payload is a JSON string, try to parse it (some historical pushes stored stringified JSON)
+  if(typeof p==="string"){
+    try{ p = JSON.parse(p); }catch(_e){}
+  }
+
   for(let i=0;i<6;i++){
     if(!p || typeof p!=="object") break;
 
@@ -10262,7 +10267,16 @@ Goal:
     if(error) throw error;
     if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
     let obj = null;
-    try{ obj = data.payload ? JSON.parse(data.payload) : null; }catch(e){ obj = null; }
+    // payload may be stored as jsonb (object) or as historical stringified JSON
+    if(data.payload==null){
+      obj = null;
+    }else if(typeof data.payload==="string"){
+      try{ obj = JSON.parse(data.payload); }catch(e){ obj = null; }
+    }else if(typeof data.payload==="object"){
+      obj = data.payload;
+    }else{
+      obj = null;
+    }
     if(obj && obj.env) obj = obj.env; // compat wrapper
     return { exists:true, state: normState(obj), hash: data.hash || null, updated_at: data.updated_at || null };
   }
