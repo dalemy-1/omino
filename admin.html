@@ -2658,6 +2658,12 @@ function showTablePreviewModal(cfg){
   foot.style.gap="10px";
 
   const left=document.createElement("div");
+  const statusEl=document.createElement("div");
+  statusEl.style.marginTop="4px";
+  statusEl.style.whiteSpace="pre-wrap";
+  statusEl.style.color="#64748b";
+  statusEl.style.fontSize="12px";
+  statusEl.textContent="";
   left.style.fontSize="12px";
   left.style.color="#6b7280";
   left.textContent="提示：先核对/修改，再点击确认执行。可取消勾选不处理的行。";
@@ -2674,21 +2680,30 @@ function showTablePreviewModal(cfg){
   const btnApply=document.createElement("button");
   btnApply.className="btn primary";
   btnApply.textContent=applyText;
-  btnApply.onclick=()=>{
-    try{
-      if(typeof onApply==="function"){
-        const finalRows = stateRows.filter(r=>r.__include).map(r=>r.data);
-        onApply(finalRows, ()=>{ try{ document.body.removeChild(overlay);}catch(e){} });
-      }else{
-        document.body.removeChild(overlay);
-      }
-    }catch(e){
-      showNotice("脚本错误", (e&&e.message)?e.message:String(e));
+  btnApply.onclick=async ()=>{
+  try{
+    if(typeof onApply==="function"){
+      const finalRows = stateRows.filter(r=>r.__include).map(r=>r.data);
+      const ui = {
+        setStatus: (msg)=>{ try{ statusEl.textContent = String(msg||""); }catch(e){} },
+        disable: ()=>{ try{ btnApply.disabled=true; btnCancel.disabled=true; btnApply.textContent="处理中…"; }catch(e){} },
+        enable: ()=>{ try{ btnApply.disabled=false; btnCancel.disabled=false; btnApply.textContent=applyText; }catch(e){} }
+      };
+      ui.disable();
+      const ret = onApply(finalRows, ()=>{ try{ document.body.removeChild(overlay);}catch(e){} }, ui);
+      if(ret && typeof ret.then==="function") await ret;
+      ui.enable();
+    }else{
+      document.body.removeChild(overlay);
     }
-  };
+  }catch(e){
+    showNotice("脚本错误", (e&&e.message)?e.message:String(e));
+  }
+};
 
   right.appendChild(btnCancel);
   right.appendChild(btnApply);
+  left.appendChild(statusEl);
   foot.appendChild(left);
   foot.appendChild(right);
   card.appendChild(foot);
@@ -4199,17 +4214,62 @@ function parseLine(line){
 }
 
 
-function batchHandle(commit){
+async function batchHandle(commit){
   const sellerIdInput = $("batchSeller").value; // 允许为空：先解析，尽量从产品库自动推导卖家
   const productIdInput = $("batchProduct").value || null;
   const defaultDate = $("batchDate").value || U.today();
   const defaultMarket = $("batchMarket").value || "";
   const text = $("batchText").value || "";
   const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+const hintEl = $("batchHint");
+const setHint = (msg)=>{ try{ if(hintEl) hintEl.textContent = String(msg||""); }catch(e){} };
+const yieldToUI = ()=> new Promise(r=>setTimeout(r,0));
+
+// 解析/提交性能优化：预构建产品索引 + 标题匹配缓存，避免每行全量扫描 products
+const _norm = (s)=>String(s||"").trim().replace(/\s+/g,'').toLowerCase();
+const productCache = new Map(); // key: market|norm(title) => product|null
+const productsByMarket = new Map(); // market => [{p, n}]
+(S.products||[]).forEach(p=>{
+  if(!p) return;
+  const mk = String(p.market||"").trim() || "*";
+  const arr = productsByMarket.get(mk) || [];
+  arr.push({p, n:_norm(p.name||"")});
+  productsByMarket.set(mk, arr);
+  if(mk!=="*"){
+    const arr2 = productsByMarket.get("*") || [];
+    arr2.push({p, n:_norm(p.name||"")});
+    productsByMarket.set("*", arr2);
+  }
+});
+const fastMatchProductFromText = (title, market)=>{
+  const t0 = String(title||"").trim();
+  if(!t0) return null;
+  const mk = String(market||"").trim() || "*";
+  const key = mk + "|" + _norm(t0);
+  if(productCache.has(key)) return productCache.get(key);
+  const t = _norm(t0);
+  const list = productsByMarket.get(mk) || productsByMarket.get("*") || [];
+  let best=null, bestScore=0;
+  for(let i=0;i<list.length;i++){
+    const pn = list[i].n;
+    if(!pn) continue;
+    if(!(t.includes(pn) || pn.includes(t))) continue;
+    const score = Math.min(pn.length, t.length);
+    if(score>bestScore){ bestScore=score; best=list[i].p; }
+  }
+  productCache.set(key, best||null);
+  return best||null;
+};
+
 
   let rows = [];
   let badLines = [];
-  for(const line of lines){
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    if(i>0 && (i%200===0)){
+      setHint(`解析中… ${i}/${lines.length}`);
+      await yieldToUI();
+    }
     const p = parseLine(line);
     if(!p.ok){ badLines.push(line); continue; }
     // detect market/review type from Chinese note if present
@@ -4225,7 +4285,7 @@ function batchHandle(commit){
     if(productIdInput){
       matchedProduct = U.productById(productIdInput) || null;
     }else{
-      matchedProduct = matchProductFromText(p.title || "", market);
+      matchedProduct = fastMatchProductFromText(p.title || "", market);
     }
 
     let finalTitle = p.title || "";
@@ -4258,6 +4318,8 @@ function batchHandle(commit){
       note: p.note || ""
     });
   }
+
+  setHint(`解析完成：成功 ${rows.length} 行，失败 ${badLines.length} 行。`);
 
   if(!rows.length){
     showNotice("提示", "未解析到可用行。\n失败 " + badLines.length + " 行。");
@@ -4300,71 +4362,89 @@ function batchHandle(commit){
     ],
     rows,
     applyText: commit ? "确认提交登记" : "关闭",
-    onApply: (finalRows, close)=>{
+    onApply: async (finalRows, close, ui)=>{
       if(!commit){ close(); return; }
 
       let submitted=0, duplicated=0, bad=0;
-      const dupLines=[], okLines=[], bad2=[];
-      for(const r of finalRows){
-        const orderId = String(r.orderId||"").trim().slice(0,19);
-        if(!orderId){ bad++; bad2.push("订单号为空"); continue; }
+const dupLines=[], okLines=[], bad2=[];
+const newOrders = [];
+// 用 key 集合替代每行 S.orders.some 全表扫描（万单级会非常卡）
+const existingKeys = new Set((S.orders||[]).map(o=>String(o && (o.key || U.orderKey(o.sellerId, o.orderId, o.asin)) || "")));
+const total = finalRows.length;
 
-        const market = String(r.market||defaultMarket||"US").trim() || "US";
-        const currency2 = U.marketToCurrency(market);
-        const reviewLabel = String(r.reviewReq||"文字评").trim();
-        const reviewType = rtMap[reviewLabel] || "TEXT";
+for(let idx=0; idx<total; idx++){
+  const r = finalRows[idx];
 
-        const asin = String(r.asin||"").trim();
-        const sellerId = String(r.sellerId || sellerIdInput || "").trim();
-        const productId = String(r.productId || productIdInput || "").trim() || null;
+  if(ui && ui.setStatus && (idx%100===0)){
+    ui.setStatus(`提交中… ${idx}/${total}\n已提交 ${submitted}，重复 ${duplicated}，失败 ${bad}`);
+    await yieldToUI();
+  }
 
-        if(!sellerId){ bad++; bad2.push(`${orderId}：未匹配到产品且未选择卖家`); continue; }
+  const orderId = String(r.orderId||"").trim().slice(0,19);
+  if(!orderId){ bad++; bad2.push("订单号为空"); continue; }
 
-        // 重复判定：仅当同卖家 + 同订单号 + 同 ASIN 同时成立
-        const dupExists = S.orders.some(o=>{
-          return o.sellerId===sellerId && (o.orderId||"")===orderId && ((o.asin||"")===asin);
-        });
-        if(dupExists){ duplicated++; dupLines.push(orderId); continue; }
+  const market = String(r.market||defaultMarket||"US").trim() || "US";
+  const currency2 = U.marketToCurrency(market);
+  const reviewLabel = String(r.reviewReq||"文字评").trim();
+  const reviewType = rtMap[reviewLabel] || "TEXT";
 
-        const key = U.orderKey(sellerId, orderId, asin);
+  const asin = String(r.asin||"").trim();
+  const sellerId = String(r.sellerId || sellerIdInput || "").trim();
+  const productId = String(r.productId || productIdInput || "").trim() || null;
 
-const seller = U.sellerById(sellerId);
-        const fxKey = U.marketToFxKey(market);
-        const fx = seller ? U.num(seller.fx?.[market] || seller.fx?.[fxKey] || 0) : 0;
+  if(!sellerId){ bad++; bad2.push(`${orderId}：未匹配到产品且未选择卖家`); continue; }
 
-        const amount = num(r.amount, 0);
+  const key = U.orderKey(sellerId, orderId, asin);
+  if(existingKeys.has(key)){ duplicated++; dupLines.push(orderId); continue; }
+  existingKeys.add(key);
 
-        const o = {
-          id: U.id("O", S.seq.order++),
-          createdAt: new Date().toISOString(),
-          orderId,
-          key,
-          sellerId,
-          productId,
-          market,
-          currency: currency2,
-          amount,
-          discount: 0,
-          buyerCommission: 0,
-          asin,
-          note: String(r.note||"") || String(r.title||""),
-          date: r.date || defaultDate,
-          fx: fx || 0,
-          reviewReq: reviewType,
-          principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-          commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-          review:{ status:"PENDING", doneType:"", date:"", link:"", note:"" }
-        };
+  const seller = U.sellerById(sellerId);
+  const fxKey = U.marketToFxKey(market);
+  const fx = seller ? U.num(seller.fx?.[market] || seller.fx?.[fxKey] || 0) : 0;
 
-        S.orders.unshift(o);
-        submitted++;
-        okLines.push(orderId);
-      }
+  const amount = num(r.amount, 0);
+
+  const o = {
+    id: U.id("O", S.seq.order++),
+    createdAt: new Date().toISOString(),
+    orderId,
+    key,
+    sellerId,
+    productId,
+    market,
+    currency: currency2,
+    amount,
+    discount: 0,
+    title: String(r.title||""),
+    asin: String(asin||"") || String(r.title||""),
+    note: String(r.note||"") || String(r.title||""),
+    date: r.date || defaultDate,
+    fx: fx || 0,
+    reviewReq: reviewType,
+    principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+    commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+    review:{ status:"PENDING", doneType:"", date:"", link:"", note:"" }
+  };
+
+  newOrders.push(o);
+  submitted++;
+  okLines.push(orderId);
+}
+
+// 保持“新订单置顶”的语义：原来每次 unshift，会导致 O(n^2) 卡顿；
+// 现在一次性合并：最后一行提交仍置顶（与旧行为一致）
+if(newOrders.length){
+  S.orders = newOrders.reverse().concat(S.orders||[]);
+}
+
+
 
       saveNow();
       refreshAfterOrderChange();
       close();
+      if(ui && ui.setStatus) ui.setStatus(`完成：已提交 ${submitted}，重复 ${duplicated}，失败 ${bad}`);
       showParseSummary({submitted, duplicated, bad, dupLines, badLines: bad2, okLines});
+      setHint("");
     }
   });
   // 解析完成后，右侧“卖家/套用产品”重置为默认（避免下一次误套用）
