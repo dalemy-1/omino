@@ -530,34 +530,42 @@ function getCloudCfgOrNull(){
   return cfg;
 }
 
-function getCloudClientOrNull(){
+function getCloudClientOrNull(opts){
+  const o = opts || {};
+  const quiet = !!o.quiet;
   const cfg = getCloudCfgOrNull();
   if(!cfg){
-    if(typeof toast === "function") toast("请先设置云端（Supabase）");
+    // 避免自动推送/定时器导致 toast 刷屏
+    if(!quiet){
+      const now = Date.now();
+      if(!window.__toast_cloud_cfg_missing_at || (now - window.__toast_cloud_cfg_missing_at) > 3000){
+        window.__toast_cloud_cfg_missing_at = now;
+        if(typeof toast === "function") toast("请先设置云端（Supabase）");
+      }
+    }
     return null;
   }
   if(!window.supabase || !window.supabase.createClient){
-    alert("未检测到 Supabase SDK（window.supabase）。请检查网络或脚本引用。");
+    if(!quiet){
+      if(typeof toast === "function") toast("Supabase SDK 未加载");
+      else alert("Supabase SDK 未加载");
+    }
     return null;
   }
-
-  // Supabase client 单例（避免同一页面多次创建 GoTrueClient 导致警告/潜在不确定行为）
-  // 仅用于 ops_cloud_snapshots_v1 快照读写，不需要 Auth 会话。
-  const key = (cfg.url || "") + "||" + (cfg.anon || "");
-  if(!window.__OPS_SB_CLIENT__ || window.__OPS_SB_CLIENT_KEY__ !== key){
-    try{
-      window.__OPS_SB_CLIENT__ = window.supabase.createClient(cfg.url, cfg.anon, {
-        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-      });
-      window.__OPS_SB_CLIENT_KEY__ = key;
-    }catch(e){
+  try{
+    const key = cfg.url + "|" + cfg.anon + "|" + cfg.app_key;
+    if(!window.__cloud_client_cache) window.__cloud_client_cache = {};
+    if(window.__cloud_client_cache[key]) return window.__cloud_client_cache[key];
+    const client = window.supabase.createClient(cfg.url, cfg.anon, { auth: { persistSession:false } });
+    window.__cloud_client_cache[key] = client;
+    return client;
+  }catch(e){
+    if(!quiet){
       console.error(e);
-      alert("初始化 Supabase Client 失败：" + (e && e.message ? e.message : String(e)));
-      return null;
+      if(typeof toast === "function") toast("云端初始化失败");
     }
+    return null;
   }
-
-  return { client: window.__OPS_SB_CLIENT__, cfg };
 }
 
 
@@ -8214,12 +8222,58 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     }
     return 0;
   }
+    function _extractMainStateFromPayload(payload){
+    // 支持多种形态：
+    // 1) 直接是 state：{sellers, products, orders, batches...}
+    // 2) 包裹形态：{payload:{...}} 或 {v, state:{ok, items:[{key:'main_state_v1', value:{key, value:STATE}}]}}
+    if(!payload) return null;
+
+    // payload.payload 递归
+    if(payload.payload && typeof payload.payload === "object"){
+      const inner = _extractMainStateFromPayload(payload.payload);
+      if(inner) return inner;
+    }
+
+    // Supabase 存储的 v/state/items 结构
+    const st = payload.state;
+    if(st && Array.isArray(st.items)){
+      // 期望 items: [{key:'main_state_v1', value:{key:'main_state_v1', value: STATE}}]
+      const hit = st.items.find(it => it && (it.key === "main_state_v1" || it.key === "main_state" || it.key === "main_state_v1 "));
+      if(hit){
+        const v = hit.value;
+        if(v && typeof v === "object"){
+          // value 可能是 {key, value:STATE} 或直接 STATE
+          if(v.value && typeof v.value === "object") return v.value;
+          return v;
+        }
+      }
+      // 如果没命中，也可能直接把 STATE 放到了 state 上
+      if(st.data && typeof st.data === "object") return st.data;
+    }
+
+    // 直接是 STATE
+    if(typeof payload === "object" && (payload.sellers || payload.products || payload.orders || payload.batches)){
+      return payload;
+    }
+
+    // 兜底：常见嵌套字段
+    for(const k of ["main","data","state","snapshot","doc"]){
+      if(payload[k] && typeof payload[k] === "object"){
+        const inner = _extractMainStateFromPayload(payload[k]);
+        if(inner) return inner;
+      }
+    }
+
+    return null;
+  }
+
   function counts(payload){
+    const state = _extractMainStateFromPayload(payload) || payload || {};
     return {
-      sellers: countAny(payload, ["sellers","sellerList","sellerRows","vendors"]),
-      products: countAny(payload, ["products","productList","productRows","items"]),
-      orders: countAny(payload, ["orders","orderList","orderRows"]),
-      batches: countAny(payload, ["batches","batchList","settleBatches","settlementBatches","payoutBatches"])
+      sellers: countAny(state, ["sellers","sellerList","sellerRows","vendors"]),
+      products: countAny(state, ["products","productList","productRows","items"]),
+      orders: countAny(state, ["orders","orderList","orderRows"]),
+      batches: countAny(state, ["batches","batchList","settleBatches","settlementBatches","payoutBatches"])
     };
   }
 
@@ -9982,7 +10036,7 @@ Goal:
 
   const AUTO_INTERVAL_MS = 60 * 1000;   // 1 min
   const AUTO_START_DELAY_MS = 2500;
-  const AUTO_ENABLED_DEFAULT = true;    // enable by default, but guarded
+  const AUTO_ENABLED_DEFAULT = false;    // enable by default, but guarded
 
   let _running = false;
   let _lastPushedHash = null;
@@ -10199,7 +10253,7 @@ Goal:
       return;
     }
     try{
-      const res = await window.cloudPush({ force });
+      const res = await window.cloudPush({ force, quiet: !force });
       if(res && res.ok){
         if(res.hash) _lastPushedHash = res.hash;
         if(res.skipped){
