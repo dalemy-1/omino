@@ -10815,67 +10815,80 @@ Goal:
 
 
 <script>
-/* ====== CLOUD SYNC OVERRIDE (single-file, stable) ======
-   - Forces table: ops_cloud_snapshots_v1
-   - Uses REST fetch (no schema cache surprises)
-   - Writes columns: payload, hash, updated_at, app_key
-   - Button binding uses capture + stopImmediatePropagation to override old handlers
-======================================================== */
+/* ====== CLOUD SYNC OVERRIDE (Plan A: payload-only, single-file) ======
+   Goal: finish cloud sync by ensuring we ALWAYS write non-empty `payload`
+   to table `ops_cloud_snapshots_v1` (primary key: app_key).
+
+   - Overrides buttons: 云端设置 / 云端推送 / 云端状态 / 云端拉取
+   - Writes columns: app_key, payload, hash, updated_at
+   - Reads columns:  app_key, payload, hash, updated_at
+   - Blocks dangerous empty-push unless user holds SHIFT (force)
+*/
 (function(){
   const TABLE = "ops_cloud_snapshots_v1";
-  const LS_URL_KEYS  = ["OPS_SUPABASE_URL","SUPABASE_URL","supabase_url","SUPABASE_URL_V2"];
-  const LS_ANON_KEYS = ["OPS_SUPABASE_ANON","SUPABASE_ANON_KEY","SUPABASE_ANON","supabase_anon","supabase_anon_key"];
-  const LS_APP_KEYS  = ["OPS_APP_KEY","OPS_SUPABASE_APP","APP_KEY","app_key","ops_app_key"];
+  const COL = "payload";
   const CANONICAL_LS_KEY = "ops_rebuild_v6_4_2_state";
+  const MAIN_KV_KEY = "main_state_v1";
 
-  function lsGetFirst(keys){
-    for(const k of keys){
-      try{ const v = localStorage.getItem(k); if(v && String(v).trim()) return String(v).trim(); }catch(_){}
-    }
-    return "";
-  }
-  function getCfg(){
-    return { url: lsGetFirst(LS_URL_KEYS), anon: lsGetFirst(LS_ANON_KEYS), app_key: lsGetFirst(LS_APP_KEYS) };
-  }
-  function okCfg(c){ return !!(c && c.url && c.anon && c.app_key); }
-
-  function jparse(s, fallback){ try{ return JSON.parse(s); }catch(_){ return fallback; } }
-  function normalizeState(state){
-    state = state && typeof state === "object" ? state : {};
-    const sellers  = Array.isArray(state.sellers)  ? state.sellers  : (Array.isArray(state.sellerList)?state.sellerList:[]);
-    const products = Array.isArray(state.products) ? state.products : (Array.isArray(state.productList)?state.productList:[]);
-    const orders   = Array.isArray(state.orders)   ? state.orders   : (Array.isArray(state.orderList)?state.orderList:[]);
-    const batches  = Array.isArray(state.batches)  ? state.batches  : (Array.isArray(state.batchList)?state.batchList:[]);
-    return { sellers, products, orders, batches, _raw: state };
-  }
-  function countSnap(payload){
-    const n = normalizeState(payload||{});
-    return { sc:n.sellers.length, pc:n.products.length, oc:n.orders.length, bc:n.batches.length };
-  }
+  function nowISO(){ return new Date().toISOString(); }
+  function ts(){ return new Date().toISOString().replace('T',' ').replace('Z',''); }
 
   function toast(msg){
-    // prefer existing toast if present
     try{
       if(typeof window.toast === "function") return window.toast(msg);
     }catch(_){}
-    alert(msg);
-  }
-
-  function bindByText(text, handler){
-    const nodes = Array.from(document.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit']"));
-    nodes.forEach(el=>{
-      const t = (el.textContent || el.value || "").trim();
-      if(t === text){
-        el.addEventListener("click", function(ev){
-          try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation && ev.stopImmediatePropagation(); }catch(_){}
-          handler(ev);
-        }, true);
+    try{
+      // lightweight inline toast (non-blocking)
+      let el = document.getElementById("__ops_toast__");
+      if(!el){
+        el = document.createElement("div");
+        el.id="__ops_toast__";
+        el.style.cssText="position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:99999;max-width:92vw;padding:10px 14px;border-radius:10px;background:#111827;color:#fff;font-size:13px;box-shadow:0 10px 25px rgba(0,0,0,.18);";
+        document.body.appendChild(el);
       }
-    });
+      el.textContent = msg;
+      el.style.opacity = "1";
+      clearTimeout(window.__ops_toast_t);
+      window.__ops_toast_t = setTimeout(()=>{ try{ el.style.opacity="0"; }catch(_){ } }, 2600);
+    }catch(_){
+      alert(msg);
+    }
   }
 
-  async function rest(method, path, cfg, body){
-    const url = cfg.url.replace(/\/+$/,"") + "/rest/v1/" + path.replace(/^\/+/,"");
+  function log(){ try{ console.log.apply(console, arguments); }catch(_){ } }
+  function warn(){ try{ console.warn.apply(console, arguments); }catch(_){ } }
+  function err(){ try{ console.error.apply(console, arguments); }catch(_){ } }
+
+  function safeJsonParse(s){
+    try{ return JSON.parse(s); }catch(_){ return null; }
+  }
+
+  function readCfg(){
+    // Accept multiple legacy key names
+    let url = "";
+    let anon = "";
+    let app_key = "dalemy";
+    try{
+      const raw = localStorage.getItem("OPS_CLOUD_CFG_V1") || localStorage.getItem("OPS_CLOUD_CFG") || "";
+      const obj = safeJsonParse(raw) || {};
+      url = (obj.url || obj.supabase_url || obj.SUPABASE_URL || "").trim();
+      anon = (obj.anon || obj.anon_key || obj.SUPABASE_ANON_KEY || "").trim();
+      app_key = (obj.app_key || obj.app || obj.APP_KEY || "").trim() || app_key;
+    }catch(_){}
+    try{
+      url = (localStorage.getItem("OPS_CLOUD_SUPABASE_URL")||url||"").trim();
+      anon = (localStorage.getItem("OPS_CLOUD_SUPABASE_ANON")||localStorage.getItem("OPS_CLOUD_SUPABASE_ANON_KEY")||anon||"").trim();
+      app_key = (localStorage.getItem("OPS_CLOUD_APP_KEY")||localStorage.getItem("OPS_CLOUD_APP")||app_key||"").trim() || app_key;
+    }catch(_){}
+    return { url, anon, app_key };
+  }
+
+  async function api(method, path, body){
+    const cfg = readCfg();
+    if(!cfg.url || !cfg.anon){
+      throw new Error("cloud_not_configured");
+    }
+    const url = cfg.url.replace(/\/$/,"") + path;
     const headers = {
       "apikey": cfg.anon,
       "Authorization": "Bearer " + cfg.anon,
@@ -10892,166 +10905,219 @@ Goal:
     let json = null;
     try{ json = txt ? JSON.parse(txt) : null; }catch(_){ json = txt; }
     if(!res.ok){
-      const err = (json && (json.message||json.error)) ? (json.message||json.error) : (txt||res.statusText);
-      throw new Error(err);
+      const msg = (json && (json.message||json.error)) ? (json.message||json.error) : (txt||res.statusText||"request_failed");
+      const e = new Error(msg);
+      e.status = res.status;
+      e.detail = json;
+      throw e;
     }
     return json;
   }
 
-  async function cloudGet(cfg){
-    const q = `${TABLE}?select=*&app_key=eq.${encodeURIComponent(cfg.app_key)}`;
-    const rows = await rest("GET", q, cfg);
-    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
-    return row;
+  function asArray(x){
+    if(Array.isArray(x)) return x;
+    if(!x) return [];
+    if(typeof x === "object") return Object.values(x);
+    return [];
   }
 
-  function getLocalPayloadPrefer(){
-    // Prefer canonical localStorage snapshot if present; else fall back to window.state/S if present
-    const raw = localStorage.getItem(CANONICAL_LS_KEY);
-    const obj = raw ? jparse(raw, null) : null;
-    if(obj && typeof obj === "object") return { payload: obj, source: "localStorage("+CANONICAL_LS_KEY+")" };
-    // fallbacks
+  function countsFromState(st){
+    const sellers = asArray(st && (st.sellers || st.sellerList || st.seller || st.sellersMap));
+    const products = asArray(st && (st.products || st.productList || st.product || st.productsMap));
+    const orders = asArray(st && (st.orders || st.orderList || st.order || st.ordersMap));
+    const batches = asArray(st && (st.batches || st.settleBatches || st.batchList || st.payoutBatches || st.batchesMap));
+    return { sellers: sellers.length, products: products.length, orders: orders.length, batches: batches.length };
+  }
+
+  function ensurePayload(st){
+    const payload = (st && typeof st === "object") ? st : {};
+    // Guarantee root keys exist so later code can count reliably
+    if(payload.sellers === undefined) payload.sellers = [];
+    if(payload.products === undefined) payload.products = [];
+    if(payload.orders === undefined) payload.orders = [];
+    if(payload.batches === undefined && payload.settleBatches !== undefined) payload.batches = payload.settleBatches;
+    if(payload.batches === undefined) payload.batches = [];
+    payload.__cloud_meta = Object.assign({}, payload.__cloud_meta || {}, { updated_at: nowISO(), source: "v6.4.2-singlefile-planA" });
+    return payload;
+  }
+
+  async function loadLocalState(){
+    // Prefer the existing helper if present
     try{
-      if(window.S && typeof window.S === "object") return { payload: window.S, source:"window.S" };
-      if(window.state && typeof window.state === "object") return { payload: window.state, source:"window.state" };
+      if(typeof window.getLocalSnapshotPreferIDB === "function"){
+        const s = await window.getLocalSnapshotPreferIDB();
+        if(s) return s;
+      }
     }catch(_){}
-    return { payload: null, source: "none" };
+    // Fallback: direct IndexedDB key
+    try{
+      if(typeof window.idbGet === "function"){
+        const s = await window.idbGet("ops_v642_main","kv", MAIN_KV_KEY);
+        if(s) return s;
+      }
+    }catch(_){}
+    // Fallback: localStorage canonical
+    try{
+      const raw = localStorage.getItem(CANONICAL_LS_KEY);
+      const s = safeJsonParse(raw);
+      if(s) return s;
+    }catch(_){}
+    return null;
   }
 
-  async function pushOnce(force){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”填写 Supabase URL / anon key / app_key。");
-      return;
-    }
-    const local = getLocalPayloadPrefer();
-    if(!local.payload){
-      toast("本地快照为空：请先点“同步主数据”，再推送。");
-      return;
-    }
-    const localCounts = countSnap(local.payload);
-    if(!force && (localCounts.sc+localCounts.pc+localCounts.oc+localCounts.bc) === 0){
-      toast("安全策略：本地统计为 0，已阻止覆盖云端。若确认要推空覆盖，请按住 Shift 再点“云端推送”。");
-      return;
-    }
-
-    const remote = await cloudGet(cfg);
-    const remotePayload = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-
-    // merge: prefer local if remote missing; otherwise basic union by arrays of objects with id (fallback)
-    let merged = local.payload;
-    if(remotePayload && typeof remotePayload === "object"){
-      // use existing merge if present
-      if(typeof window.mergeSnapshotsPlanA === "function"){
-        merged = window.mergeSnapshotsPlanA(local.payload, remotePayload);
-      }else{
-        const nL = normalizeState(local.payload);
-        const nR = normalizeState(remotePayload);
-        const byId = (arr)=> {
-          const m = new Map();
-          arr.forEach(x=>{ if(x && x.id!=null) m.set(String(x.id), x); });
-          return m;
-        };
-        const mergeArr = (a,b)=>{
-          const ma = byId(a), mb = byId(b);
-          const out = new Map(mb); // start cloud
-          for(const [k,v] of ma) out.set(k,v); // local overrides
-          // include no-id rows
-          const noId = [].concat(b.filter(x=>!(x&&x.id!=null)), a.filter(x=>!(x&&x.id!=null)));
-          return Array.from(out.values()).concat(noId);
-        };
-        merged = {
-          sellers: mergeArr(nL.sellers, nR.sellers),
-          products: mergeArr(nL.products, nR.products),
-          orders: mergeArr(nL.orders, nR.orders),
-          batches: mergeArr(nL.batches, nR.batches)
-        };
+  async function saveLocalState(state){
+    // Save to IndexedDB + localStorage to keep UI consistent
+    try{
+      if(typeof window.idbSet === "function"){
+        await window.idbSet(MAIN_KV_KEY, state);
       }
-    }
+    }catch(e){ warn("idbSet failed", e); }
+    try{
+      localStorage.setItem(CANONICAL_LS_KEY, JSON.stringify(state));
+    }catch(e){ warn("localStorage write failed", e); }
+  }
 
-    const mergedCounts = countSnap(merged);
-    const hash = String(Date.now());
+  async function cloudGetRow(){
+    const cfg = readCfg();
+    const q = `/rest/v1/${TABLE}?select=app_key,hash,updated_at,${COL}&app_key=eq.${encodeURIComponent(cfg.app_key)}`;
+    const rows = await api("GET", q);
+    return (rows && rows[0]) ? rows[0] : null;
+  }
 
-    const row = {
+  async function cloudUpsertRow(payloadObj){
+    const cfg = readCfg();
+    const body = {
       app_key: cfg.app_key,
-      payload: merged,
-      hash: hash,
-      updated_at: new Date().toISOString()
+      hash: String(Date.now()),
+      updated_at: nowISO()
     };
-    await rest("POST", `${TABLE}?on_conflict=app_key`, cfg, row);
-
-    toast(`云端推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${hash}）`);
+    body[COL] = payloadObj;
+    const q = `/rest/v1/${TABLE}?on_conflict=app_key`;
+    const res = await api("POST", q, body);
+    return res;
   }
 
   async function status(){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”。");
-      return;
+    try{
+      const local = ensurePayload(await loadLocalState());
+      const lc = countsFromState(local);
+      let row = null;
+      try{ row = await cloudGetRow(); }catch(e){ row = null; }
+      const cloudPayload = row ? (row[COL] || null) : null;
+      const cloud = ensurePayload(cloudPayload || {});
+      const cc = countsFromState(cloud);
+      const msg =
+`本地来源: IndexedDB(ops_v642_main/kv/${MAIN_KV_KEY}) 优先
+本地统计: 卖家${lc.sellers} 产品${lc.products} 订单${lc.orders} 批次${lc.batches}
+
+云端存在: ${row ? "YES" : "NO"}
+云端 hash: ${row && row.hash ? row.hash : "-"}
+云端 updated_at: ${row && row.updated_at ? row.updated_at : "-"}
+云端统计: 卖家${cc.sellers} 产品${cc.products} 订单${cc.orders} 批次${cc.batches}`;
+      alert(msg);
+    }catch(e){
+      err(e);
+      toast("云端状态失败：" + (e && e.message ? e.message : "unknown"));
     }
-    const local = getLocalPayloadPrefer();
-    const lc = local.payload ? countSnap(local.payload) : {sc:0,pc:0,oc:0,bc:0};
-    const remote = await cloudGet(cfg);
-    const rp = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-    const rc = rp ? countSnap(rp) : {sc:0,pc:0,oc:0,bc:0};
-    const msg = [
-      `本地来源：${local.source}`,
-      `本地统计：卖家${lc.sc} 产品${lc.pc} 订单${lc.oc} 批次${lc.bc}`,
-      "",
-      `云端存在：${remote ? "YES" : "NO"}`,
-      `云端 hash: ${remote && remote.hash ? remote.hash : ""}`,
-      `云端 updated_at: ${remote && remote.updated_at ? remote.updated_at : ""}`,
-      `云端统计：卖家${rc.sc} 产品${rc.pc} 订单${rc.oc} 批次${rc.bc}`,
-      "",
-      `表：${TABLE}  app_key=${cfg.app_key}`
-    ].join("\n");
-    alert(msg);
+  }
+
+  async function pushOnce(force){
+    try{
+      const st = ensurePayload(await loadLocalState());
+      const c = countsFromState(st);
+
+      const looksEmpty = (!c.sellers && !c.products && !c.orders && !c.batches);
+      if(looksEmpty && !force){
+        toast("安全策略：本地快照为空，已阻止推送（按住 SHIFT 再点可强制）。");
+        return;
+      }
+
+      // HARD GUARANTEE: payload MUST include the core collections and not be undefined
+      if(!st || typeof st !== "object") throw new Error("local_state_invalid");
+      if(st[COL] !== undefined){
+        // avoid accidental nested payload field; we want root state to be the payload itself
+      }
+
+      const resp = await cloudUpsertRow(st);
+      toast(`云端推送成功：卖家${c.sellers} 产品${c.products} 订单${c.orders} 批次${c.batches} (hash=${String(Date.now())})`);
+      // refresh status silently
+      log("[PUSH] ok", resp);
+    }catch(e){
+      err(e);
+      toast("云端推送失败：" + (e && e.message ? e.message : "unknown"));
+    }
   }
 
   async function pullToLocal(){
-    const cfg = getCfg();
-    if(!okCfg(cfg)){
-      toast("云端未配置：请先点“云端设置”。");
-      return;
+    try{
+      const row = await cloudGetRow();
+      if(!row || !row[COL]){
+        toast("云端拉取失败：云端无快照 payload。");
+        return;
+      }
+      const payload = ensurePayload(row[COL]);
+      await saveLocalState(payload);
+      const c = countsFromState(payload);
+      toast(`云端拉取成功：卖家${c.sellers} 产品${c.products} 订单${c.orders} 批次${c.batches}`);
+    }catch(e){
+      err(e);
+      toast("云端拉取失败：" + (e && e.message ? e.message : "unknown"));
     }
-    const remote = await cloudGet(cfg);
-    const rp = remote && (remote.payload || remote.data) ? (remote.payload || remote.data) : null;
-    if(!rp){
-      toast("云端暂无快照可拉取。");
-      return;
-    }
-    localStorage.setItem(CANONICAL_LS_KEY, JSON.stringify(rp));
-    toast("云端拉取完成：已写入本地主快照（ops_rebuild_v6_4_2_state）。刷新页面后生效。");
   }
 
   function openSettings(){
-    const cfg = getCfg();
-    const url = prompt("Supabase URL（例如 https://xxxx.supabase.co ）", cfg.url || "");
-    if(url===null) return;
-    const anon = prompt("Supabase anon key（Project Settings → API → anon）", cfg.anon || "");
-    if(anon===null) return;
-    const app = prompt("app_key（用于区分你的数据集，例如 dalemy）", cfg.app_key || "dalemy");
-    if(app===null) return;
-    localStorage.setItem(LS_URL_KEYS[0], String(url).trim());
-    localStorage.setItem(LS_ANON_KEYS[0], String(anon).trim());
-    localStorage.setItem(LS_APP_KEYS[0], String(app).trim());
+    const cfg = readCfg();
+    const url = prompt("Supabase Project URL（例如 https://xxxx.supabase.co）", cfg.url || "");
+    if(url === null) return;
+    const anon = prompt("Supabase anon key（仅用于测试/内测；生产建议走同源 API 代理）", cfg.anon || "");
+    if(anon === null) return;
+    const app_key = prompt("app_key（同一套数据的唯一标识，例如 dalemy）", cfg.app_key || "dalemy");
+    if(app_key === null) return;
+
+    const next = { url: (url||"").trim(), anon: (anon||"").trim(), app_key: (app_key||"").trim() || "dalemy" };
+    try{
+      localStorage.setItem("OPS_CLOUD_SUPABASE_URL", next.url);
+      localStorage.setItem("OPS_CLOUD_SUPABASE_ANON", next.anon);
+      localStorage.setItem("OPS_CLOUD_APP_KEY", next.app_key);
+      localStorage.setItem("OPS_CLOUD_CFG_V1", JSON.stringify(next));
+    }catch(_){}
     toast("云端配置已保存。");
   }
 
-  function init(){
-    bindByText("云端设置", openSettings);
-    bindByText("云端推送", (ev)=>pushOnce(!!(ev && ev.shiftKey)));
-    bindByText("云端状态", status);
-    bindByText("云端拉取", pullToLocal);
+  function bindByText(text, fn){
+    // capture phase takeover: stop old handlers
+    const nodes = Array.from(document.querySelectorAll("button, a, [role='button']"));
+    for(const el of nodes){
+      const t = (el.innerText || el.textContent || "").trim();
+      if(t === text){
+        el.addEventListener("click", function(ev){
+          try{
+            ev.preventDefault();
+            ev.stopPropagation();
+            if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+          }catch(_){}
+          return fn(ev);
+        }, true);
+      }
+    }
+  }
 
-    // hard-disable old auto push unless explicitly enabled
+  function init(){
+    // Disable auto push by default
     try{
       const v = (localStorage.getItem("OPS_CLOUD_AUTOPUSH")||"").trim();
       if(v !== "1" && v !== "true"){
         localStorage.setItem("OPS_CLOUD_AUTOPUSH","0");
       }
     }catch(_){}
-    console.log("[SYNC OVERRIDE] loaded. table="+TABLE);
+
+    bindByText("云端设置", openSettings);
+    bindByText("云端推送", (ev)=>pushOnce(!!(ev && ev.shiftKey)));
+    bindByText("云端状态", status);
+    bindByText("云端拉取", pullToLocal);
+
+    // NOTE: We do NOT run any auto push here. Manual only.
+    console.log("[SYNC FINAL] loaded. table="+TABLE+", column="+COL);
   }
 
   if(document.readyState === "loading"){
