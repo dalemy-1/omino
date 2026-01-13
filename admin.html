@@ -3497,7 +3497,7 @@ function getProductById(){
 
 
 function renderOrders(){
-  // 性能优化：S.orders 已按“新在前”维护，不再对全量结果做 slice+sort（避免万单级卡顿）
+  // 高性能：避免对 1w+ 订单做全量 filter/sort；仅扫描统计 total，并收集当前页需要的行
   const seller = $("filterSeller").value || "ALL";
   const ps = $("filterPrincipal").value || "ALL";
   const cs = $("filterCommission").value || "ALL";
@@ -3505,100 +3505,73 @@ function renderOrders(){
 
   UI.pageSize = Number($("pageSize").value || 100);
   const pageSize = UI.pageSize;
+
   const orders = (S.orders||[]);
-  let total = 0;
-
-  // 先按当前页计算一次；如页码越界，再回退到最后一页重算（最多两次）
-  for(let pass=0; pass<2; pass++){
-    const totalPagesGuess = Math.max(1, Math.ceil(Math.max(1,total||orders.length) / pageSize));
-    UI.page = Math.min(Math.max(1, UI.page), totalPagesGuess);
-
-    const startIdx = (UI.page-1)*pageSize;
-    const endIdx = startIdx + pageSize;
-    const pageList = [];
-    total = 0;
-
-    for(let i=0;i<orders.length;i++){
-      const o = orders[i]; if(!o) continue;
-
-      if(seller!=="ALL" && o.sellerId!==seller) continue;
-
-      if(ps==="UNSETTLED" && o.principal && o.principal.settled) continue;
-      if(ps==="SETTLED" && (!o.principal || !o.principal.settled)) continue;
-
-      if(cs==="UNSETTLED"){
-        if(o.commission && o.commission.settled) continue;
-        if(!canSettleCommission(o)) continue;
-      }
-      if(cs==="SETTLED" && (!o.commission || !o.commission.settled)) continue;
-
-      if(qraw){
-        // 轻量搜索：尽量避免拼接大字符串
-        const oid = String(o.orderId||"").toLowerCase();
-        const asin = String(o.asin||"").toLowerCase();
-        const note = String(o.note||"").toLowerCase();
-        const mk = String(o.market||"").toLowerCase();
-        if(oid.includes(qraw) || asin.includes(qraw) || note.includes(qraw) || mk.includes(qraw)){
-          // ok
-        }else{
-          const sn = String(U.sellerName(o.sellerId)||"").toLowerCase();
-          if(sn.includes(qraw)){
-            // ok
-          }else{
-            const pn = String(o.productId ? U.productName(o.productId) : "").toLowerCase();
-            if(!pn.includes(qraw)) continue;
-          }
-        }
-      }
-
-      if(total>=startIdx && total<endIdx) pageList.push(o);
-      total++;
+  const match = (o)=>{
+    if(seller!=="ALL" && o.sellerId!==seller) return false;
+    if(ps==="UNSETTLED" && o.principal && o.principal.settled) return false;
+    if(ps==="SETTLED" && !(o.principal && o.principal.settled)) return false;
+    if(cs==="UNSETTLED"){
+      if(o.commission && o.commission.settled) return false;
+    }else if(cs==="SETTLED"){
+      if(!(o.commission && o.commission.settled)) return false;
     }
-
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    if(UI.page>totalPages){
-      UI.page = totalPages;
-      continue; // 再跑一遍拿正确页数据
+    if(qraw){
+      // 仅在有搜索时做字符串拼接
+      const oid = String(o.orderId||"").toLowerCase();
+      const asin = String(o.asin||"").toLowerCase();
+      const note = String(o.note||"").toLowerCase();
+      const pname = o.productId ? String(U.productName(o.productId)||"").toLowerCase() : "";
+      if(!oid.includes(qraw) && !asin.includes(qraw) && !note.includes(qraw) && !pname.includes(qraw)) return false;
     }
+    return true;
+  };
 
-    // 将 pageList 暂存到 UI，供后续渲染复用
-    UI.__pageOrders = pageList;
-    UI.__pageOrdersTotal = total;
-    break;
-  }
+  // pass1: 统计总数
+  let totalCount = 0;
+  for(const o of orders){ if(match(o)) totalCount++; }
 
-  UI.pageSize = Number($("pageSize").value || 100);
-  const totalPages = Math.max(1, Math.ceil(total / UI.pageSize));
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   UI.page = Math.min(Math.max(1, UI.page), totalPages);
 
-  const start = (UI.page-1)*UI.pageSize;
-    const pageList = UI.__pageOrders || [];
-  const total = UI.__pageOrdersTotal || 0;
+  // pass2: 收集当前页
+  const startIdx = (UI.page-1)*pageSize;
+  const endIdx = startIdx + pageSize;
+  const pageList = [];
+  let idx = 0;
+  for(const o of orders){
+    if(!match(o)) continue;
+    if(idx>=startIdx && idx<endIdx) pageList.push(o);
+    idx++;
+    if(idx>=endIdx && pageList.length>=pageSize) break;
+  }
 
-  $("pagerInfo").textContent = `共 ${total} 单`;
+  // 更新分页信息
+  $("pagerInfo").textContent = `共 ${totalCount} 单`;
   $("pagerPage").textContent = `第 ${UI.page} / ${totalPages} 页`;
 
-  const sellerById = getSellerById();
-  const productById = getProductById();
+  // 渲染表格（仅当前页）
   const rows = pageList.map(o=>{
     const sellerName = U.sellerName(o.sellerId);
     const pName = o.productId ? U.productName(o.productId) : (o.note||"");
     const pCny = currentPrincipalCny(o);
     const cm = commissionShould(o);
 
-    const pSett = U.badgeSettle(o.principal.settled);
-    const cSett = o.commission.settled ? U.badgeSettle(true) :
+    const pSett = U.badgeSettle(!!(o.principal && o.principal.settled));
+    const cSett = (o.commission && o.commission.settled) ? U.badgeSettle(true) :
       (canSettleCommission(o) ? U.badgeSettle(false) : `<span class="badge pending">未回评</span>`);
 
+    const checked = UI.selected && UI.selected.has(o.orderId) ? "checked" : "";
+
     return `<tr>
-      <td><input type="checkbox" data-oid="${esc(o.orderId)}" ${UI.selected.has(o.orderId)?"checked":""} onchange="Actions.toggleSelect(\'${esc(o.orderId)}\')"/></td>
+      <td><input type="checkbox" data-oid="${esc(o.orderId)}" ${checked} onchange="Actions.toggleSelect('${esc(o.orderId)}')"/></td>
       <td>${esc(U.dateMD(o.date))}</td>
-      <td class=\"mono\">${esc(o.orderId)}</td>
+      <td class="mono">${esc(o.orderId)}</td>
       <td>${esc(sellerName)}</td>
       <td>${esc(o.market)}</td>
       <td>${esc(pName)}</td>
       <td class="mono">${esc(o.asin||"")}</td>
-      <td>${U.badgeReview(o.review.status)}</td>
+      <td>${U.badgeReview(o.review && o.review.status)}</td>
       <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
       <td class="right">${esc(U.money(o.amount||0))}</td>
       <td class="right">${esc(U.money(o.discount||0))}</td>
@@ -3606,13 +3579,15 @@ function renderOrders(){
       <td>${pSett}</td>
       <td class="right">${esc(U.money(cm))}</td>
       <td>${cSett}</td>
-      <td class=\"right action-col\">
-        <button class=\"btn\" onclick=\"Actions.editOrder('${esc(o.id)}')">编辑</button>
+      <td class="right action-col">
+        <button class="btn" onclick="Actions.editOrder('${esc(o.id)}')">编辑</button>
         <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
         <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("\n");
+  }).join("
+");
+
   $("orderRows").innerHTML = rows || `<tr><td colspan="16" class="small">暂无订单</td></tr>`;
   renderSelectedTags();
 }
