@@ -763,87 +763,6 @@ function _countSnapshot(p){
   return { sc:sellers.length, pc:products.length, oc:orders.length, bc:batches.length };
 }
 
-function _fmtCounts(c){
-  c = c || {sc:0,pc:0,oc:0,bc:0};
-  return `卖家${c.sc} 产品${c.pc} 订单${c.oc} 批次${c.bc}`;
-}
-function _diffCounts(lc, cc){
-  lc = lc || {sc:0,pc:0,oc:0,bc:0};
-  cc = cc || {sc:0,pc:0,oc:0,bc:0};
-  const ds = lc.sc - cc.sc;
-  const dp = lc.pc - cc.pc;
-  const doo = lc.oc - cc.oc;
-  const db = lc.bc - cc.bc;
-  return { ds, dp, doo, db };
-}
-function _fmtDiff(d){
-  d = d || {ds:0,dp:0,doo:0,db:0};
-  const f = (x)=> (x===0 ? "0" : (x>0? `+${x}` : `${x}`));
-  return `Δ卖家${f(d.ds)} Δ产品${f(d.dp)} Δ订单${f(d.doo)} Δ批次${f(d.db)}`;
-}
-async function _preflightCompareCloud(){
-  const localSnap = (typeof getLocalSnapshotPreferIDB==="function")
-    ? await getLocalSnapshotPreferIDB()
-    : ((typeof state!=="undefined" && state) ? state : (typeof S!=="undefined" ? S : null));
-  const lc = _countSnapshot(localSnap);
-
-  let cloud = null;
-  let cc = {sc:0,pc:0,oc:0,bc:0};
-  try{
-    const sb = (typeof getCloudClientOrNull==="function") ? getCloudClientOrNull(true) : null;
-    if(sb && sb.cfg && sb.cfg.appKey){
-      const got = await fetchCloudSnapshot(sb.client, sb.cfg.appKey, sb.cfg);
-      cloud = got;
-      if(got && got.exists) cc = _countSnapshot(got.state);
-    }else{
-      cloud = { exists:false, hash:null, updated_at:null, state:null };
-    }
-  }catch(e){
-    cloud = { exists:false, hash:null, updated_at:null, state:null, error: String(e && (e.message||e) || e) };
-  }
-  const d = _diffCounts(lc, cc);
-  return { localSnap, lc, cloud, cc, diff:d };
-}
-function _confirmForcePull(pref){
-  const c = pref || {};
-  const lc = c.lc || {sc:0,pc:0,oc:0,bc:0};
-  const cc = c.cc || {sc:0,pc:0,oc:0,bc:0};
-  const diff = c.diff || _diffCounts(lc, cc);
-  const cloudInfo = (c.cloud && c.cloud.exists)
-    ? `云端：hash=${c.cloud.hash||""} updated_at=${c.cloud.updated_at||""}`
-    : `云端：无快照`;
-  const msg = `【强制拉取】将覆盖本地数据（IndexedDB）。
-
-本地：${_fmtCounts(lc)}
-云端：${_fmtCounts(cc)}
-${_fmtDiff(diff)}
-${cloudInfo}
-
-建议：先「导出 JSON」备份本地。
-
-确认继续强制拉取吗？`;
-  return confirm(msg);
-}
-function _confirmForcePush(pref){
-  const c = pref || {};
-  const lc = c.lc || {sc:0,pc:0,oc:0,bc:0};
-  const cc = c.cc || {sc:0,pc:0,oc:0,bc:0};
-  const diff = c.diff || _diffCounts(lc, cc);
-  const cloudInfo = (c.cloud && c.cloud.exists)
-    ? `云端：hash=${c.cloud.hash||""} updated_at=${c.cloud.updated_at||""}`
-    : `云端：无快照`;
-  const msg = `【强制推送】将无视“hash 未变化”并写入云端（仍会先合并）。
-
-本地：${_fmtCounts(lc)}
-云端：${_fmtCounts(cc)}
-${_fmtDiff(diff)}
-${cloudInfo}
-
-确认继续强制推送吗？`;
-  return confirm(msg);
-}
-
-
 // -------------------------
 // Plan A merge + hash helpers
 // -------------------------
@@ -1090,10 +1009,6 @@ async function cloudPush(opts){
     // Step 2: merge (Plan A: union by id; prefer newer updatedAt)
     const localSnap = finalPayload || {};
     const cloudSnap = (cloud && cloud.payload) ? cloud.payload : null;
-    const cloudCounts = (cloud && cloud.counts && typeof cloud.counts==="object")
-      ? { sc:+(cloud.counts.sc||0), pc:+(cloud.counts.pc||0), oc:+(cloud.counts.oc||0), bc:+(cloud.counts.bc||0) }
-      : (cloudSnap ? _countSnapshot(cloudSnap) : {sc:0,pc:0,oc:0,bc:0});
-
 
     const merged = (cloudSnap && typeof mergeSnapshotsPlanA==="function")
       ? mergeSnapshotsPlanA(localSnap, cloudSnap)
@@ -1102,20 +1017,8 @@ async function cloudPush(opts){
     const mergedCounts = _countSnapshot(merged);
     const mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(merged)) : Date.now();
 
-    // Force push confirmation (show local vs cloud counts) — only when force=true
-    if(force){
-      const pref = {
-        lc: { sc, pc, oc, bc },
-        cc: cloudCounts,
-        cloud: { exists: !!cloud, hash: cloud && cloud.hash, updated_at: cloud && cloud.updated_at },
-        diff: _diffCounts({ sc, pc, oc, bc }, cloudCounts)
-      };
-      if(!_confirmForcePush(pref)) return { ok:false, cancelled:true };
-    }
-
-
-    // If we have cloud hash and merged has same hash, skip push (unless force)
-    if(!force && cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
+    // If we have cloud hash and merged has same hash, skip push
+    if(cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
       console.log(`[PUSH] 无需推送：合并后 hash 未变化（hash=${mergedHash}）`);
       return { ok:true, skipped:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
     }
@@ -1152,31 +1055,12 @@ async function cloudPull(opts){
   const sb = getCloudClientOrNull();
   if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
   const { client, cfg } = sb;
-  {
-    // Preflight compare (local vs cloud) for safer decision-making
-    let pref = null;
-    try{ pref = await _preflightCompareCloud(); }catch(_e){ pref = null; }
-
-    if(!force){
-      const lc = pref && pref.lc ? pref.lc : _countSnapshot((typeof S!=="undefined")?S:null);
-      const cc = pref && pref.cc ? pref.cc : {sc:0,pc:0,oc:0,bc:0};
-      const cloudInfo = (pref && pref.cloud && pref.cloud.exists)
-        ? `云端：hash=${pref.cloud.hash||""} updated_at=${pref.cloud.updated_at||""}`
-        : `云端：无快照`;
-      const msg = `从云端拉取会覆盖本地当前数据。
-
-本地：${_fmtCounts(lc)}
-云端：${_fmtCounts(cc)}
-${_fmtDiff(_diffCounts(lc, cc))}
-${cloudInfo}
+  if(!force){
+    if(!confirm("从云端拉取会覆盖本地当前数据。
 
 建议：先点「导出 JSON」本地存一份备份。
 
-确定要继续吗？`;
-      if(!confirm(msg)) return { ok:false, cancelled:true };
-    }else{
-      if(!_confirmForcePull(pref)) return { ok:false, cancelled:true };
-    }
+确定要继续吗？")) return { ok:false, cancelled:true };
   }
 
   try{
@@ -2157,6 +2041,27 @@ function round2(v){
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+function yieldToUI(){ return new Promise(r=>setTimeout(r,0)); }
+function runIdle(fn){ (window.requestIdleCallback||window.setTimeout)(fn,0); }
+function showBusy(msg){
+  let m=document.getElementById('__busyMask');
+  if(!m){
+    m=document.createElement('div');
+    m.id='__busyMask';
+    m.style.position='fixed';m.style.inset='0';m.style.background='rgba(17,24,39,.35)';m.style.zIndex='99999';
+    m.style.display='flex';m.style.alignItems='center';m.style.justifyContent='center';
+    m.innerHTML='<div style="background:#fff;border-radius:14px;padding:14px 18px;box-shadow:0 10px 30px rgba(0,0,0,.18);font-weight:700;">处理中…</div>';
+    document.body.appendChild(m);
+  }
+  const box=m.firstElementChild; if(box) box.textContent = msg || '处理中…';
+  m.style.pointerEvents='auto';
+  m.style.opacity='1';
+}
+function hideBusy(){
+  const m=document.getElementById('__busyMask');
+  if(m) m.remove();
+}
+
 /* ===================== Constants ===================== */
 const VERSION = "6.4.2";
 const STORAGE_KEY = "ops_rebuild_v6_4_2_state";
@@ -2658,12 +2563,6 @@ function showTablePreviewModal(cfg){
   foot.style.gap="10px";
 
   const left=document.createElement("div");
-  const statusEl=document.createElement("div");
-  statusEl.style.marginTop="4px";
-  statusEl.style.whiteSpace="pre-wrap";
-  statusEl.style.color="#64748b";
-  statusEl.style.fontSize="12px";
-  statusEl.textContent="";
   left.style.fontSize="12px";
   left.style.color="#6b7280";
   left.textContent="提示：先核对/修改，再点击确认执行。可取消勾选不处理的行。";
@@ -2680,30 +2579,21 @@ function showTablePreviewModal(cfg){
   const btnApply=document.createElement("button");
   btnApply.className="btn primary";
   btnApply.textContent=applyText;
-  btnApply.onclick=async ()=>{
-  try{
-    if(typeof onApply==="function"){
-      const finalRows = stateRows.filter(r=>r.__include).map(r=>r.data);
-      const ui = {
-        setStatus: (msg)=>{ try{ statusEl.textContent = String(msg||""); }catch(e){} },
-        disable: ()=>{ try{ btnApply.disabled=true; btnCancel.disabled=true; btnApply.textContent="处理中…"; }catch(e){} },
-        enable: ()=>{ try{ btnApply.disabled=false; btnCancel.disabled=false; btnApply.textContent=applyText; }catch(e){} }
-      };
-      ui.disable();
-      const ret = onApply(finalRows, ()=>{ try{ document.body.removeChild(overlay);}catch(e){} }, ui);
-      if(ret && typeof ret.then==="function") await ret;
-      ui.enable();
-    }else{
-      document.body.removeChild(overlay);
+  btnApply.onclick=()=>{
+    try{
+      if(typeof onApply==="function"){
+        const finalRows = stateRows.filter(r=>r.__include).map(r=>r.data);
+        onApply(finalRows, ()=>{ try{ document.body.removeChild(overlay);}catch(e){} });
+      }else{
+        document.body.removeChild(overlay);
+      }
+    }catch(e){
+      showNotice("脚本错误", (e&&e.message)?e.message:String(e));
     }
-  }catch(e){
-    showNotice("脚本错误", (e&&e.message)?e.message:String(e));
-  }
-};
+  };
 
   right.appendChild(btnCancel);
   right.appendChild(btnApply);
-  left.appendChild(statusEl);
   foot.appendChild(left);
   foot.appendChild(right);
   card.appendChild(foot);
@@ -3096,6 +2986,7 @@ function normalizeImported(obj){
       currency:String(o.currency||"").trim() || U.marketToCurrency(market||"US"),
       amount:U.num(o.amount ?? o.orderAmount ?? o.price ?? 0),
       discount:U.num(o.discount ?? o.sellerDiscount ?? 0),
+      buyerCommission:U.num(o.buyerCommission ?? o.buyer_commission ?? 0),
       asin:String(o.asin||o.ASIN||"").trim(),
       note:o.note||o.productName||"",
       reviewReq:String(o.reviewReq||o.reviewType||o.review_type||"TEXT").trim(), // 订单要求（跟随产品）
@@ -4214,62 +4105,17 @@ function parseLine(line){
 }
 
 
-async function batchHandle(commit){
+function batchHandle(commit){
   const sellerIdInput = $("batchSeller").value; // 允许为空：先解析，尽量从产品库自动推导卖家
   const productIdInput = $("batchProduct").value || null;
   const defaultDate = $("batchDate").value || U.today();
   const defaultMarket = $("batchMarket").value || "";
   const text = $("batchText").value || "";
   const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-const hintEl = $("batchHint");
-const setHint = (msg)=>{ try{ if(hintEl) hintEl.textContent = String(msg||""); }catch(e){} };
-const yieldToUI = ()=> new Promise(r=>setTimeout(r,0));
-
-// 解析/提交性能优化：预构建产品索引 + 标题匹配缓存，避免每行全量扫描 products
-const _norm = (s)=>String(s||"").trim().replace(/\s+/g,'').toLowerCase();
-const productCache = new Map(); // key: market|norm(title) => product|null
-const productsByMarket = new Map(); // market => [{p, n}]
-(S.products||[]).forEach(p=>{
-  if(!p) return;
-  const mk = String(p.market||"").trim() || "*";
-  const arr = productsByMarket.get(mk) || [];
-  arr.push({p, n:_norm(p.name||"")});
-  productsByMarket.set(mk, arr);
-  if(mk!=="*"){
-    const arr2 = productsByMarket.get("*") || [];
-    arr2.push({p, n:_norm(p.name||"")});
-    productsByMarket.set("*", arr2);
-  }
-});
-const fastMatchProductFromText = (title, market)=>{
-  const t0 = String(title||"").trim();
-  if(!t0) return null;
-  const mk = String(market||"").trim() || "*";
-  const key = mk + "|" + _norm(t0);
-  if(productCache.has(key)) return productCache.get(key);
-  const t = _norm(t0);
-  const list = productsByMarket.get(mk) || productsByMarket.get("*") || [];
-  let best=null, bestScore=0;
-  for(let i=0;i<list.length;i++){
-    const pn = list[i].n;
-    if(!pn) continue;
-    if(!(t.includes(pn) || pn.includes(t))) continue;
-    const score = Math.min(pn.length, t.length);
-    if(score>bestScore){ bestScore=score; best=list[i].p; }
-  }
-  productCache.set(key, best||null);
-  return best||null;
-};
-
 
   let rows = [];
   let badLines = [];
-  for(let i=0;i<lines.length;i++){
-    const line = lines[i];
-    if(i>0 && (i%200===0)){
-      setHint(`解析中… ${i}/${lines.length}`);
-      await yieldToUI();
-    }
+  for(const line of lines){
     const p = parseLine(line);
     if(!p.ok){ badLines.push(line); continue; }
     // detect market/review type from Chinese note if present
@@ -4285,7 +4131,7 @@ const fastMatchProductFromText = (title, market)=>{
     if(productIdInput){
       matchedProduct = U.productById(productIdInput) || null;
     }else{
-      matchedProduct = fastMatchProductFromText(p.title || "", market);
+      matchedProduct = matchProductFromText(p.title || "", market);
     }
 
     let finalTitle = p.title || "";
@@ -4308,6 +4154,8 @@ const fastMatchProductFromText = (title, market)=>{
       orderId: (p.orderId||"").slice(0,19),
       title: finalTitle,
       amount: (p.amount==null? "" : String(p.amount)),
+      discount: (matchedProduct && matchedProduct.discount!=null) ? String(matchedProduct.discount) : (p.discount==null? "" : String(p.discount)),
+      buyerCommission: (matchedProduct && matchedProduct.buyerCommission!=null) ? String(matchedProduct.buyerCommission) : (p.buyerCommission==null? "" : String(p.buyerCommission)),
       market,
       currency,
       asin: finalAsin,
@@ -4318,8 +4166,6 @@ const fastMatchProductFromText = (title, market)=>{
       note: p.note || ""
     });
   }
-
-  setHint(`解析完成：成功 ${rows.length} 行，失败 ${badLines.length} 行。`);
 
   if(!rows.length){
     showNotice("提示", "未解析到可用行。\n失败 " + badLines.length + " 行。");
@@ -4354,6 +4200,8 @@ const fastMatchProductFromText = (title, market)=>{
       {key:"orderId", label:"订单号(19位)", width:"170px", type:"text"},
       {key:"title", label:"产品名/标题", width:"280px", type:"text"},
       {key:"amount", label:"订单金额", width:"120px", type:"text"},
+      {key:"discount", label:"折扣价", width:"110px", type:"text"},
+      {key:"buyerCommission", label:"买手佣金", width:"110px", type:"text"},
       {key:"market", label:"Market", width:"110px", type:"select", options:()=>markets},
       {key:"asin", label:"ASIN", width:"160px", type:"text"},
       {key:"reviewReq", label:"回评要求", width:"140px", type:"select", options:()=>reviewOpts},
@@ -4362,90 +4210,102 @@ const fastMatchProductFromText = (title, market)=>{
     ],
     rows,
     applyText: commit ? "确认提交登记" : "关闭",
-    onApply: async (finalRows, close, ui)=>{
+    onApply: (finalRows, close)=>{
       if(!commit){ close(); return; }
 
-      let submitted=0, duplicated=0, bad=0;
-const dupLines=[], okLines=[], bad2=[];
-const newOrders = [];
-// 用 key 集合替代每行 S.orders.some 全表扫描（万单级会非常卡）
-const existingKeys = new Set((S.orders||[]).map(o=>String(o && (o.key || U.orderKey(o.sellerId, o.orderId, o.asin)) || "")));
-const total = finalRows.length;
-
-for(let idx=0; idx<total; idx++){
-  const r = finalRows[idx];
-
-  if(ui && ui.setStatus && (idx%100===0)){
-    ui.setStatus(`提交中… ${idx}/${total}\n已提交 ${submitted}，重复 ${duplicated}，失败 ${bad}`);
-    await yieldToUI();
-  }
-
-  const orderId = String(r.orderId||"").trim().slice(0,19);
-  if(!orderId){ bad++; bad2.push("订单号为空"); continue; }
-
-  const market = String(r.market||defaultMarket||"US").trim() || "US";
-  const currency2 = U.marketToCurrency(market);
-  const reviewLabel = String(r.reviewReq||"文字评").trim();
-  const reviewType = rtMap[reviewLabel] || "TEXT";
-
-  const asin = String(r.asin||"").trim();
-  const sellerId = String(r.sellerId || sellerIdInput || "").trim();
-  const productId = String(r.productId || productIdInput || "").trim() || null;
-
-  if(!sellerId){ bad++; bad2.push(`${orderId}：未匹配到产品且未选择卖家`); continue; }
-
-  const key = U.orderKey(sellerId, orderId, asin);
-  if(existingKeys.has(key)){ duplicated++; dupLines.push(orderId); continue; }
-  existingKeys.add(key);
-
-  const seller = U.sellerById(sellerId);
-  const fxKey = U.marketToFxKey(market);
-  const fx = seller ? U.num(seller.fx?.[market] || seller.fx?.[fxKey] || 0) : 0;
-
-  const amount = num(r.amount, 0);
-
-  const o = {
-    id: U.id("O", S.seq.order++),
-    createdAt: new Date().toISOString(),
-    orderId,
-    key,
-    sellerId,
-    productId,
-    market,
-    currency: currency2,
-    amount,
-    discount: 0,
-    title: String(r.title||""),
-    asin: String(asin||"") || String(r.title||""),
-    note: String(r.note||"") || String(r.title||""),
-    date: r.date || defaultDate,
-    fx: fx || 0,
-    reviewReq: reviewType,
-    principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-    commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-    review:{ status:"PENDING", doneType:"", date:"", link:"", note:"" }
-  };
-
-  newOrders.push(o);
-  submitted++;
-  okLines.push(orderId);
-}
-
-// 保持“新订单置顶”的语义：原来每次 unshift，会导致 O(n^2) 卡顿；
-// 现在一次性合并：最后一行提交仍置顶（与旧行为一致）
-if(newOrders.length){
-  S.orders = newOrders.reverse().concat(S.orders||[]);
-}
-
-
-
-      saveNow();
-      refreshAfterOrderChange();
+      // 关闭预览弹窗，避免大批量提交时阻塞 UI（鼠标移动延迟/假死）
       close();
-      if(ui && ui.setStatus) ui.setStatus(`完成：已提交 ${submitted}，重复 ${duplicated}，失败 ${bad}`);
-      showParseSummary({submitted, duplicated, bad, dupLines, badLines: bad2, okLines});
-      setHint("");
-    }
+      showBusy("正在提交订单…（批量较大时会分段处理，页面可正常操作）");
+
+      // 分段提交：避免一次性循环 + unshift + 全表 some 查重导致 O(n²) 卡顿
+      (async ()=>{
+        let submitted=0, duplicated=0, bad=0;
+        const dupLines=[], okLines=[], bad2=[];
+
+        // 用 Set 做 O(1) 查重（同卖家+订单号+ASIN）
+        const existingKeys = new Set(S.orders.map(o=>U.orderKey(o.sellerId, (o.orderId||"").slice(0,19), (o.asin||""))));
+        const newOrders = [];
+
+        for(let i=0;i<finalRows.length;i++){
+          const r = finalRows[i];
+
+          const orderId = String(r.orderId||"").trim().slice(0,19);
+          if(!orderId){ bad++; bad2.push("订单号为空"); continue; }
+
+          const market = String(r.market||defaultMarket||"US").trim() || "US";
+          const currency2 = U.marketToCurrency(market);
+          const reviewLabel = String(r.reviewReq||"文字评").trim();
+          const reviewType = rtMap[reviewLabel] || "TEXT";
+
+          const asin = String(r.asin||"").trim();
+          const sellerId = String(r.sellerId || sellerIdInput || "").trim();
+          const productId = String(r.productId || productIdInput || "").trim() || null;
+
+          if(!sellerId){ bad++; bad2.push(`${orderId}：未匹配到产品且未选择卖家`); continue; }
+
+          const key = U.orderKey(sellerId, orderId, asin);
+          if(existingKeys.has(key)){ duplicated++; dupLines.push(orderId); continue; }
+          existingKeys.add(key);
+
+          const seller = U.sellerById(sellerId);
+          const fxKey = U.marketToFxKey(market);
+          const fx = seller ? U.num(seller.fx?.[market] || seller.fx?.[fxKey] || 0) : 0;
+
+          const amount = num(r.amount, 0);
+          const discount = num(r.discount, 0);
+          const buyerCommission = num(r.buyerCommission, 0);
+
+          const o = {
+            id: U.id("O", S.seq.order++),
+            createdAt: new Date().toISOString(),
+            orderId,
+            key,
+            sellerId,
+            productId,
+            market,
+            currency: currency2,
+            amount,
+            discount,
+            buyerCommission,
+            asin,
+            note: String(r.note||""),
+            date: String(r.date||U.today()).slice(0,10),
+            reviewReq: reviewType,
+            fxOverride: null,
+            principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+            commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
+            review:{ status:"PENDING", doneType:"", date:"", link:"", note:"" }
+          };
+
+          newOrders.push(o);
+          submitted++;
+          okLines.push(orderId);
+
+          // 每 80 行让出一次主线程，避免鼠标/滚动卡顿
+          if(i>0 && i%80===0){
+            showBusy(`正在提交订单… ${i}/${finalRows.length}`);
+            await yieldToUI();
+          }
+        }
+
+        // 一次性合并（保持“新订单置顶”）
+        if(newOrders.length){
+          S.orders = newOrders.reverse().concat(S.orders);
+        }
+
+        // 持久化与刷新放到 idle/下一帧，减少提交完成瞬间的卡顿
+        showBusy("正在保存与刷新列表…");
+        runIdle(()=>{
+          try{ saveNow(); }catch(e){}
+          runIdle(()=>{
+            try{ refreshAfterOrderChange(); }catch(e){}
+            hideBusy();
+            showParseSummary({submitted, duplicated, bad, dupLines, badLines: bad2, okLines});
+          });
+        });
+
+      })();
+}
   });
   // 解析完成后，右侧“卖家/套用产品”重置为默认（避免下一次误套用）
   try{ $("batchSeller").value=""; }catch(e){}
@@ -8871,28 +8731,28 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
 
     if(pushBtn) pushBtn.onclick = ()=> _doPush(false);
     if(pushForceBtn) pushForceBtn.onclick = ()=>{
-      const ok = confirm(`强制推送：即使 hash 未变化也会写入云端快照。
+      const ok = confirm("强制推送：即使 hash 未变化也会写入云端快照。
 
 建议：仅在你确认云端异常、或需要强制刷新云端时使用。
 
-继续？`);
+继续？");
       if(!ok) return;
       _doPush(true);
     };
 
     if(pullBtn) pullBtn.onclick = ()=>{
-      const ok = confirm(`云端拉取会覆盖本地数据（IndexedDB）。
+      const ok = confirm("云端拉取会覆盖本地数据（IndexedDB）。
 
 建议：先做一次“云端推送”或导出 JSON 备份。
 
-继续拉取？`);
+继续拉取？");
       if(!ok) return;
       _doPull(false);
     };
     if(pullForceBtn) pullForceBtn.onclick = ()=>{
-      const ok1 = confirm(`强制拉取将覆盖本地数据（不可撤销）。
+      const ok1 = confirm("强制拉取将覆盖本地数据（不可撤销）。
 
-继续？`);
+继续？");
       if(!ok1) return;
       const ok2 = confirm("二次确认：确定要“强制拉取并覆盖本地”？");
       if(!ok2) return;
