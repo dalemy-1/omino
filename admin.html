@@ -2875,11 +2875,11 @@ async function saveMainStateSmart(state){
 }
 
 async function loadMainStateSmart(){
-  // 1) try main_state_v1
-  const v = await loadMainStateSmart();
+  // 1) load main meta/state
+  const v = await idbGet(MAIN_STATE_KEY);
   if(!v) return null;
 
-  // 2) if not split, return as-is
+  // 2) if not split-store payload, return as-is
   if(!v.__split_store_v1) return v;
 
   // 3) split-store: load manifest and chunks
@@ -2887,14 +2887,12 @@ async function loadMainStateSmart(){
   const out = Object.assign({}, v);
   out.orders = [];
   if(!mf || !mf.chunks){
-    // Manifest missing: treat as empty orders but keep meta
     return out;
   }
   for(let i=0;i<mf.chunks;i++){
     const part = await idbGet(SPLIT_KEY_CHUNK_PREFIX + String(i));
     if(Array.isArray(part)) out.orders = out.orders.concat(part);
   }
-  // Safety: if counts mismatch, still return whatever we got.
   return out;
 }
 // ===== End Split-store persistence =====
@@ -2949,7 +2947,7 @@ function _queueSave(){
     __saveInFlight = true;
     try{
       // 只保存当前内存态（主库）
-      await idbSet(MAIN_STATE_KEY, S);
+      await saveMainStateSmart(S);
       __savePending = false;
     }catch(e){
       console.error(e);
@@ -3168,7 +3166,7 @@ async function load(){
       const obj = normalizeImported(JSON.parse(raw));
       S = obj;
       computeSeq();
-      try{ await idbSet(MAIN_STATE_KEY, S); }catch(_e){}
+      try{ await saveMainStateSmart(S); }catch(_e){}
       try{ localStorage.removeItem(STORAGE_KEY); }catch(_e){}
       return;
     }
@@ -9891,7 +9889,7 @@ function syncMainStateFromDOM(){
       if(!obj){ alert("云端快照 payload 为空或解析失败。"); return; }
 
       if(typeof idbSet === "function" && typeof MAIN_STATE_KEY !== "undefined"){
-        await idbSet(MAIN_STATE_KEY, obj);
+        await saveMainStateSmart(obj);
         toast("云端拉取完成：已写入 IndexedDB 主库（main_state_v1），即将刷新。");
         try{ location.reload(); }catch(_e){}
         return;
@@ -10306,7 +10304,7 @@ What V30 does:
 
       // If your app provides idbSet+MAIN_STATE_KEY, write there; otherwise keep a safe localStorage copy.
       if(typeof idbSet === "function" && typeof MAIN_STATE_KEY !== "undefined"){
-        await idbSet(MAIN_STATE_KEY, obj);
+        await saveMainStateSmart(obj);
         toastSafe("云端拉取完成：已写入 IndexedDB 主库（"+MAIN_STATE_KEY+"），即将刷新。");
         try{ location.reload(); }catch(e){}
         return;
