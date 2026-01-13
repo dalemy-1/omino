@@ -5156,6 +5156,20 @@ async function importOrdersCsvFile(file){
   // save & refresh (avoid heavy payout snapshot during bulk import)
   try{ saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); try{ saveNow(); }catch(_){} }
   refreshAfterOrderChange();
+
+  // 强制刷新：清空搜索、回到第1页，并立即渲染一次（避免“导入成功但列表不刷新”）
+  try{
+    UI.page = 1;
+    if($("filterSearch")) $("filterSearch").value = "";
+  }catch(e){}
+  try{
+    // 立即渲染一轮（如果渲染调度被遮罩/节流，仍能看到数据）
+    markDirty(["orders","kpi"]);
+    flushRender();
+  }catch(e){
+    try{ renderOrders(); }catch(_){}
+    try{ renderKPI(); }catch(_){}
+  }
 }
 
 
