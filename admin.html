@@ -2815,6 +2815,90 @@ function openMainDB(){
   });
   return __mainDbPromise;
 }
+
+// ===== Split-store persistence (v1) =====
+// Problem: very large S (thousands of orders) saved as a single record can fail or be slow on some browsers.
+// Solution: store meta in main_state_v1 and store orders in chunk records within the same kv store.
+// Backward compatible: if main_state_v1 is a full state, we load it as-is.
+const SPLIT_STORE_ENABLED = true;
+const SPLIT_MAX_ORDERS_PER_CHUNK = 1200; // conservative for Chrome/Edge
+const SPLIT_KEY_MANIFEST = MAIN_STATE_KEY + "__split_manifest_v1";
+const SPLIT_KEY_CHUNK_PREFIX = MAIN_STATE_KEY + "__orders_chunk_v1__"; // + index
+
+function __approxJsonSize(obj){
+  try{ return new Blob([JSON.stringify(obj)]).size; }catch(_e){ return 0; }
+}
+
+async function saveMainStateSmart(state){
+  if(!SPLIT_STORE_ENABLED) return await idbSet(MAIN_STATE_KEY, state);
+
+  const orders = Array.isArray(state && state.orders) ? state.orders : [];
+  // Heuristics: split when orders is big OR JSON is big.
+  let needSplit = orders.length > SPLIT_MAX_ORDERS_PER_CHUNK;
+  if(!needSplit){
+    const sz = __approxJsonSize(state);
+    if(sz && sz > 1.8 * 1024 * 1024) needSplit = true; // ~1.8MB
+  }
+
+  if(!needSplit){
+    // Clean any old split remnants (best-effort)
+    try{ await idbDel(SPLIT_KEY_MANIFEST); }catch(_e){}
+    // We do not enumerate and delete old chunks (not supported without cursor here); it's okay.
+    return await idbSet(MAIN_STATE_KEY, state);
+  }
+
+  // Build meta without orders
+  const meta = Object.assign({}, state);
+  meta.orders = []; // keep shape
+  meta.__split_store_v1 = true;
+
+  const chunks = [];
+  for(let i=0;i<orders.length;i+=SPLIT_MAX_ORDERS_PER_CHUNK){
+    chunks.push(orders.slice(i, i+SPLIT_MAX_ORDERS_PER_CHUNK));
+  }
+
+  const manifest = {
+    v: 1,
+    ts: Date.now(),
+    totalOrders: orders.length,
+    chunks: chunks.length,
+    chunkSize: SPLIT_MAX_ORDERS_PER_CHUNK
+  };
+
+  // Write meta + manifest + chunks
+  await idbSet(MAIN_STATE_KEY, meta);
+  await idbSet(SPLIT_KEY_MANIFEST, manifest);
+  for(let i=0;i<chunks.length;i++){
+    await idbSet(SPLIT_KEY_CHUNK_PREFIX + String(i), chunks[i]);
+  }
+  return true;
+}
+
+async function loadMainStateSmart(){
+  // 1) try main_state_v1
+  const v = await loadMainStateSmart();
+  if(!v) return null;
+
+  // 2) if not split, return as-is
+  if(!v.__split_store_v1) return v;
+
+  // 3) split-store: load manifest and chunks
+  const mf = await idbGet(SPLIT_KEY_MANIFEST);
+  const out = Object.assign({}, v);
+  out.orders = [];
+  if(!mf || !mf.chunks){
+    // Manifest missing: treat as empty orders but keep meta
+    return out;
+  }
+  for(let i=0;i<mf.chunks;i++){
+    const part = await idbGet(SPLIT_KEY_CHUNK_PREFIX + String(i));
+    if(Array.isArray(part)) out.orders = out.orders.concat(part);
+  }
+  // Safety: if counts mismatch, still return whatever we got.
+  return out;
+}
+// ===== End Split-store persistence =====
+
 async function idbGet(key){
   const db = await openMainDB();
   return await new Promise((resolve, reject)=>{
@@ -2917,7 +3001,7 @@ function saveNow(opts){
 
   // 主库：IndexedDB
   let p;
-  try{ p = idbSet(MAIN_STATE_KEY, S); }catch(e){ p = Promise.resolve(); }
+  try{ p = saveMainStateSmart(S); }catch(e){ p = Promise.resolve(); }
   // 兜底：localStorage（只保存返款最小快照）
   if(!opts.skipPayoutSnapshot) persistPayoutSnapshot();
   return p;
@@ -3065,7 +3149,7 @@ function normalizeImported(obj){
 async function load(){
   // 1) 先读 IndexedDB 主库
   try{
-    const v = await idbGet(MAIN_STATE_KEY);
+    const v = await loadMainStateSmart();
     if(v){
       S = normalizeImported(v);
       try{ restorePayoutSnapshot(S); }catch(e){}
@@ -5154,7 +5238,7 @@ async function importOrdersCsvFile(file){
   showNotice("导入完成", `新增 ${add} 单，跳过重复 ${skip}。`);
 
   // save & refresh (avoid heavy payout snapshot during bulk import)
-  try{ saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); try{ saveNow(); }catch(_){} }
+  try{ await saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); showNotice('持久化失败', '订单已导入到当前页面，但写入本地数据库失败（刷新会丢失）。请稍后重试，或检查浏览器站点存储权限。\n错误：'+(e&&e.message?e.message:String(e))); }
   refreshAfterOrderChange();
 
   // 强制刷新：清空搜索、回到第1页，并立即渲染一次（避免“导入成功但列表不刷新”）
