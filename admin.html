@@ -12361,6 +12361,11 @@ if(!_autoEnabled){
         return (prefix||"X") + "_" + Date.now().toString(16) + "_" + rnd;
       };
 
+      // order key helper (do not depend on global U, to survive after reset/clean)
+      const __orderKey = (sellerId, orderId, asin)=>`${String(sellerId||"").trim()}::${String(orderId||"").trim()}::${String(asin||"").trim()}`;
+      const orderKeyFn = (typeof U!=="undefined" && U && typeof U.orderKey==="function") ? U.orderKey : __orderKey;
+
+
 
       const normHeader = (h)=>String(h||"").trim()
         .replace(/（/g,"(").replace(/）/g,")")
@@ -12458,7 +12463,7 @@ if(!_autoEnabled){
         const now = Date.now();
         const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
         const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
-        const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
+        const existingKeys = new Set((S.orders||[]).map(o=>o.key || orderKeyFn(o.sellerId, o.orderId, o.asin||"")));
 
         const newOrders = [];
         let add=0, skip=0, bad=0;
@@ -12515,7 +12520,7 @@ if(!_autoEnabled){
             productByAsin.set(asin, product);
           }
 
-          const key = U.orderKey(seller.id, orderId, asin||"");
+          const key = orderKeyFn(seller.id, orderId, asin||"");
           if(existingKeys.has(key)){ skip++; continue; }
           existingKeys.add(key);
 
