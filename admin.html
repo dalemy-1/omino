@@ -3585,10 +3585,8 @@ function renderOrders(){
         <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("
-");
-
-  $("orderRows").innerHTML = rows || `<tr><td colspan="16" class="small">暂无订单</td></tr>`;
+  }).join("");
+$("orderRows").innerHTML = rows || `<tr><td colspan="16" class="small">暂无订单</td></tr>`;
   renderSelectedTags();
 }
 
