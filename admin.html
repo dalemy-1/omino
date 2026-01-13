@@ -2042,7 +2042,17 @@ function round2(v){
 }
 
 function yieldToUI(){ return new Promise(r=>setTimeout(r,0)); }
-function runIdle(fn){ (window.requestIdleCallback||window.setTimeout)(fn,0); }
+function runIdle(fn){
+  try{
+    if(typeof window.requestIdleCallback === 'function'){
+      window.requestIdleCallback(()=>{ try{ fn(); }catch(e){} }, {timeout: 500});
+    }else{
+      window.setTimeout(()=>{ try{ fn(); }catch(e){} }, 0);
+    }
+  }catch(e){
+    try{ window.setTimeout(()=>{ try{ fn(); }catch(e2){} }, 0); }catch(e2){}
+  }
+}
 function showBusy(msg){
   let m=document.getElementById('__busyMask');
   if(!m){
@@ -4036,18 +4046,39 @@ function parseLine(line){
   const raw = String(line||'').trim();
   if(!raw) return null;
 
-  // 1) 订单号：默认取前 19 位；若前 19 位不是 Amazon 单号格式，仍按“纯单号”处理（价格=0，其它空）
+  // 1) 订单号：默认取前 19 位
   const head = raw.slice(0,19);
-  const isAmazonOrderId = /^\d{3}-\d{7}-\d{7}$/.test(head);
-  const orderId = isAmazonOrderId ? head : head; // 仍然保留前 19 位作为订单号
+  const orderId = head; // 仍然保留前 19 位作为订单号（含非标准也保留）
 
-  const rest = raw.slice(19).trim();
+  let rest = raw.slice(19).trim();
 
-  // 2) 价格：只在 rest 中识别，避免把“纯 19 位单号”误识别为金额
-  //    规则：在 rest 里找第一个“独立数字(可带小数)”；若 rest 为空则 price=0
+  // 2) 先识别“折扣价/佣金”，并从 rest 中移除，避免干扰价格识别
+  let discount = 0;
+  let buyerCommission = 0;
+  let discountProvided = false;
+  let commissionProvided = false;
+
+  const discRe = /(折扣价|折扣|折后价?)\s*([0-9]+(?:\.[0-9]{1,2})?)/i;
+  const commRe = /(买手佣金|买家佣金|佣金)\s*([0-9]+(?:\.[0-9]{1,2})?)/i;
+
+  const md = raw.match(discRe);
+  if(md){
+    const v = parseFloat(md[2]);
+    if(Number.isFinite(v)){ discount = v; discountProvided = true; }
+    rest = rest.replace(md[0], ' ');
+  }
+  const mc = raw.match(commRe);
+  if(mc){
+    const v = parseFloat(mc[2]);
+    if(Number.isFinite(v)){ buyerCommission = v; commissionProvided = true; }
+    rest = rest.replace(mc[0], ' ');
+  }
+
+  rest = rest.replace(/\s+/g,' ').trim();
+
+  // 3) 订单金额：只在 rest 中识别（优先带小数，其次整数）
   let price = 0;
   if(rest){
-    // 优先识别带小数的价格，其次整数；均要求前后不是数字，避免粘连
     const m = rest.match(/(^|[^\d])(\d+(?:\.\d{1,2})?)(?=$|[^\d])/);
     if(m){
       const v = parseFloat(m[2]);
@@ -4055,53 +4086,27 @@ function parseLine(line){
     }
   }
 
-  // 3) 折扣价 / 买手佣金（买家佣金）：不会同时出现；识别失败则为 0
-  let discount = 0;
-  let buyerCommission = 0;
-
-  // 折扣：折扣价10 / 折扣10 / review后“折扣价 3”
-  const mDisc = raw.match(/折扣价\s*([0-9]+(?:\.[0-9]{1,2})?)/) || raw.match(/折扣\s*([0-9]+(?:\.[0-9]{1,2})?)/);
-  if(mDisc){
-    const v = parseFloat(mDisc[1]);
-    if(Number.isFinite(v)) discount = v;
-  }
-
-  // 佣金：佣金30 / 买家佣金30 / 买手佣金30（额外给买家）
-  const mComm = raw.match(/(?:买家佣金|买手佣金|佣金)\s*([0-9]+(?:\.[0-9]{1,2})?)/);
-  if(mComm){
-    const v = parseFloat(mComm[1]);
-    if(Number.isFinite(v)) buyerCommission = v;
-  }
-
-  // 4) 回评要求：默认文字评；能识别则覆盖
-  //    规则：图片/图评 => 图片评；视频 => 视频评；免评/FB/feedback/无法上评 => 免评 或 免评FB
+  // 4) 回评要求：默认文字评
   let reviewType = '文字评';
   const low = raw.toLowerCase();
   if(/免评点星/.test(raw)) reviewType = '免评点星';
   else if(/免评fb/.test(low) || /feedback/.test(low)) reviewType = '免评FB';
-  else if(/无法上评/.test(raw) || /fb/.test(low)) reviewType = '免评'; // 你要求“无法上评FB”按免评计算
+  else if(/无法上评/.test(raw) || /fb/.test(low)) reviewType = '免评';
   else if(/免评/.test(raw)) reviewType = '免评';
   else if(/视频/.test(raw)) reviewType = '视频评';
   else if(/图评/.test(raw) || /图片/.test(raw)) reviewType = '图片评';
-  // 其余默认文字评
 
-  // 5) 产品名：取 rest 去掉金额、折扣/佣金等关键词后的前半段（尽量保留中文名）
-  let title = rest;
+  // 5) 产品名：从 rest 中去掉价格/关键词后取剩余
+  let title = rest || '';
   if(title){
-    // 去掉括号后备注
     title = title.replace(/\(.*?\)/g,' ').trim();
-    // 去掉折扣/佣金信息段
-    title = title.replace(/折扣价\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
-    title = title.replace(/折扣\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
-    title = title.replace(/(?:买家佣金|买手佣金|佣金)\s*[0-9]+(?:\.[0-9]{1,2})?/g,' ');
-    // 去掉回评关键词
     title = title.replace(/(?:文字评价|图片评价|视频评价|review\+feedback|review|feedback|免评点星|免评fb|免评)/ig,' ');
-    // 去掉刚刚识别的价格数字（只去掉第一个匹配）
+    // 去掉第一个价格数字
     title = title.replace(/(^|[^\d])(\d+(?:\.\d{1,2})?)(?=$|[^\d])/, '$1 ');
     title = title.replace(/\s+/g,' ').trim();
   }
 
-  return { ok:true, orderId, title, amount: price, discount, buyerCommission, reviewReq: reviewType };
+  return { ok:true, orderId, title, amount: price, discount, buyerCommission, discountProvided, commissionProvided, reviewReq: reviewType };
 }
 
 
@@ -4154,8 +4159,8 @@ function batchHandle(commit){
       orderId: (p.orderId||"").slice(0,19),
       title: finalTitle,
       amount: (p.amount==null? "" : String(p.amount)),
-      discount: (matchedProduct && matchedProduct.discount!=null) ? String(matchedProduct.discount) : (p.discount==null? "" : String(p.discount)),
-      buyerCommission: (matchedProduct && matchedProduct.buyerCommission!=null) ? String(matchedProduct.buyerCommission) : (p.buyerCommission==null? "" : String(p.buyerCommission)),
+      discount: (p.discountProvided ? (p.discount==null? "" : String(p.discount)) : ((matchedProduct && matchedProduct.discount!=null) ? String(matchedProduct.discount) : (p.discount==null? "" : String(p.discount)))),
+      buyerCommission: (p.commissionProvided ? (p.buyerCommission==null? "" : String(p.buyerCommission)) : ((matchedProduct && matchedProduct.buyerCommission!=null) ? String(matchedProduct.buyerCommission) : (p.buyerCommission==null? "" : String(p.buyerCommission)))),
       market,
       currency,
       asin: finalAsin,
