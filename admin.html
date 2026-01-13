@@ -12721,5 +12721,155 @@ if(!_autoEnabled){
 })();
 </script>
 
+<script>
+(()=>{
+  const w = window;
+  const safe = (fn)=>{ try{ return fn(); }catch(e){ console.error('[PATCH v10]', e); } };
+
+  // 1) 全量重渲染（避免只刷新局部导致看板/列表不同步）
+  w.__rerenderAllSafe = function(){
+    safe(()=>w.renderKPI && w.renderKPI());
+    safe(()=>w.renderSellers && w.renderSellers());
+    safe(()=>w.renderProducts && w.renderProducts());
+    safe(()=>w.renderOrders && w.renderOrders());
+    safe(()=>w.renderBatches && w.renderBatches());
+  };
+
+  // 2) 保存后强制刷新（修复：导入后提示成功但列表/看板不更新）
+  if (typeof w.saveNow === 'function' && !w.__saveNowPatchedV10){
+    w.__saveNowPatchedV10 = true;
+    const _saveNow = w.saveNow;
+    w.saveNow = async function(...args){
+      const r = await _saveNow.apply(this, args);
+      // saveNow 内部可能是节流/异步落盘，这里补两次渲染：立即 + 下一帧
+      w.__rerenderAllSafe();
+      requestAnimationFrame(()=>w.__rerenderAllSafe());
+      setTimeout(()=>w.__rerenderAllSafe(), 120);
+      return r;
+    };
+  }
+
+  // 3) 导入订单后：等待保存完成，再强制刷新渲染
+  if (typeof w.importOrdersCsvFile === 'function' && !w.__importOrdersPatchedV10){
+    w.__importOrdersPatchedV10 = true;
+    const _import = w.importOrdersCsvFile;
+    w.importOrdersCsvFile = async function(file){
+      const r = await _import.call(this, file);
+      // 保险：如果导入函数内部没有 await saveNow，这里补一轮
+      if (typeof w.saveNow === 'function'){
+        await safe(()=>w.saveNow());
+      }
+      w.__rerenderAllSafe();
+      requestAnimationFrame(()=>w.__rerenderAllSafe());
+      setTimeout(()=>w.__rerenderAllSafe(), 200);
+      return r;
+    };
+  }
+
+  // 4) 清空/重置后默认关闭自动推送（仅手动开启才推送）
+  const disableAutoPush = ()=>{
+    try{
+      localStorage.setItem('OPS_CLOUD_AUTOPUSH', '0');
+      if (w.setAutoPushUI) w.setAutoPushUI(false);
+      // 兼容：按钮文案/状态由主程序渲染时，这里只打标记即可
+      console.log('[PATCH v10] auto-push default OFF');
+    }catch(e){
+      console.warn('[PATCH v10] disableAutoPush failed', e);
+    }
+  };
+
+  // 尝试挂钩常见清空函数名
+  ['clearAllData','resetAll','hardReset','clearData','doResetAll'].forEach((name)=>{
+    if (typeof w[name] === 'function' && !w[`__patched_${name}_v10`]){
+      w[`__patched_${name}_v10`] = true;
+      const _fn = w[name];
+      w[name] = async function(...args){
+        const r = await _fn.apply(this, args);
+        disableAutoPush();
+        w.__rerenderAllSafe();
+        return r;
+      };
+    }
+  });
+
+  // 如果页面刚加载且处于“刚清空/初始”状态，也确保默认关闭
+  disableAutoPush();
+
+})();
+
+  // 2) 导入/保存后强制刷新一次（并延迟再刷新一次，覆盖异步UI更新）
+  const bump = ()=>{ w.__rerenderAllSafe(); setTimeout(w.__rerenderAllSafe, 50); setTimeout(w.__rerenderAllSafe, 250); };
+
+  // 2.1 包装 saveNow：保存后刷新UI（避免看板仍显示旧值）
+  if (typeof w.saveNow === 'function' && !w.saveNow.__patched_v10) {
+    const _saveNow = w.saveNow;
+    const wrapped = async function(...args){
+      const r = await _saveNow.apply(this, args);
+      bump();
+      return r;
+    };
+    wrapped.__patched_v10 = true;
+    w.saveNow = wrapped;
+  }
+
+  // 2.2 包装各类“变更后刷新”入口
+  ['refreshAfterSellerChange','refreshAfterProductChange','refreshAfterOrderChange','refreshAfterBatchChange','renderAll'].forEach((k)=>{
+    if (typeof w[k] === 'function' && !w[k].__patched_v10) {
+      const _fn = w[k];
+      const wrapped = function(...args){
+        const r = _fn.apply(this, args);
+        bump();
+        return r;
+      };
+      wrapped.__patched_v10 = true;
+      w[k] = wrapped;
+    }
+  });
+
+  // 2.3 包装导入订单 CSV：导入完成后立即刷新UI（并确保落盘完成后再刷新）
+  if (typeof w.importOrdersCsvFile === 'function' && !w.importOrdersCsvFile.__patched_v10) {
+    const _import = w.importOrdersCsvFile;
+    const wrapped = async function(...args){
+      const r = await _import.apply(this, args);
+      // 某些浏览器上，文件读取/批量写入完成后 UI 仍停留在旧视图，强制刷新
+      bump();
+      // 确保保存完成后再刷新（若 saveNow 是 async）
+      if (typeof w.saveNow === 'function') {
+        await safe(()=>w.saveNow());
+      }
+      bump();
+      return r;
+    };
+    wrapped.__patched_v10 = true;
+    w.importOrdersCsvFile = wrapped;
+  }
+
+  // 3) 清空/重置后：默认关闭自动推送（直到手动开启）
+  // 兼容：不同版本函数名可能不同，做多路包装。
+  const forceAutoPushOff = ()=>{
+    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
+    // 若页面里有按钮/文本同步状态，尝试刷新
+    safe(()=>w.renderCloud && w.renderCloud());
+    safe(()=>w.updateCloudUI && w.updateCloudUI());
+  };
+
+  ['clearAllData','hardResetAll','resetAllData','wipeAllData','clearData','btnClearAllData_onclick'].forEach((k)=>{
+    if (typeof w[k] === 'function' && !w[k].__patched_v10) {
+      const _fn = w[k];
+      const wrapped = async function(...args){
+        const r = await _fn.apply(this, args);
+        forceAutoPushOff();
+        bump();
+        return r;
+      };
+      wrapped.__patched_v10 = true;
+      w[k] = wrapped;
+    }
+  });
+
+  // 兜底：页面加载完成后再补一次渲染（防止首屏渲染早于异步load）
+  window.addEventListener('load', ()=>{ setTimeout(bump, 0); setTimeout(bump, 200); });
+})();
+</script>
 </body>
 </html>
