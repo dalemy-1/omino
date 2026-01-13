@@ -11963,5 +11963,394 @@ if(!_autoEnabled){
 })();
 </script>
 
+
+<script>
+/* ===== PERF PATCH (1+3+2): auto-push backoff+idle, KPI idle batching, CSV import robustness ===== */
+(function(){
+  // --------- utilities ---------
+  const _now = ()=>Date.now();
+  const _idle = (cb, timeoutMs)=>{
+    try{
+      if("requestIdleCallback" in window){
+        return requestIdleCallback(cb, { timeout: Math.max(200, timeoutMs||800) });
+      }
+    }catch(_e){}
+    return setTimeout(()=>cb({ didTimeout:true, timeRemaining:()=>0 }), 0);
+  };
+  const _yield = ()=>new Promise(r=>setTimeout(r,0));
+
+  // track recent user interaction to avoid running heavy work while user is active
+  let __lastUserAction = _now();
+  ["pointerdown","pointermove","wheel","keydown","touchstart","scroll"].forEach(ev=>{
+    window.addEventListener(ev, ()=>{ __lastUserAction = _now(); }, {passive:true, capture:true});
+  });
+  const _isUserIdle = (ms)=> (_now() - __lastUserAction) >= (ms||1200);
+
+  // --------- (1) AUTO-PUSH: idle gating + exponential backoff (does not block UI) ---------
+  try{
+    if(typeof window.cloudPush === "function" && !window.__cloudPushWrapped){
+      window.__cloudPushWrapped = true;
+      window.__cloudPushRaw = window.__cloudPushRaw || window.cloudPush;
+
+      const backoff = window.__cloudPushBackoff = window.__cloudPushBackoff || { until:0, step:0, lastErr:"" };
+
+      window.cloudPush = async function(opts){
+        const o = opts||{};
+        const force = !!o.force;
+        const quiet = !!o.quiet;
+
+        // Only gate AUTO calls (quiet=true, force=false). Manual force should always run.
+        const isAuto = (!force && quiet);
+
+        if(isAuto){
+          // respect disable switch
+          try{
+            const v = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
+            if(v === "0" || v === "false"){
+              return { ok:false, skipped:true, reason:"auto_disabled" };
+            }
+          }catch(_e){}
+          // do not push when tab is hidden
+          if(document.hidden) return { ok:false, skipped:true, reason:"tab_hidden" };
+          // do not push while user is actively interacting
+          if(!_isUserIdle(1500)) return { ok:false, skipped:true, reason:"user_active" };
+          // backoff window
+          if(_now() < (backoff.until||0)) return { ok:false, skipped:true, reason:"backoff", until: backoff.until };
+        }
+
+        // run the real push in idle to reduce jank
+        return await new Promise((resolve)=>{
+          _idle(async ()=>{
+            try{
+              const res = await window.__cloudPushRaw(o);
+              // success -> reset backoff
+              if(res && res.ok){
+                backoff.step = 0;
+                backoff.until = 0;
+                backoff.lastErr = "";
+              }else if(isAuto && res && res.ok === false && !res.skipped){
+                // non-throwing failure
+                backoff.step = Math.min(6, (backoff.step||0) + 1);
+                const wait = 30_000 * Math.pow(2, backoff.step-1); // 30s,60s,120s,...
+                backoff.until = _now() + Math.min(wait, 10*60_000);
+                backoff.lastErr = res.reason || "push_failed";
+              }
+              resolve(res);
+            }catch(e){
+              if(isAuto){
+                const msg = (e && e.message) ? e.message : String(e);
+                // timeouts / 57014 / 500 -> stronger backoff
+                backoff.step = Math.min(7, (backoff.step||0) + 1);
+                const base = /57014|timeout|statement|500/i.test(msg) ? 60_000 : 30_000;
+                const wait = base * Math.pow(2, backoff.step-1);
+                backoff.until = _now() + Math.min(wait, 15*60_000);
+                backoff.lastErr = msg;
+              }
+              throw e;
+            }
+          }, isAuto ? 1200 : 300);
+        });
+      };
+    }
+  }catch(_e){
+    console.warn("[PERF PATCH] cloudPush wrap failed", _e);
+  }
+
+  // --------- (3) KPI/统计：用分段 idle 扫描替换全量 filter ---------
+  try{
+    if(typeof window.renderKPI === "function" && !window.__renderKPIWrapped){
+      window.__renderKPIWrapped = true;
+      const $ = (id)=>document.getElementById(id);
+      const _setText = (id, v)=>{ const el=$(id); if(el) el.textContent = String(v); };
+
+      window.renderKPI = function(){
+        // quick set for sellers/products (cheap)
+        try{
+          _setText("kpiSellers", (window.S?.sellers?.length||0));
+          _setText("kpiProducts", (window.S?.products?.length||0));
+          _setText("kpiOrders", (window.S?.orders?.length||0));
+        }catch(_e){}
+
+        // heavy parts: scan orders in chunks
+        const orders = (window.S && Array.isArray(window.S.orders)) ? window.S.orders : [];
+        let i=0, pPending=0, cPending=0;
+
+        const step = ()=>{
+          const tEnd = _now() + 12; // ~12ms budget
+          for(; i<orders.length && _now()<tEnd; i++){
+            const o = orders[i];
+            if(!o) continue;
+            if(!(o.principal && o.principal.settled)) pPending++;
+            // “待结算佣金（已回评/免评）”口径：未结算佣金 且 (回评 DONE/WAIVED)
+            const reviewOk = (o.reviewStatus==="DONE" || o.reviewStatus==="WAIVED");
+            if(reviewOk && !(o.commission && o.commission.settled)) cPending++;
+          }
+          if(i<orders.length){
+            _idle(step, 600);
+          }else{
+            _setText("kpiP", pPending);
+            _setText("kpiC", cPending);
+          }
+        };
+        _idle(step, 600);
+      };
+    }
+  }catch(_e){
+    console.warn("[PERF PATCH] renderKPI wrap failed", _e);
+  }
+
+  // --------- (2) 订单明细 CSV 导入：表头同义词 + 数值清洗 + 导入报告 ---------
+  try{
+    if(typeof window.importOrdersCsvFile === "function" && !window.__importOrdersCsvFileV2){
+      window.__importOrdersCsvFileV2 = true;
+
+      const num = (v)=>{
+        if(v===null || v===undefined) return 0;
+        const s = String(v).trim();
+        if(!s) return 0;
+        // remove currency symbols/commas/Chinese words
+        const cleaned = s.replace(/[,\s￥$€£¥]/g,"").replace(/[^\d\.\-]/g,"");
+        const n = parseFloat(cleaned);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const pick = (row, keys)=>{
+        for(const k of keys){
+          if(row && Object.prototype.hasOwnProperty.call(row, k)) return row[k];
+        }
+        return "";
+      };
+
+      const normHeader = (h)=>String(h||"").trim()
+        .replace(/（/g,"(").replace(/）/g,")")
+        .replace(/\s+/g,"")
+        .toLowerCase();
+
+      // synonyms map (normalized)
+      const H = {
+        orderTime: ["下单时间","下单日期","日期","下单时间(本地)"],
+        seller: ["卖家","卖家名称","seller"],
+        asin: ["asin"],
+        title: ["产品名称","产品名","产品名称/标题","标题","产品"],
+        reviewReq: ["留评需求","回评需求","留评要求","reviewreq","review"],
+        reviewStatus: ["留评状态","回评状态","reviewstatus"],
+        principalStatus: ["收款状态","本金状态","principalstatus"],
+        commissionStatus: ["返佣状态","佣金状态","commissionstatus","返佣状态"],
+        orderId: ["订单号","订单号(19位)","订单号（19位）","orderid"],
+        unitPrice: ["单价","订单金额","金额","price","amount"],
+        discount: ["卖家折扣","折扣","折扣价","discount"],
+        buyerCommission: ["买手佣金","买手费","buyercommission"],
+        actualAmount: ["实际金额","实付金额","实际支付","actual"],
+        fx: ["汇率","fx"],
+        principalCny: ["本金金额","本金(cny)","本金cny","principal(cny)","本金金额cny"],
+        commissionCny: ["佣金","佣金(cny)","佣金cny","commission(cny)"],
+        estRecv: ["预估收款","预计收款","预估收款cny","预计收款cny"],
+        payout: ["返款金额","返款","已返款金额","payout"]
+      };
+
+      // rebuild a normalized row with canonical keys
+      const canonizeRow = (row)=>{
+        const out = {};
+        const keys = Object.keys(row||{});
+        const map = {};
+        for(const k of keys){ map[normHeader(k)] = k; }
+        const getBy = (arr)=>{
+          for(const alias of arr){
+            const nk = normHeader(alias);
+            if(map[nk]) return row[map[nk]];
+          }
+          return "";
+        };
+        out.orderTime = getBy(H.orderTime);
+        out.seller = getBy(H.seller);
+        out.asin = getBy(H.asin);
+        out.title = getBy(H.title);
+        out.reviewReq = getBy(H.reviewReq);
+        out.reviewStatus = getBy(H.reviewStatus);
+        out.principalStatus = getBy(H.principalStatus);
+        out.commissionStatus = getBy(H.commissionStatus);
+        out.orderId = getBy(H.orderId);
+        out.unitPrice = getBy(H.unitPrice);
+        out.discount = getBy(H.discount);
+        out.buyerCommission = getBy(H.buyerCommission);
+        out.actualAmount = getBy(H.actualAmount);
+        out.fx = getBy(H.fx);
+        out.principalCny = getBy(H.principalCny);
+        out.commissionCny = getBy(H.commissionCny);
+        out.estRecv = getBy(H.estRecv);
+        out.payout = getBy(H.payout);
+        return out;
+      };
+
+      // override with robust importer
+      window.importOrdersCsvFile = async function(file){
+        const txt = await window.__readFileTextSmart(file);
+        const rows = window.__parseCSV(txt);
+        if(!rows || !rows.length){
+          window.showNotice?.("导入失败","CSV 为空或无法解析。");
+          return;
+        }
+
+        // Pre-index
+        const S = window.S;
+        const U = window.U;
+        const now = Date.now();
+        const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
+        const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
+        const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
+
+        const newOrders = [];
+        let add=0, skip=0, bad=0;
+        const badLines = [];
+
+        // allow UI to breathe
+        const CHUNK = 200;
+        let idx=0;
+
+        for(const raw of rows){
+          idx++;
+          const r = canonizeRow(raw);
+
+          const orderId = String(r.orderId||"").trim();
+          if(!orderId){ continue; }
+
+          const sellerName = String(r.seller||"").trim();
+          const asin = String(r.asin||"").trim();
+          const title = String(r.title||"").trim();
+
+          if(!sellerName){
+            bad++; if(badLines.length<20) badLines.push(`${idx}: 缺少卖家`);
+            continue;
+          }
+
+          // seller
+          let seller = sellerByName.get(sellerName);
+          if(!seller){
+            const sid = U.id("S", S.seq.seller++);
+            seller = {id:sid, name:sellerName, market:"", fx:0, createdAt: now};
+            S.sellers.push(seller);
+            sellerByName.set(sellerName, seller);
+          }
+
+          // product (optional)
+          let product = asin ? productByAsin.get(asin) : null;
+          if(!product && asin){
+            const pid = U.id("P", S.seq.product++);
+            const mk = (window.__inferMarketFromName?.(title) || seller.market || "");
+            product = {
+              id:pid,
+              name: title || asin,
+              asin,
+              market: mk,
+              sellerId: seller.id,
+              reviewType: (window.__mapReviewReq?.(r.reviewReq) || "文字评"),
+              discount: 0,
+              buyerCommission: 0,
+              createdAt: now
+            };
+            S.products.push(product);
+            productByAsin.set(asin, product);
+          }
+
+          const key = U.orderKey(seller.id, orderId, asin||"");
+          if(existingKeys.has(key)){ skip++; continue; }
+          existingKeys.add(key);
+
+          // statuses
+          const reviewStatus = window.__mapReviewStatus?.(r.reviewStatus) || "PENDING";
+          const principalSettled = window.__isSettledText?.(r.principalStatus) || false;
+          const commissionSettled = window.__isSettledText?.(r.commissionStatus) || false;
+
+          const fx = num(r.fx) || (seller.fx||0);
+          const amount = num(r.unitPrice) || num(r.actualAmount);
+          const discount = num(r.discount);
+          const buyerCommission = num(r.buyerCommission);
+
+          const principalCny = num(r.principalCny);
+          const commissionCny = num(r.commissionCny);
+          const estRecv = num(r.estRecv);
+          const payout = num(r.payout);
+
+          const o = window.__newOrderSkeleton ? window.__newOrderSkeleton() : {
+            id: U.id("O", S.seq.order++),
+            createdAt: now,
+            updatedAt: now,
+            principal: { settled:false, amountCny:0, settledAmountCny:0 },
+            commission: { settled:false, amountCny:0, settledAmountCny:0 }
+          };
+
+          o.sellerId = seller.id;
+          o.sellerName = seller.name;
+          o.productId = product ? product.id : "";
+          o.productName = product ? product.name : title;
+          o.asin = asin || (product ? (product.asin||"") : "");
+          o.market = (product ? product.market : "") || seller.market || "";
+          o.currency = window.__marketCurrency?.(o.market) || o.currency || "";
+          o.orderId = orderId;
+          o.key = key;
+
+          // date
+          const dt = String(r.orderTime||"").trim();
+          if(dt) o.date = dt.slice(0,10).replace(/\./g,"-").replace(/\//g,"-");
+
+          // review
+          o.reviewType = (window.__mapReviewReq?.(r.reviewReq) || o.reviewType || (product?product.reviewType:"文字评"));
+          o.reviewStatus = reviewStatus;
+
+          // money
+          o.amount = amount || 0;
+          o.discount = discount || 0;
+          o.buyerCommission = buyerCommission || 0;
+          o.fx = fx || 0;
+
+          // principal/commission
+          o.principal.amountCny = principalCny || o.principal.amountCny || 0;
+          o.principal.settled = !!principalSettled;
+          if(o.principal.settled) o.principal.settledAmountCny = o.principal.amountCny;
+
+          o.commission.amountCny = commissionCny || o.commission.amountCny || 0;
+          o.commission.settled = !!commissionSettled;
+          if(o.commission.settled) o.commission.settledAmountCny = o.commission.amountCny;
+
+          // optional fields (kept for later reporting)
+          o.estimatedReceivableCny = estRecv || o.estimatedReceivableCny || 0;
+          if(payout>0){
+            o.payoutAmountCny = payout;
+            o.payoutStatus = "PAID";
+          }
+
+          newOrders.push(o);
+          add++;
+
+          if(add % CHUNK === 0) await _yield();
+        }
+
+        // prepend new orders (keep newest on top)
+        if(newOrders.length){
+          S.orders = newOrders.reverse().concat(S.orders);
+        }
+
+        // persist + refresh (use existing functions)
+        try{
+          if(typeof window.saveNow === "function") window.saveNow();
+          if(typeof window.refreshAfterOrderChange === "function") window.refreshAfterOrderChange();
+          if(typeof window.renderKPI === "function") window.renderKPI();
+        }catch(_e){ console.warn(_e); }
+
+        // report
+        const msg = [
+          `导入完成：新增 ${add}，跳过重复 ${skip}，异常 ${bad}。`,
+          badLines.length ? `异常示例：\n- ` + badLines.join("\n- ") : ""
+        ].filter(Boolean).join("\n\n");
+        window.showNotice ? window.showNotice("导入订单 CSV（明细）", msg) : alert(msg);
+      };
+    }
+  }catch(_e){
+    console.warn("[PERF PATCH] importOrdersCsvFile patch failed", _e);
+  }
+
+})();
+</script>
+
 </body>
 </html>
