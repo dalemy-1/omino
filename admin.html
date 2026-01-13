@@ -1056,11 +1056,11 @@ async function cloudPull(opts){
   if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
   const { client, cfg } = sb;
   if(!force){
-    if(!confirm("从云端拉取会覆盖本地当前数据。
+    if(!confirm(`从云端拉取会覆盖本地当前数据。
 
 建议：先点「导出 JSON」本地存一份备份。
 
-确定要继续吗？")) return { ok:false, cancelled:true };
+确定要继续吗？`)) return { ok:false, cancelled:true };
   }
 
   try{
@@ -8731,28 +8731,28 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
 
     if(pushBtn) pushBtn.onclick = ()=> _doPush(false);
     if(pushForceBtn) pushForceBtn.onclick = ()=>{
-      const ok = confirm("强制推送：即使 hash 未变化也会写入云端快照。
+      const ok = confirm(`强制推送：即使 hash 未变化也会写入云端快照。
 
 建议：仅在你确认云端异常、或需要强制刷新云端时使用。
 
-继续？");
+继续？`);
       if(!ok) return;
       _doPush(true);
     };
 
     if(pullBtn) pullBtn.onclick = ()=>{
-      const ok = confirm("云端拉取会覆盖本地数据（IndexedDB）。
+      const ok = confirm(`云端拉取会覆盖本地数据（IndexedDB）。
 
 建议：先做一次“云端推送”或导出 JSON 备份。
 
-继续拉取？");
+继续拉取？`);
       if(!ok) return;
       _doPull(false);
     };
     if(pullForceBtn) pullForceBtn.onclick = ()=>{
-      const ok1 = confirm("强制拉取将覆盖本地数据（不可撤销）。
+      const ok1 = confirm(`强制拉取将覆盖本地数据（不可撤销）。
 
-继续？");
+继续？`);
       if(!ok1) return;
       const ok2 = confirm("二次确认：确定要“强制拉取并覆盖本地”？");
       if(!ok2) return;
