@@ -1818,7 +1818,7 @@ window.$$$ = window.$$$ || function(sel, root){
 
       <div id="payoutStickyBar">
         <div class="mini" id="payoutStickyHint">提示：可在表内修改金额/折扣/买手佣金(原币)/佣金(CNY)。</div>
-        <div class="right">本金：<span id="payoutModalTotalPrincipal">0.00</span>　佣金：<span id="payoutModalTotalComm">0.00</span>　总计：<span id="payoutModalTotal">0.00</span> CNY</div>
+        <div class="right">本金：<span id="payoutModalTotalPrincipal">0.00</span>　佣金：<span id="payoutModalTotalCommission">0.00</span>　总计：<span id="payoutModalTotalGrand">0.00</span>　<span id="payoutModalTotal" class="mini" style="margin-left:10px">当页合计：0.00 CNY</span></div>
       </div>
 
       <div class="table-scroll" style="margin-top:8px">
@@ -6926,6 +6926,84 @@ function closePayoutModal(){
 // 返款可选规则（兼容旧字段/新字段）
 // 目标：回评= DONE 且 返款未完成（仍处于待返款/已回评待打款）
 // 注意：历史版本可能存在 camelCase / snake_case / Name 字段并存。
+function payoutModalExportCsv(){
+  try{
+    var pm = state._payoutModal;
+    if(!pm || !pm.orders || !pm.orders.length){ alert('没有可导出的返款数据'); return; }
+
+    // 确保 calc 已收集（至少当前页）
+    pm._calc = pm._calc || {};
+    var fx = payoutModalReadBatchFx();
+
+    var batchId = (document.getElementById('payoutBatchId')||{}).value || '';
+    var batchDate = (document.getElementById('payoutBatchDate')||{}).value || '';
+    var method = (document.getElementById('payoutBatchMethod')||{}).value || '';
+    var note = (document.getElementById('payoutBatchNote')||{}).value || '';
+
+    var header = [
+      'batch_id','batch_date','method','note',
+      'order_no','seller','market','asin','product',
+      'amount','discount','buyer_commission_orig',
+      'fx','principal_orig','principal_cny',
+      'principal_pay_cny','commission_should_cny','commission_pay_cny','row_total_cny'
+    ];
+    var rows = [header.join(',')];
+
+    for(var i=0;i<pm.orders.length;i++){
+      var o = pm.orders[i];
+      var oid = String(o.orderId||o.id||'');
+      var calc = pm._calc[oid] || null;
+
+      var orderNo = (U.orderNo?U.orderNo(o):(o.orderNo||o.order_no||o.orderId||o.order_id||oid||'')) || '';
+      var seller = payoutSellerName2 ? payoutSellerName2(o) : (o.sellerName||o.seller||'');
+      var market = (o.market||o.country||o.site||'');
+      var asin = (o.asin||o.ASIN||'');
+      var product = payoutProductName ? (payoutProductName(o) || '') : (o.productName||o.title||'');
+
+      var amount = calc ? (parseFloat(calc.amount)||0) : U.num(o.amount);
+      var discount = calc ? (parseFloat(calc.discount)||0) : U.num(o.discount);
+      var bc = calc ? (parseFloat(calc.buyerCommission)||0) : U.num(o.buyerCommission);
+
+      var fxv = getFxForOrder ? getFxForOrder(o, fx) : 1;
+      var principalOrig = (amount - discount + bc);
+      var principalCny = principalOrig * fxv;
+
+      var commShould = (commissionShould ? commissionShould(o) : U.num(o.commission));
+      var principalPay = calc ? (parseFloat(calc.principalPay)||0) : principalCny;
+      var commPay = calc ? (parseFloat(calc.commPay)||0) : commShould;
+      var rowTotal = principalPay + commPay;
+
+      function q(v){
+        var s = String(v==null?'':v);
+        if(/[",\n]/.test(s)) s = '"' + s.replace(/"/g,'""') + '"';
+        return s;
+      }
+
+      rows.push([
+        q(batchId), q(batchDate), q(method), q(note),
+        q(orderNo), q(seller), q(market), q(asin), q(product),
+        amount.toFixed(2), discount.toFixed(2), bc.toFixed(2),
+        fxv.toFixed(6), principalOrig.toFixed(2), principalCny.toFixed(2),
+        principalPay.toFixed(2), commShould.toFixed(2), commPay.toFixed(2), rowTotal.toFixed(2)
+      ].join(','));
+    }
+
+    var csv = rows.join('\n');
+    var fname = (batchId ? String(batchId) : ('payout_batch_' + U.today().replaceAll('-',''))) + '.csv';
+    var blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }catch(e){
+    console.error(e);
+    alert('导出失败：' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+
 function isPayoutEligible(o){
   // 唯一可信口径：回评状态 DONE 且 返款状态 = payout_pending
   // 说明：本项目订单结构为 o.review.status 与 o.payout.status（可能为空/中文/旧字段）
@@ -7000,14 +7078,43 @@ function preparePayoutModal(ids){
       pageSize: fastMode ? 80 : 150,
       fastMode: fastMode
     };
+    // 初始化 calc：保证“总计/导出”即使在快速模式下也准确（无需渲染全量）
+    try{
+      var pm = state._payoutModal;
+      pm._calc = pm._calc || {};
+      var fx = payoutModalReadBatchFx();
+      for(var ii=0; ii<eligible.length; ii++){
+        var o = eligible[ii];
+        var oid = String(o.orderId||o.id||''); if(!oid) continue;
+        var amount = U.num(o.amount);
+        var discount = U.num(o.discount);
+        var bc = U.num(o.buyerCommission); if(!isFinite(bc)) bc = 0;
+        var fxv = getFxForOrder(o, fx);
+        var principalOrig = amount - discount + bc;
+        var principalCny = principalOrig * fxv;
+        var commCny = (commissionShould ? commissionShould(o) : U.num(o.commission));
+        pm._calc[oid] = { amount: amount, discount: discount, buyerCommission: bc, principalPay: principalCny, commPay: commCny };
+      }
+    }catch(e){}
+
 
     // 绑定按钮（确保永远可用）
     if($("payoutModalCancel")) $("payoutModalCancel").onclick = ()=> closePayoutModal();
     if($("payoutModalExport")) $("payoutModalExport").onclick = ()=> payoutModalExportCsv && payoutModalExportCsv();
     if($("payoutModalConfirm")) $("payoutModalConfirm").onclick = ()=> confirmPayoutModal();
+    if($("payoutModalClose")) $("payoutModalClose").onclick = ()=> closePayoutModal();
+    if($("payoutModalTopToggle")) $("payoutModalTopToggle").onclick = ()=>{
+      const box = $("payoutModalTopBox");
+      const btn = $("payoutModalTopToggle");
+      if(!box||!btn) return;
+      const hidden = (box.style.display==="none");
+      box.style.display = hidden ? "" : "none";
+      btn.textContent = hidden ? "隐藏" : "显示";
+    };
 
     payoutModalBindPagerOnce();
     payoutModalRenderPage(1);
+    try{ payoutModalRecalcAll(); }catch(e){}
 
   }catch(e){
     console.error(e);
@@ -7140,7 +7247,11 @@ function payoutModalRenderPage(page){
 
   // 行内输入变更：自动重算 + 预检
   document.querySelectorAll("#payoutModalRows input").forEach(function(inp){
-    inp.oninput = function(){
+    inp.oninput = function(ev){
+      try{
+        var tr = ev && ev.target ? ev.target.closest('tr[data-oid]') : null;
+        if(tr) payoutModalUpdateCalcFromRow(tr);
+      }catch(e){}
       payoutModalRecalcTotal();
       payoutModalRunPrecheck();
     };
@@ -7211,14 +7322,51 @@ function payoutModalRecalcAll(){
 function payoutModalRecalcTotalVisible(){
   var pm = state._payoutModal; if(!pm) return;
   var rowsEl = document.getElementById('payoutModalRows'); if(!rowsEl) return;
-  var sum = 0;
+
+  // 1) 当页合计：读取表格当前页每行的 rowTotal（更轻量，不扫描全量）
+  var pageSum = 0;
   var trs = rowsEl.querySelectorAll('tr[data-oid]');
   for(var i=0;i<trs.length;i++){
-    var total = parseFloat((trs[i].querySelector('.pm-total')||{}).textContent||'0')||0;
-    sum += total;
+    var td = trs[i].querySelector('[data-v="rowTotal"]');
+    var raw = td ? td.textContent : '';
+    // raw 可能形如 "= 257.53"
+    var num = parseFloat(String(raw||'').replace(/[^0-9.\-]/g,'')) || 0;
+    pageSum += num;
   }
   var totalEl = document.getElementById('payoutModalTotal');
-  if(totalEl) totalEl.textContent = '当页合计：' + round2(sum) + ' CNY';
+  if(totalEl) totalEl.textContent = '当页合计：' + round2(pageSum) + ' CNY';
+
+  // 2) 全部合计：基于 pm._calc（含未渲染页也准确）
+  var calc = pm._calc || {};
+  var sumP = 0, sumC = 0;
+  for(var j=0;j<pm.orders.length;j++){
+    var o = pm.orders[j];
+    var oid = String(o.orderId || o.id || '');
+    if(!oid) continue;
+    var r = calc[oid];
+    if(r){
+      sumP += (parseFloat(r.principalPay)||0);
+      sumC += (parseFloat(r.commPay)||0);
+    }else{
+      // 默认值：按 renderPage 同口径
+      var fx = payoutModalReadBatchFx();
+      var fxv = getFxForOrder(o, fx);
+      var amount = U.num(o.amount);
+      var discount = U.num(o.discount);
+      var buyerCommOrig = U.num(o.buyerCommission); if(!isFinite(buyerCommOrig)) buyerCommOrig = 0;
+      var principalOrig = amount - discount + buyerCommOrig;
+      var principalCny = principalOrig * fxv;
+      var commCny = commissionShould ? commissionShould(o) : (U.num(o.commission)||0);
+      sumP += principalCny;
+      sumC += commCny;
+    }
+  }
+  var elP = document.getElementById('payoutModalTotalPrincipal');
+  var elC = document.getElementById('payoutModalTotalCommission');
+  var elG = document.getElementById('payoutModalTotalGrand');
+  if(elP) elP.textContent = round2(sumP).toFixed(2);
+  if(elC) elC.textContent = round2(sumC).toFixed(2);
+  if(elG) elG.textContent = round2(sumP + sumC).toFixed(2);
 }
 
 
@@ -7241,11 +7389,13 @@ function payoutModalRunPrecheck(){
   var summaryEl = document.getElementById('payoutPrecheckSummary');
   var listEl = document.getElementById('payoutPrecheckList');
   var btn = document.getElementById('payoutModalConfirm');
+  var btnEx = document.getElementById('payoutModalExport');
 
   if(!pm || !pm.orders){
     if(summaryEl) summaryEl.textContent = '—';
     if(listEl) listEl.innerHTML = '';
     if(btn) btn.disabled = true;
+    if(btnEx) btnEx.disabled = true;
     return { ok:false, issues:['no_modal'] };
   }
 
@@ -7303,10 +7453,83 @@ function payoutModalRunPrecheck(){
     }
   }
   if(btn) btn.disabled = !ok;
+  if(btnEx) btnEx.disabled = !ok;
 
   return { ok: ok, issues: issues };
 }
 
+
+
+function payoutModalUpdateCalcFromRow(tr){
+  try{
+    var pm = state._payoutModal; if(!pm) return;
+    pm._calc = pm._calc || {};
+    var oid = String(tr.getAttribute('data-oid')||'');
+    if(!oid) return;
+
+    // 读取输入
+    function val(sel){
+      var el = tr.querySelector(sel);
+      return el ? (parseFloat(el.value||'0')||0) : 0;
+    }
+    var amount = val('input[data-f="amount"]');
+    var discount = val('input[data-f="discount"]');
+    var buyerCommOrig = val('input[data-f="buyerCommission"]');
+    var principalPay = val('input[data-f="principalPay"]');
+    var commPay = val('input[data-f="commPay"]');
+
+    // 标记：若用户直接改了 principalPay/commPay，则以后不自动覆盖
+    var tgt = tr._pmTouched || (tr._pmTouched = {});
+    // 通过 activeElement 判断本次触发来源
+    var ae = document.activeElement;
+    if(ae && ae.matches && ae.matches('input[data-f="principalPay"]')) tgt.p = true;
+    if(ae && ae.matches && ae.matches('input[data-f="commPay"]')) tgt.c = true;
+
+    // 计算派生（principalCny/rowTotal）
+    var fx = payoutModalReadBatchFx();
+    var o = (pm._byId && pm._byId[oid]) || null;
+    if(!pm._byId){
+      pm._byId = {};
+      for(var i=0;i<pm.orders.length;i++){
+        var oo = pm.orders[i];
+        var id2 = String(oo.orderId||oo.id||'');
+        if(id2) pm._byId[id2] = oo;
+      }
+      o = pm._byId[oid] || null;
+    }
+    var fxv = o ? getFxForOrder(o, fx) : 1;
+    var principalOrig = amount - discount + buyerCommOrig;
+    var principalCny = principalOrig * fxv;
+
+    // 若用户没有手动改 principalPay，则跟随 principalCny
+    if(!tgt.p){
+      principalPay = principalCny;
+      var ip = tr.querySelector('input[data-f="principalPay"]');
+      if(ip) ip.value = round2(principalPay).toFixed(2);
+    }
+    // 若用户没有手动改 commPay，则跟随默认佣金(CNY)（来自隐藏 commCny）
+    if(!tgt.c){
+      var ic = tr.querySelector('input[data-f="commCny"]');
+      var commCny = ic ? (parseFloat(ic.value||'0')||0) : commPay;
+      commPay = commCny;
+      var i2 = tr.querySelector('input[data-f="commPay"]');
+      if(i2) i2.value = round2(commPay).toFixed(2);
+    }
+
+    // 更新行合计显示
+    var td = tr.querySelector('[data-v="rowTotal"]');
+    if(td) td.textContent = '= ' + fmtMoney((principalPay + commPay), 2);
+
+    // 写入 calc
+    pm._calc[oid] = {
+      amount: amount,
+      discount: discount,
+      buyerCommission: buyerCommOrig,
+      principalPay: principalPay,
+      commPay: commPay
+    };
+  }catch(e){}
+}
 
 function payoutModalBindPagerOnce(){
   if(state._payoutPagerBound) return;
