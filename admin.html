@@ -5035,15 +5035,6 @@ function __mapCommissionStatus(v){
 }
 
 async function importOrdersCsvFile(file){
-  // Guard: after “清空数据/彻底重置”，全局状态可能尚未初始化，避免读取 undefined.sellers 直接崩溃
-  if(!window.S){ window.S = {}; }
-  if(!Array.isArray(window.S.sellers)) window.S.sellers = [];
-  if(!Array.isArray(window.S.products)) window.S.products = [];
-  if(!Array.isArray(window.S.orders)) window.S.orders = [];
-  if(!Array.isArray(window.S.batches)) window.S.batches = [];
-  if(!window.S.seq) window.S.seq = {seller:0,product:0,order:0,batch:0};
-  // keep internal pointer consistent
-  try{ S = window.S; }catch(e){}
   const txt = await __readFileTextSmart(file);
   const rows = __parseCSV(txt);
   if(!rows || !rows.length){
@@ -5554,6 +5545,8 @@ function bind(){
     clearMainState().finally(()=>{
       S = blankState();
       save();
+      try{ localStorage.setItem("OPS_CLOUD_AUTOPUSH","0"); }catch(_e){}
+      try{ if(typeof __renderCloudMeta==="function") __renderCloudMeta(); }catch(_e){}
       UI.selected.clear();
       UI.page = 1;
       Actions.cancelSellerEdit();
@@ -5576,6 +5569,8 @@ $("btnHardReset").onclick = async ()=>{
   if(!ok1) return;
   const ok2 = confirm("最后确认一次：真的要从零开始（不可恢复）？");
   if(!ok2) return;
+  try{ localStorage.setItem("OPS_CLOUD_AUTOPUSH","0"); }catch(_e){}
+  try{ if(typeof __renderCloudMeta==="function") __renderCloudMeta(); }catch(_e){}
 
   const delDB = (name)=>new Promise((resolve)=>{
     try{
@@ -12416,6 +12411,26 @@ if(!_autoEnabled){
 
       // override with robust importer
       window.importOrdersCsvFile = async function(file){
+
+        // --- GUARD: after clear/reset, main state variable may be undefined. Rehydrate or create empty state.
+        let __S;
+        try { __S = S; } catch(_e) { __S = window.S; }
+        if (!__S || typeof __S !== 'object') {
+          try {
+            const loaded = (typeof window._readPrimaryState === 'function') ? await window._readPrimaryState() : null;
+            __S = (loaded && loaded.state) ? loaded.state : loaded;
+          } catch(_e) {}
+        }
+        if (!__S || typeof __S !== 'object') {
+          __S = { sellers: [], products: [], orders: [], batches: [], seq: { seller: 1, product: 1, order: 1, batch: 1 } };
+        }
+        __S.sellers = Array.isArray(__S.sellers) ? __S.sellers : [];
+        __S.products = Array.isArray(__S.products) ? __S.products : [];
+        __S.orders = Array.isArray(__S.orders) ? __S.orders : [];
+        __S.batches = Array.isArray(__S.batches) ? __S.batches : [];
+        __S.seq = (__S.seq && typeof __S.seq === 'object') ? __S.seq : { seller: 1, product: 1, order: 1, batch: 1 };
+        window.S = __S;
+        try { S = __S; } catch(_e) {}
         const txt = await window.__readFileTextSmart(file);
         const rows = window.__parseCSV(txt);
         if(!rows || !rows.length){
