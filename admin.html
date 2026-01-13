@@ -4365,7 +4365,7 @@ function batchHandle(commit){
           const buyerCommission = num(r.buyerCommission, 0);
 
           const o = {
-            id: U.id("O", S.seq.order++),
+            id: makeId("O"),
             createdAt: new Date().toISOString(),
             orderId,
             key,
@@ -5070,7 +5070,7 @@ async function importOrdersCsvFile(file){
     // product (optional)
     let product = asin ? productByAsin.get(asin) : null;
     if(!product && asin){
-      const pid = U.id("P", S.seq.product++);
+      const pid = makeId("P");
       const mk = __inferMarketFromName(title) || (seller.market||"");
       product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
       S.products.push(product);
@@ -5102,7 +5102,7 @@ async function importOrdersCsvFile(file){
     const commissionSettled = __mapCommissionStatus(r["返佣状态"]);
 
     const o = {
-      id: U.id("O", S.seq.order++),
+      id: makeId("O"),
       createdAt: now,
       orderId,
       key,
@@ -12348,6 +12348,20 @@ if(!_autoEnabled){
         return "";
       };
 
+      // safe id generator (works even if U.id / seq are not ready)
+      const makeId = (prefix)=>{
+        try{
+          if(typeof U !== "undefined" && U && typeof U.id === "function" && S && S.seq){
+            if(prefix==="S"){ return U.id("S", (S.seq.seller = (S.seq.seller||1))++); }
+            if(prefix==="P"){ return U.id("P", (S.seq.product = (S.seq.product||1))++); }
+            if(prefix==="O"){ return U.id("O", (S.seq.order = (S.seq.order||1))++); }
+          }
+        }catch(e){}
+        const rnd = (crypto && crypto.getRandomValues) ? [...crypto.getRandomValues(new Uint32Array(2))].map(x=>x.toString(16)).join("") : Math.random().toString(16).slice(2);
+        return (prefix||"X") + "_" + Date.now().toString(16) + "_" + rnd;
+      };
+
+
       const normHeader = (h)=>String(h||"").trim()
         .replace(/（/g,"(").replace(/）/g,")")
         .replace(/\s+/g,"")
@@ -12466,23 +12480,25 @@ if(!_autoEnabled){
           const title = String(r.title||"").trim();
 
           if(!sellerName){
-            bad++; if(badLines.length<20) badLines.push(`${idx}: 缺少卖家`);
-            continue;
+            // allow import even if seller is missing; put into placeholder seller
+            bad++; if(badLines.length<20) badLines.push(`${idx}: 缺少卖家(已放入占位卖家)`);
           }
 
           // seller
-          let seller = sellerByName.get(sellerName);
+          const sName = sellerName || "（未指定卖家）";
+          let seller = sellerByName.get(sName);
           if(!seller){
-            const sid = U.id("S", S.seq.seller++);
-            seller = {id:sid, name:sellerName, market:"", fx:0, createdAt: now};
+            const sid = makeId("S");
+            seller = {id:sid, name:sName, market:"", fx:0, createdAt: now};
+            S.sellers = Array.isArray(S.sellers) ? S.sellers : [];
             S.sellers.push(seller);
-            sellerByName.set(sellerName, seller);
+            sellerByName.set(sName, seller);
           }
 
           // product (optional)
           let product = asin ? productByAsin.get(asin) : null;
           if(!product && asin){
-            const pid = U.id("P", S.seq.product++);
+            const pid = makeId("P");
             const mk = (window.__inferMarketFromName?.(title) || seller.market || "");
             product = {
               id:pid,
@@ -12519,7 +12535,7 @@ if(!_autoEnabled){
           const payout = num(r.payout);
 
           const o = window.__newOrderSkeleton ? window.__newOrderSkeleton() : {
-            id: U.id("O", S.seq.order++),
+            id: makeId("O"),
             createdAt: now,
             updatedAt: now,
             principal: { settled:false, amountCny:0, settledAmountCny:0 },
