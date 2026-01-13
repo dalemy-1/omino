@@ -2893,7 +2893,9 @@ function save(){
   try{ UI.__idx && (UI.__idx = {}); }catch(e){}
   _queueSave();
 }
-function saveNow(){
+function saveNow(opts){
+  opts = opts || {};
+
   // 性能：状态变更版本号（用于过滤结果/索引缓存失效）
   try{ S.__rev = (S.__rev||0) + 1; }catch(e){}
   try{ UI.__cache && (UI.__cache = {}); }catch(e){}
@@ -2903,7 +2905,7 @@ function saveNow(){
   let p;
   try{ p = idbSet(MAIN_STATE_KEY, S); }catch(e){ p = Promise.resolve(); }
   // 兜底：localStorage（只保存返款最小快照）
-  persistPayoutSnapshot();
+  if(!opts.skipPayoutSnapshot) persistPayoutSnapshot();
   return p;
 }
 
@@ -3495,23 +3497,83 @@ function getProductById(){
 
 
 function renderOrders(){
-  // 排序：新建订单优先（createdAt 降序），无 createdAt 则保持原顺序
-  const list = filteredOrders().slice().sort((a,b)=>{
-    const ta = (a.createdAt||0), tb = (b.createdAt||0);
-    if(tb!==ta) return tb-ta;
-    // 兜底：按内部自增 id 末尾数字降序（新更大）
-    const na = Number(String(a.id||'').replace(/\D+/g,''))||0;
-    const nb = Number(String(b.id||'').replace(/\D+/g,''))||0;
-    return nb-na;
-  });
-  const total = list.length;
+  // 性能优化：S.orders 已按“新在前”维护，不再对全量结果做 slice+sort（避免万单级卡顿）
+  const seller = $("filterSeller").value || "ALL";
+  const ps = $("filterPrincipal").value || "ALL";
+  const cs = $("filterCommission").value || "ALL";
+  const qraw = ($("filterSearch").value||"").trim().toLowerCase();
+
+  UI.pageSize = Number($("pageSize").value || 100);
+  const pageSize = UI.pageSize;
+  const orders = (S.orders||[]);
+  let total = 0;
+
+  // 先按当前页计算一次；如页码越界，再回退到最后一页重算（最多两次）
+  for(let pass=0; pass<2; pass++){
+    const totalPagesGuess = Math.max(1, Math.ceil(Math.max(1,total||orders.length) / pageSize));
+    UI.page = Math.min(Math.max(1, UI.page), totalPagesGuess);
+
+    const startIdx = (UI.page-1)*pageSize;
+    const endIdx = startIdx + pageSize;
+    const pageList = [];
+    total = 0;
+
+    for(let i=0;i<orders.length;i++){
+      const o = orders[i]; if(!o) continue;
+
+      if(seller!=="ALL" && o.sellerId!==seller) continue;
+
+      if(ps==="UNSETTLED" && o.principal && o.principal.settled) continue;
+      if(ps==="SETTLED" && (!o.principal || !o.principal.settled)) continue;
+
+      if(cs==="UNSETTLED"){
+        if(o.commission && o.commission.settled) continue;
+        if(!canSettleCommission(o)) continue;
+      }
+      if(cs==="SETTLED" && (!o.commission || !o.commission.settled)) continue;
+
+      if(qraw){
+        // 轻量搜索：尽量避免拼接大字符串
+        const oid = String(o.orderId||"").toLowerCase();
+        const asin = String(o.asin||"").toLowerCase();
+        const note = String(o.note||"").toLowerCase();
+        const mk = String(o.market||"").toLowerCase();
+        if(oid.includes(qraw) || asin.includes(qraw) || note.includes(qraw) || mk.includes(qraw)){
+          // ok
+        }else{
+          const sn = String(U.sellerName(o.sellerId)||"").toLowerCase();
+          if(sn.includes(qraw)){
+            // ok
+          }else{
+            const pn = String(o.productId ? U.productName(o.productId) : "").toLowerCase();
+            if(!pn.includes(qraw)) continue;
+          }
+        }
+      }
+
+      if(total>=startIdx && total<endIdx) pageList.push(o);
+      total++;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if(UI.page>totalPages){
+      UI.page = totalPages;
+      continue; // 再跑一遍拿正确页数据
+    }
+
+    // 将 pageList 暂存到 UI，供后续渲染复用
+    UI.__pageOrders = pageList;
+    UI.__pageOrdersTotal = total;
+    break;
+  }
 
   UI.pageSize = Number($("pageSize").value || 100);
   const totalPages = Math.max(1, Math.ceil(total / UI.pageSize));
   UI.page = Math.min(Math.max(1, UI.page), totalPages);
 
   const start = (UI.page-1)*UI.pageSize;
-  const pageList = list.slice(start, start+UI.pageSize);
+    const pageList = UI.__pageOrders || [];
+  const total = UI.__pageOrdersTotal || 0;
 
   $("pagerInfo").textContent = `共 ${total} 单`;
   $("pagerPage").textContent = `第 ${UI.page} / ${totalPages} 页`;
@@ -4301,7 +4363,7 @@ function batchHandle(commit){
         // 持久化与刷新放到 idle/下一帧，减少提交完成瞬间的卡顿
         showBusy("正在保存与刷新列表…");
         runIdle(()=>{
-          try{ saveNow(); }catch(e){}
+          try{ saveNow({skipPayoutSnapshot:true}); }catch(e){}
           runIdle(()=>{
             try{ refreshAfterOrderChange(); }catch(e){}
             hideBusy();
