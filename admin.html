@@ -1512,6 +1512,8 @@ window.$$$ = window.$$$ || function(sel, root){
       <div class="row" style="margin-top:10px;justify-content:flex-end;gap:10px;flex-wrap:wrap">
         <button class="btn" id="btnSettleDrafts">收款草稿箱</button>
         <button class="btn" id="btnExportOrdersCsv">导出订单 CSV（按当前筛选）</button>
+        <button class="btn" id="btnImportOrdersCsv">导入订单 CSV（明细）</button>
+        <input id="fileImportOrdersCsv" type="file" accept=".csv" class="hidden"/>
       </div>
 
       <div class="pager" style="margin-top:10px">
@@ -3497,98 +3499,153 @@ function getProductById(){
 
 
 function renderOrders(){
-  // 高性能：避免对 1w+ 订单做全量 filter/sort；仅扫描统计 total，并收集当前页需要的行
-  const seller = $("filterSeller").value || "ALL";
-  const ps = $("filterPrincipal").value || "ALL";
-  const cs = $("filterCommission").value || "ALL";
-  const qraw = ($("filterSearch").value||"").trim().toLowerCase();
+  const tbody = $("orderRows");
+  if(!tbody) return;
 
-  UI.pageSize = Number($("pageSize").value || 100);
-  const pageSize = UI.pageSize;
+  // --- filters snapshot
+  const seller = ($("filterSeller")?$("filterSeller").value:"ALL") || "ALL";
+  const ps = ($("filterPrincipal")?$("filterPrincipal").value:"ALL") || "ALL";
+  const cs = ($("filterCommission")?$("filterCommission").value:"ALL") || "ALL";
+  const payoutSt = ($("filterPayoutStatus")?$("filterPayoutStatus").value:"") || "";
+  const q = (($("filterSearch")?$("filterSearch").value:"")||"").trim().toLowerCase();
 
-  const orders = (S.orders||[]);
-  const match = (o)=>{
-    if(seller!=="ALL" && o.sellerId!==seller) return false;
-    if(ps==="UNSETTLED" && o.principal && o.principal.settled) return false;
-    if(ps==="SETTLED" && !(o.principal && o.principal.settled)) return false;
-    if(cs==="UNSETTLED"){
-      if(o.commission && o.commission.settled) return false;
-    }else if(cs==="SETTLED"){
-      if(!(o.commission && o.commission.settled)) return false;
-    }
-    if(qraw){
-      // 仅在有搜索时做字符串拼接
-      const oid = String(o.orderId||"").toLowerCase();
-      const asin = String(o.asin||"").toLowerCase();
-      const note = String(o.note||"").toLowerCase();
-      const pname = o.productId ? String(U.productName(o.productId)||"").toLowerCase() : "";
-      if(!oid.includes(qraw) && !asin.includes(qraw) && !note.includes(qraw) && !pname.includes(qraw)) return false;
-    }
-    return true;
+  // --- helpers
+  const sellerMap = new Map((S.sellers||[]).map(s=>[s.id, s]));
+  const productMap = new Map((S.products||[]).map(p=>[p.id, p]));
+  const selected = UI.selectedOrderIds || new Set();
+
+  const matchQ = (o)=>{
+    if(!q) return true;
+    const sName = (sellerMap.get(o.sellerId)?.name||"").toLowerCase();
+    const pName = (productMap.get(o.productId)?.name||o.title||"").toLowerCase();
+    return String(o.orderId||"").toLowerCase().includes(q)
+      || String(o.asin||"").toLowerCase().includes(q)
+      || sName.includes(q)
+      || pName.includes(q);
   };
 
-  // pass1: 统计总数
-  let totalCount = 0;
-  for(const o of orders){ if(match(o)) totalCount++; }
+  const match = (o)=>{
+    if(seller!=="ALL" && o.sellerId!==seller) return false;
 
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-  UI.page = Math.min(Math.max(1, UI.page), totalPages);
+    // principal filter
+    const p = o.principal || {};
+    const pSettled = !!p.settled;
+    if(ps==="PENDING" && pSettled) return false;
+    if(ps==="SETTLED" && !pSettled) return false;
 
-  // pass2: 收集当前页
-  const startIdx = (UI.page-1)*pageSize;
+    // commission filter
+    const c = o.commission || {};
+    const cSettled = !!c.settled;
+    if(cs==="PENDING" && cSettled) return false;
+    if(cs==="SETTLED" && !cSettled) return false;
+
+    // payout filter (optional)
+    if(payoutSt){
+      const st = getPayoutStatus(o);
+      if(st !== payoutSt) return false;
+    }
+
+    return matchQ(o);
+  };
+
+  // --- compute total & page slice without building full arrays
+  const pageSize = UI.pageSize || 100;
+  const page = Math.max(1, UI.page || 1);
+
+  let total = 0;
+  const startIdx = (page-1)*pageSize;
   const endIdx = startIdx + pageSize;
-  const pageList = [];
-  let idx = 0;
-  for(const o of orders){
+
+  const pageItems = [];
+  let seen = 0;
+
+  for(const o of (S.orders||[])){
     if(!match(o)) continue;
-    if(idx>=startIdx && idx<endIdx) pageList.push(o);
-    idx++;
-    if(idx>=endIdx && pageList.length>=pageSize) break;
+    if(total>=startIdx && total<endIdx){
+      pageItems.push(o);
+    }
+    total++;
+    if(total>=endIdx && pageItems.length>=pageSize) {
+      // we already have enough items for current page
+      // but still need accurate total; keep counting
+      continue;
+    }
   }
 
-  // 更新分页信息
-  $("pagerInfo").textContent = `共 ${totalCount} 单`;
-  $("pagerPage").textContent = `第 ${UI.page} / ${totalPages} 页`;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if(page>totalPages){ UI.page = totalPages; return renderOrders(); }
 
-  // 渲染表格（仅当前页）
-  const rows = pageList.map(o=>{
-    const sellerName = U.sellerName(o.sellerId);
-    const pName = o.productId ? U.productName(o.productId) : (o.note||"");
-    const pCny = currentPrincipalCny(o);
-    const cm = commissionShould(o);
+  // pager info
+  if($("pagerInfo")) $("pagerInfo").textContent = `共 ${total} 单`;
+  if($("pagerPage")) $("pagerPage").textContent = `第 ${UI.page} / ${totalPages} 页`;
+  if($("pagerJump")) $("pagerJump").placeholder = `例如 ${Math.min(3,totalPages)}`;
 
-    const pSett = U.badgeSettle(!!(o.principal && o.principal.settled));
-    const cSett = (o.commission && o.commission.settled) ? U.badgeSettle(true) :
-      (canSettleCommission(o) ? U.badgeSettle(false) : `<span class="badge pending">未回评</span>`);
+  // --- segmented rendering (rAF chunks)
+  tbody.innerHTML = `<tr><td colspan="18" class="small">渲染中…</td></tr>`;
 
-    const checked = UI.selected && UI.selected.has(o.orderId) ? "checked" : "";
+  // Build rows in chunks to avoid blocking (especially after batch import)
+  const chunkSize = 20;
+  let idx = 0;
 
-    return `<tr>
-      <td><input type="checkbox" data-oid="${esc(o.orderId)}" ${checked} onchange="Actions.toggleSelect('${esc(o.orderId)}')"/></td>
-      <td>${esc(U.dateMD(o.date))}</td>
-      <td class="mono">${esc(o.orderId)}</td>
-      <td>${esc(sellerName)}</td>
-      <td>${esc(o.market)}</td>
-      <td>${esc(pName)}</td>
-      <td class="mono">${esc(o.asin||"")}</td>
-      <td>${U.badgeReview(o.review && o.review.status)}</td>
-      <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
-      <td class="right">${esc(U.money(o.amount||0))}</td>
-      <td class="right">${esc(U.money(o.discount||0))}</td>
-      <td class="right">${esc(U.money(pCny))}</td>
-      <td>${pSett}</td>
-      <td class="right">${esc(U.money(cm))}</td>
-      <td>${cSett}</td>
-      <td class="right action-col">
-        <button class="btn" onclick="Actions.editOrder('${esc(o.id)}')">编辑</button>
-        <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
-        <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
-      </td>
-    </tr>`;
-  }).join("");
-$("orderRows").innerHTML = rows || `<tr><td colspan="16" class="small">暂无订单</td></tr>`;
-  renderSelectedTags();
+  const renderChunk = ()=>{
+    const frag = document.createDocumentFragment();
+    for(let k=0; k<chunkSize && idx<pageItems.length; k++, idx++){
+      const o = pageItems[idx];
+      const sellerName = sellerMap.get(o.sellerId)?.name || "";
+      const pObj = productMap.get(o.productId);
+      const pName = (pObj && pObj.name) ? pObj.name : (o.title||"");
+      const pCny = (o.principal && (o.principal.amountCny||0)) || 0;
+      const cm = (o.commission && (o.commission.amountCny||0)) || 0;
+      const pSett = (o.principal && o.principal.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
+      const cSett = (o.commission && o.commission.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
+      const checked = selected.has(o.orderId) ? "checked" : "";
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><input type="checkbox" data-oid="${esc(o.orderId)}" ${checked} onchange="Actions.toggleSelect('${esc(o.orderId)}')"/></td>
+        <td>${esc(U.dateMD(o.date))}</td>
+        <td class="mono">${esc(o.orderId)}</td>
+        <td>${esc(sellerName)}</td>
+        <td>${esc(o.market||"")}</td>
+        <td>${esc(pName)}</td>
+        <td class="mono">${esc(o.asin||"")}</td>
+        <td>${U.badgeReview(o.review && o.review.status)}</td>
+        <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
+        <td class="right">${esc(U.money(o.amount||0))}</td>
+        <td class="right">${esc(U.money(o.discount||0))}</td>
+        <td class="right">${esc(U.money(o.buyerCommission||0))}</td>
+        <td class="right">${esc(U.money(pCny))}</td>
+        <td>${pSett}</td>
+        <td class="right">${esc(U.money(cm))}</td>
+        <td>${cSett}</td>
+        <td class="right action-col">
+          <button class="btn" onclick="Actions.editOrder('${esc(o.id)}')">编辑</button>
+          <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
+          <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
+        </td>
+      `;
+      frag.appendChild(tr);
+    }
+
+    // first chunk: clear placeholder
+    if(idx<=chunkSize){
+      tbody.innerHTML = "";
+    }
+    tbody.appendChild(frag);
+
+    if(idx < pageItems.length){
+      requestAnimationFrame(renderChunk);
+    }else{
+      if(pageItems.length===0){
+        tbody.innerHTML = `<tr><td colspan="18" class="small">暂无订单</td></tr>`;
+      }
+      renderSelectedTags();
+    }
+  };
+
+  requestAnimationFrame(renderChunk);
 }
+
 
 /* ===================== Export Orders CSV ===================== */
 function exportOrdersCsv(){
@@ -4908,6 +4965,183 @@ function __parseCSV(text){
   }
   return rows;
 }
+
+async function __readFileTextSmart(file){
+  const buf = await file.arrayBuffer();
+  // try utf-8 first, fallback to gb18030/gbk (common in CN exports)
+  try{
+    return new TextDecoder("utf-8",{fatal:true}).decode(buf);
+  }catch(e){
+    try{ return new TextDecoder("gb18030",{fatal:false}).decode(buf); }catch(_){}
+    try{ return new TextDecoder("gbk",{fatal:false}).decode(buf); }catch(_){}
+    return new TextDecoder().decode(buf);
+  }
+}
+
+function __inferMarketFromName(name){
+  const s = String(name||"");
+  if(s.startsWith("英国")) return "UK";
+  if(s.startsWith("德国")) return "DE";
+  if(s.startsWith("法国")) return "FR";
+  if(s.startsWith("意大利")) return "IT";
+  if(s.startsWith("西班牙")) return "ES";
+  if(s.startsWith("加拿大")) return "CA";
+  if(s.startsWith("日本")) return "JP";
+  if(s.startsWith("美国")) return "US";
+  return "";
+}
+
+function __mapReviewReq(v){
+  const s = String(v||"").trim();
+  if(!s) return "auto";
+  if(s.includes("视频")) return "VIDEO";
+  if(s.includes("图片")) return "IMAGE";
+  if(s.includes("免评FB")) return "WAIVED_FB";
+  if(s.includes("免评") && (s.includes("点星") || s.toLowerCase().includes("rating"))) return "WAIVED_RATING";
+  if(s.includes("免评")) return "WAIVED";
+  if(s.includes("文字")) return "TEXT";
+  return "TEXT";
+}
+function __mapReviewStatus(v){
+  const s = String(v||"").trim();
+  if(!s) return "PENDING";
+  if(["已上评","已留评","DONE","done","已完成"].includes(s)) return "DONE";
+  if(["免评","WAIVED","waived","已免评"].includes(s)) return "WAIVED";
+  return "PENDING";
+}
+function __mapSettleStatus(v){
+  const s = String(v||"").trim();
+  if(!s) return false;
+  if(["已收款","已结算","已收","SETTLED","settled"].includes(s)) return true;
+  return false;
+}
+function __mapCommissionStatus(v){
+  const s = String(v||"").trim();
+  if(!s) return false;
+  if(["已收","已返佣","已结算","SETTLED","settled"].includes(s)) return true;
+  return false;
+}
+
+async function importOrdersCsvFile(file){
+  const txt = await __readFileTextSmart(file);
+  const rows = __parseCSV(txt);
+  if(!rows || !rows.length){
+    showNotice("导入失败","CSV 为空或无法解析。");
+    return;
+  }
+
+  // Pre-index
+  const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
+  const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
+  const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
+  const now = Date.now();
+
+  const newOrders = [];
+  let add=0, skip=0;
+
+  for(const r of rows){
+    const orderId = String(r["订单号"]||r["订单号(19位)"]||r["订单号（19位）"]||"").trim();
+    if(!orderId) continue;
+    const sellerName = String(r["卖家"]||"").trim();
+    const asin = String(r["ASIN"]||"").trim();
+    const title = String(r["产品名称"]||r["产品名"]||r["产品名称/标题"]||"").trim();
+
+    // seller
+    let seller = sellerByName.get(sellerName);
+    if(!seller){
+      const sid = U.id("S", S.seq.seller++);
+      seller = {id:sid, name:sellerName || ("卖家"+sid), market:"", fx:0, createdAt: now};
+      S.sellers.push(seller);
+      sellerByName.set(sellerName, seller);
+    }
+
+    // product (optional)
+    let product = asin ? productByAsin.get(asin) : null;
+    if(!product && asin){
+      const pid = U.id("P", S.seq.product++);
+      const mk = __inferMarketFromName(title) || (seller.market||"");
+      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
+      S.products.push(product);
+      productByAsin.set(asin, product);
+    }
+
+    const market = __inferMarketFromName(title) || (product?.market||seller.market||"");
+    const currency = U.marketToCurrency(market||"") || "";
+
+    const key = U.orderKey(seller.id, orderId, asin||"");
+    if(existingKeys.has(key)){ skip++; continue; }
+    existingKeys.add(key);
+
+    const amount = U.toNum(r["单价"]);
+    const discount = U.toNum(r["卖家折扣"]);
+    const buyerCommission = U.toNum(r["买手佣金"]);
+    const fx = U.toNum(r["汇率"]);
+    const principalCny = U.toNum(r["本金金额"]);
+    const commissionCny = U.toNum(r["佣金"]);
+    const estRecv = U.toNum(r["预估收款"]);
+    const payoutAmt = U.toNum(r["返款金额"]);
+
+    const dateRaw = String(r["下单时间"]||"").trim();
+    const date = U.normalizeDate ? U.normalizeDate(dateRaw) : dateRaw.replace(/\//g,"-");
+
+    const reviewReq = __mapReviewReq(r["留评需求"]);
+    const reviewStatus = __mapReviewStatus(r["留评状态"]);
+    const principalSettled = __mapSettleStatus(r["收款状态"]);
+    const commissionSettled = __mapCommissionStatus(r["返佣状态"]);
+
+    const o = {
+      id: U.id("O", S.seq.order++),
+      createdAt: now,
+      orderId,
+      key,
+      sellerId: seller.id,
+      productId: product ? product.id : "",
+      market,
+      currency,
+      amount,
+      discount,
+      buyerCommission,
+      asin,
+      title: title,
+      fx,
+      reviewReq,
+      note: "",
+      date: date || U.today(),
+      principal: { settled: principalSettled, batchId: null, amountCny: principalCny||0, settledAmountCny: principalSettled?(principalCny||0):0 },
+      commission:{ settled: commissionSettled, batchId: null, amountCny: commissionCny||0, settledAmountCny: commissionSettled?(commissionCny||0):0 },
+      review: { status: reviewStatus, doneType: null, date:"", link:"", note:"" }
+    };
+
+    // payout info (best-effort)
+    if(payoutAmt>0){
+      o.payout = { status:"paid", amountCny: payoutAmt, paidAt: now };
+      o.payout_status = "paid";
+    }else{
+      // default internal logic will treat DONE -> payout_pending, else not_ready
+      o.payout = o.payout || {};
+    }
+    // optional fields
+    o.estimatedReceivableCny = estRecv || 0;
+
+    newOrders.push(o);
+    add++;
+  }
+
+  if(add===0){
+    showNotice("导入完成", `无新增订单（跳过重复 ${skip}）。`);
+    return;
+  }
+
+  // New first
+  S.orders = newOrders.reverse().concat(S.orders||[]);
+  showNotice("导入完成", `新增 ${add} 单，跳过重复 ${skip}。`);
+
+  // save & refresh (avoid heavy payout snapshot during bulk import)
+  try{ saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); try{ saveNow(); }catch(_){} }
+  refreshAfterOrderChange();
+}
+
+
 function __normKey(k){
   return String(k||"").trim().toLowerCase().replace(/\s+/g,"").replace(/[_\-]/g,"");
 }
@@ -5684,6 +5918,17 @@ $("btnHardReset").onclick = async ()=>{
 
   // export orders csv
   $("btnExportOrdersCsv").onclick = exportOrdersCsv;
+
+  // import orders csv (detail)
+  $("btnImportOrdersCsv").onclick = ()=> $("fileImportOrdersCsv").click();
+  $("fileImportOrdersCsv").onchange = async (ev)=>{
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if(!f) return;
+    try{ await importOrdersCsvFile(f); }
+    catch(e){ alert("导入失败：" + (e?.message || e)); console.error(e); }
+  };
+
 
   // pagination
   $("pageSize").onchange = ()=>{ UI.page=1; renderOrders(); };
