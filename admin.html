@@ -5045,7 +5045,9 @@ async function importOrdersCsvFile(file){
   // Pre-index
   const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
   const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
-  const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
+  const hadExisting = Array.isArray(S.orders) && S.orders.length>0;
+  const orderKeyFn = (sellerName, orderId, asin) => `${String(sellerName||"").trim()}||${String(orderId||"").trim()}||${String(asin||"").trim()}`;
+  const existingKeys = hadExisting ? new Set((S.orders||[]).map(o=>o.key || orderKeyFn(o.sellerName||"", o.orderId||o.orderNo||"", o.asin||""))) : new Set();
   const now = Date.now();
 
   const newOrders = [];
@@ -5072,7 +5074,8 @@ async function importOrdersCsvFile(file){
     if(!product && asin){
       const pid = makeId("P");
       const mk = __inferMarketFromName(title) || (seller.market||"");
-      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
+      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id,
+      sellerName: seller.name, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
       S.products.push(product);
       productByAsin.set(asin, product);
     }
@@ -5080,9 +5083,11 @@ async function importOrdersCsvFile(file){
     const market = __inferMarketFromName(title) || (product?.market||seller.market||"");
     const currency = U.marketToCurrency(market||"") || "";
 
-    const key = U.orderKey(seller.id, orderId, asin||"");
-    if(existingKeys.has(key)){ skip++; continue; }
-    existingKeys.add(key);
+    const key = orderKeyFn(sellerName||seller.name||"", orderId, asin||"");
+    if(hadExisting){
+      if(existingKeys.has(key)){ skip++; continue; }
+      existingKeys.add(key);
+    }
 
     const amount = U.toNum(r["单价"]);
     const discount = U.toNum(r["卖家折扣"]);
