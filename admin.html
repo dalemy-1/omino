@@ -12352,9 +12352,9 @@ if(!_autoEnabled){
       const makeId = (prefix)=>{
         try{
           if(typeof U !== "undefined" && U && typeof U.id === "function" && S && S.seq){
-            if(prefix==="S"){ return U.id("S", (S.seq.seller = (S.seq.seller||1))++); }
-            if(prefix==="P"){ return U.id("P", (S.seq.product = (S.seq.product||1))++); }
-            if(prefix==="O"){ return U.id("O", (S.seq.order = (S.seq.order||1))++); }
+            if(prefix==="S"){ const n=(S.seq.seller||1); S.seq.seller=n+1; return U.id("S", n); }
+            if(prefix==="P"){ const n=(S.seq.product||1); S.seq.product=n+1; return U.id("P", n); }
+            if(prefix==="O"){ const n=(S.seq.order||1); S.seq.order=n+1; return U.id("O", n); }
           }
         }catch(e){}
         const rnd = (crypto && crypto.getRandomValues) ? [...crypto.getRandomValues(new Uint32Array(2))].map(x=>x.toString(16)).join("") : Math.random().toString(16).slice(2);
