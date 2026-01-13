@@ -2820,7 +2820,7 @@ function openMainDB(){
 // Problem: very large S (thousands of orders) saved as a single record can fail or be slow on some browsers.
 // Solution: store meta in main_state_v1 and store orders in chunk records within the same kv store.
 // Backward compatible: if main_state_v1 is a full state, we load it as-is.
-const SPLIT_STORE_ENABLED = true;
+const SPLIT_STORE_ENABLED = false;
 const SPLIT_MAX_ORDERS_PER_CHUNK = 1200; // conservative for Chrome/Edge
 const SPLIT_KEY_MANIFEST = MAIN_STATE_KEY + "__split_manifest_v1";
 const SPLIT_KEY_CHUNK_PREFIX = MAIN_STATE_KEY + "__orders_chunk_v1__"; // + index
