@@ -148,36 +148,6 @@ details summary{cursor:pointer;font-weight:900;color:#1f2937}
   z-index:4;
   box-shadow:-10px 0 14px rgba(15,23,42,.06);
 }
-
-.orders-table th.action-col, .orders-table td.action-col{min-width:72px; width:72px;}
-.op-wrap{position:relative; display:inline-block;}
-.kebab{padding:6px 10px; line-height:1; font-weight:700;}
-.op-menu{
-  position:absolute;
-  right:0;
-  top:calc(100% + 6px);
-  min-width:120px;
-  background:#fff;
-  border:1px solid #e5e7eb;
-  border-radius:12px;
-  box-shadow:0 12px 28px rgba(15,23,42,.14);
-  padding:6px;
-  display:none;
-  z-index:30;
-}
-.op-menu[data-open="1"]{display:block;}
-.op-menu button{
-  width:100%;
-  text-align:left;
-  border:0;
-  background:transparent;
-  padding:8px 10px;
-  border-radius:10px;
-  cursor:pointer;
-  font-size:13px;
-}
-.op-menu button:hover{background:#f3f4f6;}
-.op-menu button.danger{color:#b91c1c;}
 .orders-table th.action-col{z-index:6;}
 
 /* === UI compact: actions column === */
@@ -3661,14 +3631,9 @@ function renderOrders(){
         <td class="right">${esc(U.money(cm))}</td>
         <td>${cSett}</td>
         <td class="right action-col">
-          <div class="op-wrap" data-id="${esc(o.id)}">
-            <button class="btn sm kebab" type="button" data-op="menu" data-id="${esc(o.id)}">···</button>
-            <div class="op-menu" data-open="0">
-              <button type="button" data-op="edit" data-id="${esc(o.id)}">编辑</button>
-              <button type="button" data-op="review" data-id="${esc(o.id)}">回评</button>
-              <button type="button" class="danger" data-op="delete" data-id="${esc(o.id)}">删除</button>
-            </div>
-          </div>
+          <button class="btn" onclick="Actions.editOrder('${esc(o.id)}')">编辑</button>
+          <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
+          <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
         </td>
       `;
       frag.appendChild(tr);
@@ -4099,65 +4064,6 @@ const Actions = {
     save(); markDirty(["batches","orders","kpi","payout"]); scheduleRender();
   }
 };
-
-function initOrderActionMenu(){
-  const tbody = $("orderRows");
-  if(!tbody || tbody.__opmenu_bound) return;
-  tbody.__opmenu_bound = true;
-
-  function closeAll(){
-    document.querySelectorAll(".op-menu[data-open='1']").forEach(el=>{ el.setAttribute("data-open","0"); });
-  }
-
-  // click delegation inside table body
-  tbody.addEventListener("click",(ev)=>{
-    const t = ev.target;
-    if(!(t instanceof Element)) return;
-
-    const op = t.getAttribute("data-op");
-    const id = t.getAttribute("data-id");
-
-    if(op === "menu"){
-      ev.preventDefault();
-      ev.stopPropagation();
-      // toggle this row menu, close others
-      closeAll();
-      const wrap = t.closest(".op-wrap");
-      const menu = wrap ? wrap.querySelector(".op-menu") : null;
-      if(menu){
-        menu.setAttribute("data-open","1");
-      }
-      return;
-    }
-
-    if(op === "edit" && id){
-      ev.preventDefault();
-      closeAll();
-      try{ Actions.editOrder(id); }catch(e){ console.error(e); }
-      return;
-    }
-    if(op === "review" && id){
-      ev.preventDefault();
-      closeAll();
-      try{ Actions.openReview(id); }catch(e){ console.error(e); }
-      return;
-    }
-    if(op === "delete" && id){
-      ev.preventDefault();
-      closeAll();
-      try{ Actions.deleteOrder(id); }catch(e){ console.error(e); }
-      return;
-    }
-  });
-
-  // click outside closes
-  document.addEventListener("click", ()=>{ closeAll(); });
-
-  // ESC closes
-  document.addEventListener("keydown",(ev)=>{
-    if(ev.key === "Escape") closeAll();
-  });
-}
 
 /* ===================== Product -> Order autofill ===================== */
 function applyProductToOrder(){
@@ -6052,8 +5958,7 @@ $("btnHardReset").onclick = async ()=>{
     el.addEventListener("focus", ()=>{ try{ el.select(); }catch(e){} });
   });
   // 新增：返款模块绑定
-    try{ initOrderActionMenu(); }catch(e){ console.warn('initOrderActionMenu failed', e); }
-try{ bindPayout(); }catch(e){ console.warn('bindPayout failed', e); }
+  try{ bindPayout(); }catch(e){ console.warn('bindPayout failed', e); }
 }
 
 
