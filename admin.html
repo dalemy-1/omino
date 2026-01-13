@@ -5035,6 +5035,15 @@ function __mapCommissionStatus(v){
 }
 
 async function importOrdersCsvFile(file){
+  // Guard: after “清空数据/彻底重置”，全局状态可能尚未初始化，避免读取 undefined.sellers 直接崩溃
+  if(!window.S){ window.S = {}; }
+  if(!Array.isArray(window.S.sellers)) window.S.sellers = [];
+  if(!Array.isArray(window.S.products)) window.S.products = [];
+  if(!Array.isArray(window.S.orders)) window.S.orders = [];
+  if(!Array.isArray(window.S.batches)) window.S.batches = [];
+  if(!window.S.seq) window.S.seq = {seller:0,product:0,order:0,batch:0};
+  // keep internal pointer consistent
+  try{ S = window.S; }catch(e){}
   const txt = await __readFileTextSmart(file);
   const rows = __parseCSV(txt);
   if(!rows || !rows.length){
