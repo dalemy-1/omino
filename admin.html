@@ -427,7 +427,7 @@ function getCloudCfg(){
     const first = (keys)=>{
       for(const k of keys){
         const v = (localStorage.getItem(k)||"").trim();
-        if(v) return sanitizeStateForSave(v);
+        if(v) return v;
       }
       return "";
     };
@@ -824,7 +824,7 @@ function _mergeListById(localArr, cloudArr){
   };
   (cloudArr||[]).forEach(it=>push(it,"cloud"));
   (localArr||[]).forEach(it=>push(it,"local"));
-  return sanitizeStateForSave(out);
+  return out;
 }
 function mergeSnapshotsPlanA(localSnap, cloudSnap){
   const L = localSnap && typeof localSnap==="object" ? localSnap : {};
@@ -2815,125 +2815,6 @@ function openMainDB(){
   });
   return __mainDbPromise;
 }
-
-// ===== Split-store persistence (v1) =====
-// Problem: very large S (thousands of orders) saved as a single record can fail or be slow on some browsers.
-// Solution: store meta in main_state_v1 and store orders in chunk records within the same kv store.
-// Backward compatible: if main_state_v1 is a full state, we load it as-is.
-const SPLIT_STORE_ENABLED = false;
-const SPLIT_MAX_ORDERS_PER_CHUNK = 1200; // conservative for Chrome/Edge
-const SPLIT_KEY_MANIFEST = MAIN_STATE_KEY + "__split_manifest_v1";
-const SPLIT_KEY_CHUNK_PREFIX = MAIN_STATE_KEY + "__orders_chunk_v1__"; // + index
-
-function __approxJsonSize(obj){
-  try{ return new Blob([JSON.stringify(obj)]).size; }catch(_e){ return 0; }
-}
-
-
-  // --- Persist Safety: sanitize state before saving (avoid non-clonable UI refs) ---
-  function sanitizeStateForSave(state){
-    try{
-      const seen = new WeakSet();
-      const safe = JSON.parse(JSON.stringify(state, (k,v)=>{
-        // Drop UI / runtime-only fields
-        if (k && (k.startsWith("__ui") || k.startsWith("__dom") || k.startsWith("_el") || k.startsWith("_node") || k==="__row" || k==="__tr" || k==="__cache")) return undefined;
-        // Drop DOM nodes / Window objects
-        if (v && typeof v === "object"){
-          if (typeof Node !== "undefined" && v instanceof Node) return undefined;
-          if (typeof Window !== "undefined" && v === window) return undefined;
-          if (seen.has(v)) return undefined;
-          seen.add(v);
-        }
-        return v;
-      }));
-      // Ensure essential arrays exist
-      safe.sellers = Array.isArray(safe.sellers)? safe.sellers : [];
-      safe.products = Array.isArray(safe.products)? safe.products : [];
-      safe.orders = Array.isArray(safe.orders)? safe.orders : [];
-      safe.batches = Array.isArray(safe.batches)? safe.batches : [];
-      return safe;
-    }catch(e){
-      // Fallback: minimal clone
-      return {
-        sellers: Array.isArray(state?.sellers)? state.sellers : [],
-        products: Array.isArray(state?.products)? state.products : [],
-        orders: Array.isArray(state?.orders)? state.orders : [],
-        batches: Array.isArray(state?.batches)? state.batches : [],
-        meta: state?.meta || {}
-      };
-    }
-  }
-
-async function saveMainStateSmart(state){
-    state = sanitizeStateForSave(state);
-
-  if(!SPLIT_STORE_ENABLED) return await idbSet(MAIN_STATE_KEY, state);
-
-  const orders = Array.isArray(state && state.orders) ? state.orders : [];
-  // Heuristics: split when orders is big OR JSON is big.
-  let needSplit = orders.length > SPLIT_MAX_ORDERS_PER_CHUNK;
-  if(!needSplit){
-    const sz = __approxJsonSize(state);
-    if(sz && sz > 1.8 * 1024 * 1024) needSplit = true; // ~1.8MB
-  }
-
-  if(!needSplit){
-    // Clean any old split remnants (best-effort)
-    try{ await idbDel(SPLIT_KEY_MANIFEST); }catch(_e){}
-    // We do not enumerate and delete old chunks (not supported without cursor here); it's okay.
-    return await idbSet(MAIN_STATE_KEY, state);
-  }
-
-  // Build meta without orders
-  const meta = Object.assign({}, state);
-  meta.orders = []; // keep shape
-  meta.__split_store_v1 = true;
-
-  const chunks = [];
-  for(let i=0;i<orders.length;i+=SPLIT_MAX_ORDERS_PER_CHUNK){
-    chunks.push(orders.slice(i, i+SPLIT_MAX_ORDERS_PER_CHUNK));
-  }
-
-  const manifest = {
-    v: 1,
-    ts: Date.now(),
-    totalOrders: orders.length,
-    chunks: chunks.length,
-    chunkSize: SPLIT_MAX_ORDERS_PER_CHUNK
-  };
-
-  // Write meta + manifest + chunks
-  await idbSet(MAIN_STATE_KEY, meta);
-  await idbSet(SPLIT_KEY_MANIFEST, manifest);
-  for(let i=0;i<chunks.length;i++){
-    await idbSet(SPLIT_KEY_CHUNK_PREFIX + String(i), chunks[i]);
-  }
-  return true;
-}
-
-async function loadMainStateSmart(){
-  // 1) load main meta/state
-  const v = await idbGet(MAIN_STATE_KEY);
-  if(!v) return null;
-
-  // 2) if not split-store payload, return as-is
-  if(!v.__split_store_v1) return v;
-
-  // 3) split-store: load manifest and chunks
-  const mf = await idbGet(SPLIT_KEY_MANIFEST);
-  const out = Object.assign({}, v);
-  out.orders = [];
-  if(!mf || !mf.chunks){
-    return out;
-  }
-  for(let i=0;i<mf.chunks;i++){
-    const part = await idbGet(SPLIT_KEY_CHUNK_PREFIX + String(i));
-    if(Array.isArray(part)) out.orders = out.orders.concat(part);
-  }
-  return out;
-}
-// ===== End Split-store persistence =====
-
 async function idbGet(key){
   const db = await openMainDB();
   return await new Promise((resolve, reject)=>{
@@ -2984,7 +2865,7 @@ function _queueSave(){
     __saveInFlight = true;
     try{
       // 只保存当前内存态（主库）
-      await saveMainStateSmart(S);
+      await idbSet(MAIN_STATE_KEY, S);
       __savePending = false;
     }catch(e){
       console.error(e);
@@ -3036,7 +2917,7 @@ function saveNow(opts){
 
   // 主库：IndexedDB
   let p;
-  try{ p = saveMainStateSmart(S); }catch(e){ p = Promise.resolve(); }
+  try{ p = idbSet(MAIN_STATE_KEY, S); }catch(e){ p = Promise.resolve(); }
   // 兜底：localStorage（只保存返款最小快照）
   if(!opts.skipPayoutSnapshot) persistPayoutSnapshot();
   return p;
@@ -3184,7 +3065,7 @@ function normalizeImported(obj){
 async function load(){
   // 1) 先读 IndexedDB 主库
   try{
-    const v = await loadMainStateSmart();
+    const v = await idbGet(MAIN_STATE_KEY);
     if(v){
       S = normalizeImported(v);
       try{ restorePayoutSnapshot(S); }catch(e){}
@@ -3203,7 +3084,7 @@ async function load(){
       const obj = normalizeImported(JSON.parse(raw));
       S = obj;
       computeSeq();
-      try{ await saveMainStateSmart(S); }catch(_e){}
+      try{ await idbSet(MAIN_STATE_KEY, S); }catch(_e){}
       try{ localStorage.removeItem(STORAGE_KEY); }catch(_e){}
       return;
     }
@@ -3363,7 +3244,6 @@ function renderKPI(){
   $("kpiP").textContent = S.orders.filter(o=>!o.principal.settled).length;
   $("kpiC").textContent = S.orders.filter(o=>!o.commission.settled && canSettleCommission(o)).length;
 }
-window.renderKPI = renderKPI;
 function updateProductPreview(){
   const sellerId = $("productSeller").value;
   if(!sellerId){ $("productPreview").value=""; return; }
@@ -4485,7 +4365,7 @@ function batchHandle(commit){
           const buyerCommission = num(r.buyerCommission, 0);
 
           const o = {
-            id: makeId("O"),
+            id: U.id("O", S.seq.order++),
             createdAt: new Date().toISOString(),
             orderId,
             key,
@@ -5165,9 +5045,7 @@ async function importOrdersCsvFile(file){
   // Pre-index
   const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
   const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
-  const hadExisting = Array.isArray(S.orders) && S.orders.length>0;
-  const orderKeyFn = (sellerName, orderId, asin) => `${String(sellerName||"").trim()}||${String(orderId||"").trim()}||${String(asin||"").trim()}`;
-  const existingKeys = hadExisting ? new Set((S.orders||[]).map(o=>o.key || orderKeyFn(o.sellerName||"", o.orderId||o.orderNo||"", o.asin||""))) : new Set();
+  const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
   const now = Date.now();
 
   const newOrders = [];
@@ -5192,10 +5070,9 @@ async function importOrdersCsvFile(file){
     // product (optional)
     let product = asin ? productByAsin.get(asin) : null;
     if(!product && asin){
-      const pid = makeId("P");
+      const pid = U.id("P", S.seq.product++);
       const mk = __inferMarketFromName(title) || (seller.market||"");
-      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id,
-      sellerName: seller.name, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
+      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
       S.products.push(product);
       productByAsin.set(asin, product);
     }
@@ -5203,11 +5080,9 @@ async function importOrdersCsvFile(file){
     const market = __inferMarketFromName(title) || (product?.market||seller.market||"");
     const currency = U.marketToCurrency(market||"") || "";
 
-    const key = orderKeyFn(sellerName||seller.name||"", orderId, asin||"");
-    if(hadExisting){
-      if(existingKeys.has(key)){ skip++; continue; }
-      existingKeys.add(key);
-    }
+    const key = U.orderKey(seller.id, orderId, asin||"");
+    if(existingKeys.has(key)){ skip++; continue; }
+    existingKeys.add(key);
 
     const amount = U.toNum(r["单价"]);
     const discount = U.toNum(r["卖家折扣"]);
@@ -5227,7 +5102,7 @@ async function importOrdersCsvFile(file){
     const commissionSettled = __mapCommissionStatus(r["返佣状态"]);
 
     const o = {
-      id: makeId("O"),
+      id: U.id("O", S.seq.order++),
       createdAt: now,
       orderId,
       key,
@@ -5274,22 +5149,8 @@ async function importOrdersCsvFile(file){
   showNotice("导入完成", `新增 ${add} 单，跳过重复 ${skip}。`);
 
   // save & refresh (avoid heavy payout snapshot during bulk import)
-  try{ await saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); showNotice('持久化失败', '订单已导入到当前页面，但写入本地数据库失败（刷新会丢失）。请稍后重试，或检查浏览器站点存储权限。\n错误：'+(e&&e.message?e.message:String(e))); }
+  try{ saveNow({skipPayoutSnapshot:true}); }catch(e){ console.warn(e); try{ saveNow(); }catch(_){} }
   refreshAfterOrderChange();
-
-  // 强制刷新：清空搜索、回到第1页，并立即渲染一次（避免“导入成功但列表不刷新”）
-  try{
-    UI.page = 1;
-    if($("filterSearch")) $("filterSearch").value = "";
-  }catch(e){}
-  try{
-    // 立即渲染一轮（如果渲染调度被遮罩/节流，仍能看到数据）
-    markDirty(["orders","kpi"]);
-    flushRender();
-  }catch(e){
-    try{ renderOrders(); }catch(_){}
-    try{ renderKPI(); }catch(_){}
-  }
 }
 
 
@@ -5684,8 +5545,6 @@ function bind(){
     clearMainState().finally(()=>{
       S = blankState();
       save();
-      try{ localStorage.setItem("OPS_CLOUD_AUTOPUSH","0"); }catch(_e){}
-      try{ if(typeof __renderCloudMeta==="function") __renderCloudMeta(); }catch(_e){}
       UI.selected.clear();
       UI.page = 1;
       Actions.cancelSellerEdit();
@@ -5708,8 +5567,6 @@ $("btnHardReset").onclick = async ()=>{
   if(!ok1) return;
   const ok2 = confirm("最后确认一次：真的要从零开始（不可恢复）？");
   if(!ok2) return;
-  try{ localStorage.setItem("OPS_CLOUD_AUTOPUSH","0"); }catch(_e){}
-  try{ if(typeof __renderCloudMeta==="function") __renderCloudMeta(); }catch(_e){}
 
   const delDB = (name)=>new Promise((resolve)=>{
     try{
@@ -9359,7 +9216,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     // init auto-push flag
     try{
       const v = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
-      __setCloudMeta({ autoEnabled: (v===null ? false : !(v==="0" || v==="false")) });
+      __setCloudMeta({ autoEnabled: (v===null ? true : !(v==="0" || v==="false")) });
     }catch(_e){
       __setCloudMeta({ autoEnabled: true });
     }
@@ -9927,7 +9784,7 @@ function syncMainStateFromDOM(){
       if(!obj){ alert("云端快照 payload 为空或解析失败。"); return; }
 
       if(typeof idbSet === "function" && typeof MAIN_STATE_KEY !== "undefined"){
-        await saveMainStateSmart(obj);
+        await idbSet(MAIN_STATE_KEY, obj);
         toast("云端拉取完成：已写入 IndexedDB 主库（main_state_v1），即将刷新。");
         try{ location.reload(); }catch(_e){}
         return;
@@ -10342,7 +10199,7 @@ What V30 does:
 
       // If your app provides idbSet+MAIN_STATE_KEY, write there; otherwise keep a safe localStorage copy.
       if(typeof idbSet === "function" && typeof MAIN_STATE_KEY !== "undefined"){
-        await saveMainStateSmart(obj);
+        await idbSet(MAIN_STATE_KEY, obj);
         toastSafe("云端拉取完成：已写入 IndexedDB 主库（"+MAIN_STATE_KEY+"），即将刷新。");
         try{ location.reload(); }catch(e){}
         return;
@@ -11947,12 +11804,8 @@ if(!_autoEnabled){
   }
 
   async function restSelect(cfg){
-    return await restSelectKey(cfg, cfg.app);
-  }
-
-  async function restSelectKey(cfg, appKey){
     const base = cfg.url.replace(/\/+$/,'');
-    const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=eq.${encodeURIComponent(appKey)}&limit=1`;
+    const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=eq.${encodeURIComponent(cfg.app)}&limit=1`;
     const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,200)}`);
@@ -11960,106 +11813,88 @@ if(!_autoEnabled){
     return arr[0] || null;
   }
 
-  async function restSelectLike(cfg, likePattern, limit=5000){
-    const base = cfg.url.replace(/\/+$/,'');
-    const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=like.${encodeURIComponent(likePattern)}&order=app_key.asc&limit=${limit}`;
-    const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
-    const text = await r.text();
-    if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,200)}`);
-    return JSON.parse(text || '[]');
-  }
-
   async function restUpsert(cfg, row){
-    return await restUpsertKey(cfg, row.app_key, row);
-  }
-
-  async function restUpsertKey(cfg, appKey, row){
     const base = cfg.url.replace(/\/+$/,'');
     const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
     const r = await fetch(url, {
       method:'POST',
       headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
-      body: JSON.stringify([{...row, app_key: appKey}])
+      body: JSON.stringify([row])
     });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
+    // return representation array or empty
     try{ const arr = JSON.parse(text || '[]'); return arr[0] || null; }catch(_){ return null; }
+  }
+
+  async function readLocalCanonical(){
+    const rec = await idbKvGet(CANON_KEY);
+    return rec || null;
+  }
+
+  async function getLocalStateForPush(){
+    const rec = await readLocalCanonical();
+    const raw = rec ? (rec.value ?? rec.payload ?? rec) : null;
+    const norm = normalizeState(raw || {});
+    return { rec, raw, norm };
+  }
+
+  async function cloudStatus(){
+    const cfg = readCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app){
+      uiAlert('请先云端设置并保存（URL / anon / app_key）。');
+      return;
+    }
+    const local = await getLocalStateForPush();
+    let cloud = null;
+    try{ cloud = await restSelect(cfg); }catch(e){ uiAlert('云端状态失败：' + e.message); return; }
+
+    let cloudNorm = { sellers:[], products:[], orders:[], batches:[] };
+    if(cloud && cloud.payload){
+      cloudNorm = normalizeState(cloud.payload);
+    }
+    const lines = [
+      `本地来源: IndexedDB(${CANON_DB}/${CANON_STORE}/${CANON_KEY})`,
+      `本地统计: 卖家${local.norm.sellers.length} 产品${local.norm.products.length} 订单${local.norm.orders.length} 批次${local.norm.batches.length}`,
+      '',
+      `云端存在: ${cloud ? 'YES' : 'NO'}`,
+      cloud ? `云端 hash: ${cloud.hash||''}` : '',
+      cloud ? `云端 updated_at: ${cloud.updated_at||''}` : '',
+      cloud ? `云端统计: 卖家${cloudNorm.sellers.length} 产品${cloudNorm.products.length} 订单${cloudNorm.orders.length} 批次${cloudNorm.batches.length}` : ''
+    ].filter(Boolean).join('\n');
+    uiAlert(lines);
   }
 
   async function cloudPush(manual=true){
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
     const local = await getLocalStateForPush();
+    // If still zero, we show raw keys for diagnosis in console
     if((local.norm.sellers.length + local.norm.products.length + local.norm.orders.length + local.norm.batches.length) === 0){
       console.warn('[CLEAN-SYNC] local state normalized to empty. keys=', local.norm._rawKeys, 'rec=', local.rec);
     }
     const payload = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
-    const payloadStr = JSON.stringify(payload);
-    const hash = await sha256Hex(payloadStr);
-
-    // Large payload: chunked upsert to avoid PostgREST statement timeout
-    const CHUNK_SIZE = 150_000; // chars
-    if(payloadStr.length > 280_000){
-      const total = Math.ceil(payloadStr.length / CHUNK_SIZE);
-      const metaCounts = { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length };
-      const manifest = {
-        app_key: cfg.app,
-        hash,
-        updated_at: nowISO(),
-        payload: { __chunked:true, total, hash, metaCounts, ts: nowISO() }
-      };
-
-      // upsert manifest first
-      await restUpsertKey(cfg, cfg.app, manifest);
-
-      for(let i=0;i<total;i++){
-        const part = payloadStr.slice(i*CHUNK_SIZE, (i+1)*CHUNK_SIZE);
-        const key = `${cfg.app}__chunk__${String(i).padStart(6,'0')}`;
-        const row = { app_key: key, hash, updated_at: nowISO(), payload: { __chunk:true, i, total, part } };
-        // small retry to smooth transient failures
-        let ok=false, lastErr=null;
-        for(let t=0;t<3;t++){
-          try{ await restUpsertKey(cfg, key, row); ok=true; break; }catch(e){ lastErr=e; await new Promise(r=>setTimeout(r, 250*(t+1))); }
-        }
-        if(!ok) throw lastErr || new Error('chunk_upsert_failed');
-      }
-      return { ok:true, counts: metaCounts, hash, chunked:true, total };
-    }
-
-    // Small payload: single row
+    const hash = await sha256Hex(JSON.stringify(payload));
     const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload };
-    await restUpsertKey(cfg, cfg.app, row);
-    return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash, chunked:false };
+    await restUpsert(cfg, row);
+    return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash };
   }
 
   async function cloudPull(opts){
-    opts = opts||{};
+  opts = opts||{};
+  const force = !!opts.force;
+
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
-
-    const main = await restSelectKey(cfg, cfg.app);
-    if(!main || !main.payload) throw new Error('云端无快照（payload 为空）');
-
-    let payload = main.payload;
-    if(payload && payload.__chunked){
-      const total = payload.total|0;
-      const likePattern = cfg.app + '__chunk__%';
-      const rows = await restSelectLike(cfg, likePattern, Math.max(50,total+5));
-      const parts = new Array(total).fill('');
-      for(const r of rows){
-        const p = r.payload || {};
-        if(p.__chunk && typeof p.i==='number' && p.i>=0 && p.i<total) parts[p.i] = String(p.part||'');
-      }
-      const joined = parts.join('');
-      try{ payload = JSON.parse(joined); }catch(e){ throw new Error('云端分片快照解析失败：'+e.message); }
-    }
-
-    const norm = normalizeState(payload);
+    const cloud = await restSelect(cfg);
+    if(!cloud || !cloud.payload) throw new Error('云端无快照（payload 为空）');
+    const norm = normalizeState(cloud.payload);
     const record = { key: CANON_KEY, value: { sellers: norm.sellers, products: norm.products, orders: norm.orders, batches: norm.batches }, updated_at: nowISO() };
     await idbKvPut(record);
-    return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: main.hash };
+    return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: cloud.hash };
   }
-function bind(){
+
+  function bind(){
     const $ = (id)=> document.getElementById(id);
     const bCfg = $('btnCloudCfg');
     const bPush = $('btnCloudPush');
@@ -12093,7 +11928,7 @@ function bind(){
     // AUTO-PUSH default: enabled (can be toggled via UI)
     try{
       const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
+      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
     }catch(_){}
   }
 
@@ -12117,7 +11952,7 @@ function bind(){
   // AUTO-PUSH default: ON (legacy patches may read OPS_CLOUD_AUTOPUSH)
   try{
     const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
+    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
   }catch(e){}
   const MAX_LOGS = 30;
   const logs = [];
@@ -12509,25 +12344,6 @@ function bind(){
         return "";
       };
 
-      // safe id generator (works even if U.id / seq are not ready)
-      const makeId = (prefix)=>{
-        try{
-          if(typeof U !== "undefined" && U && typeof U.id === "function" && S && S.seq){
-            if(prefix==="S"){ const n=(S.seq.seller||1); S.seq.seller=n+1; return U.id("S", n); }
-            if(prefix==="P"){ const n=(S.seq.product||1); S.seq.product=n+1; return U.id("P", n); }
-            if(prefix==="O"){ const n=(S.seq.order||1); S.seq.order=n+1; return U.id("O", n); }
-          }
-        }catch(e){}
-        const rnd = (crypto && crypto.getRandomValues) ? [...crypto.getRandomValues(new Uint32Array(2))].map(x=>x.toString(16)).join("") : Math.random().toString(16).slice(2);
-        return (prefix||"X") + "_" + Date.now().toString(16) + "_" + rnd;
-      };
-
-      // order key helper (do not depend on global U, to survive after reset/clean)
-      const __orderKey = (sellerId, orderId, asin)=>`${String(sellerId||"").trim()}::${String(orderId||"").trim()}::${String(asin||"").trim()}`;
-      const orderKeyFn = (typeof U!=="undefined" && U && typeof U.orderKey==="function") ? U.orderKey : __orderKey;
-
-
-
       const normHeader = (h)=>String(h||"").trim()
         .replace(/（/g,"(").replace(/）/g,")")
         .replace(/\s+/g,"")
@@ -12591,26 +12407,6 @@ function bind(){
 
       // override with robust importer
       window.importOrdersCsvFile = async function(file){
-
-        // --- GUARD: after clear/reset, main state variable may be undefined. Rehydrate or create empty state.
-        let __S;
-        try { __S = S; } catch(_e) { __S = window.S; }
-        if (!__S || typeof __S !== 'object') {
-          try {
-            const loaded = (typeof window._readPrimaryState === 'function') ? await window._readPrimaryState() : null;
-            __S = (loaded && loaded.state) ? loaded.state : loaded;
-          } catch(_e) {}
-        }
-        if (!__S || typeof __S !== 'object') {
-          __S = { sellers: [], products: [], orders: [], batches: [], seq: { seller: 1, product: 1, order: 1, batch: 1 } };
-        }
-        __S.sellers = Array.isArray(__S.sellers) ? __S.sellers : [];
-        __S.products = Array.isArray(__S.products) ? __S.products : [];
-        __S.orders = Array.isArray(__S.orders) ? __S.orders : [];
-        __S.batches = Array.isArray(__S.batches) ? __S.batches : [];
-        __S.seq = (__S.seq && typeof __S.seq === 'object') ? __S.seq : { seller: 1, product: 1, order: 1, batch: 1 };
-        window.S = __S;
-        try { S = __S; } catch(_e) {}
         const txt = await window.__readFileTextSmart(file);
         const rows = window.__parseCSV(txt);
         if(!rows || !rows.length){
@@ -12624,7 +12420,7 @@ function bind(){
         const now = Date.now();
         const sellerByName = new Map((S.sellers||[]).map(s=>[String(s.name||"").trim(), s]));
         const productByAsin = new Map((S.products||[]).filter(p=>p.asin).map(p=>[String(p.asin).trim(), p]));
-        const existingKeys = new Set((S.orders||[]).map(o=>o.key || orderKeyFn(o.sellerId, o.orderId, o.asin||"")));
+        const existingKeys = new Set((S.orders||[]).map(o=>o.key || U.orderKey(o.sellerId, o.orderId, o.asin||"")));
 
         const newOrders = [];
         let add=0, skip=0, bad=0;
@@ -12646,25 +12442,23 @@ function bind(){
           const title = String(r.title||"").trim();
 
           if(!sellerName){
-            // allow import even if seller is missing; put into placeholder seller
-            bad++; if(badLines.length<20) badLines.push(`${idx}: 缺少卖家(已放入占位卖家)`);
+            bad++; if(badLines.length<20) badLines.push(`${idx}: 缺少卖家`);
+            continue;
           }
 
           // seller
-          const sName = sellerName || "（未指定卖家）";
-          let seller = sellerByName.get(sName);
+          let seller = sellerByName.get(sellerName);
           if(!seller){
-            const sid = makeId("S");
-            seller = {id:sid, name:sName, market:"", fx:0, createdAt: now};
-            S.sellers = Array.isArray(S.sellers) ? S.sellers : [];
+            const sid = U.id("S", S.seq.seller++);
+            seller = {id:sid, name:sellerName, market:"", fx:0, createdAt: now};
             S.sellers.push(seller);
-            sellerByName.set(sName, seller);
+            sellerByName.set(sellerName, seller);
           }
 
           // product (optional)
           let product = asin ? productByAsin.get(asin) : null;
           if(!product && asin){
-            const pid = makeId("P");
+            const pid = U.id("P", S.seq.product++);
             const mk = (window.__inferMarketFromName?.(title) || seller.market || "");
             product = {
               id:pid,
@@ -12681,7 +12475,7 @@ function bind(){
             productByAsin.set(asin, product);
           }
 
-          const key = orderKeyFn(seller.id, orderId, asin||"");
+          const key = U.orderKey(seller.id, orderId, asin||"");
           if(existingKeys.has(key)){ skip++; continue; }
           existingKeys.add(key);
 
@@ -12701,7 +12495,7 @@ function bind(){
           const payout = num(r.payout);
 
           const o = window.__newOrderSkeleton ? window.__newOrderSkeleton() : {
-            id: makeId("O"),
+            id: U.id("O", S.seq.order++),
             createdAt: now,
             updatedAt: now,
             principal: { settled:false, amountCny:0, settledAmountCny:0 },
@@ -12781,154 +12575,5 @@ function bind(){
 })();
 </script>
 
-<script>
-(()=>{
-  const w = window;
-  const safe = (fn)=>{ try{ return fn(); }catch(e){ console.error('[PATCH v10]', e); } };
-
-  // 1) 全量重渲染（避免只刷新局部导致看板/列表不同步）
-  w.__rerenderAllSafe = function(){
-    safe(()=>w.renderKPI && w.renderKPI());
-    safe(()=>w.renderSellers && w.renderSellers());
-    safe(()=>w.renderProducts && w.renderProducts());
-    safe(()=>w.renderOrders && w.renderOrders());
-    safe(()=>w.renderBatches && w.renderBatches());
-  };
-
-  // 2) 保存后强制刷新（修复：导入后提示成功但列表/看板不更新）
-  if (typeof w.saveNow === 'function' && !w.__saveNowPatchedV10){
-    w.__saveNowPatchedV10 = true;
-    const _saveNow = w.saveNow;
-    w.saveNow = async function(...args){
-      const r = await _saveNow.apply(this, args);
-      // saveNow 内部可能是节流/异步落盘，这里补两次渲染：立即 + 下一帧
-      w.__rerenderAllSafe();
-      requestAnimationFrame(()=>w.__rerenderAllSafe());
-      setTimeout(()=>w.__rerenderAllSafe(), 120);
-      return r;
-    };
-  }
-
-  // 3) 导入订单后：等待保存完成，再强制刷新渲染
-  if (typeof w.importOrdersCsvFile === 'function' && !w.__importOrdersPatchedV10){
-    w.__importOrdersPatchedV10 = true;
-    const _import = w.importOrdersCsvFile;
-    w.importOrdersCsvFile = async function(file){
-      const r = await _import.call(this, file);
-      // 保险：如果导入函数内部没有 await saveNow，这里补一轮
-      if (typeof w.saveNow === 'function'){
-        await safe(()=>w.saveNow());
-      }
-      w.__rerenderAllSafe();
-      requestAnimationFrame(()=>w.__rerenderAllSafe());
-      setTimeout(()=>w.__rerenderAllSafe(), 200);
-      return r;
-    };
-  }
-
-  // 4) 清空/重置后默认关闭自动推送（仅手动开启才推送）
-  const disableAutoPush = ()=>{
-    try{
-      localStorage.setItem('OPS_CLOUD_AUTOPUSH', '0');
-      if (w.setAutoPushUI) w.setAutoPushUI(false);
-      // 兼容：按钮文案/状态由主程序渲染时，这里只打标记即可
-      console.log('[PATCH v10] auto-push default OFF');
-    }catch(e){
-      console.warn('[PATCH v10] disableAutoPush failed', e);
-    }
-  };
-
-  // 尝试挂钩常见清空函数名
-  ['clearAllData','resetAll','hardReset','clearData','doResetAll'].forEach((name)=>{
-    if (typeof w[name] === 'function' && !w[`__patched_${name}_v10`]){
-      w[`__patched_${name}_v10`] = true;
-      const _fn = w[name];
-      w[name] = async function(...args){
-        const r = await _fn.apply(this, args);
-        disableAutoPush();
-        w.__rerenderAllSafe();
-        return r;
-      };
-    }
-  });
-
-  // 如果页面刚加载且处于“刚清空/初始”状态，也确保默认关闭
-  disableAutoPush();
-
-
-  // 2) 导入/保存后强制刷新一次（并延迟再刷新一次，覆盖异步UI更新）
-  const bump = ()=>{ w.__rerenderAllSafe(); setTimeout(w.__rerenderAllSafe, 50); setTimeout(w.__rerenderAllSafe, 250); };
-
-  // 2.1 包装 saveNow：保存后刷新UI（避免看板仍显示旧值）
-  if (typeof w.saveNow === 'function' && !w.saveNow.__patched_v10) {
-    const _saveNow = w.saveNow;
-    const wrapped = async function(...args){
-      const r = await _saveNow.apply(this, args);
-      bump();
-      return r;
-    };
-    wrapped.__patched_v10 = true;
-    w.saveNow = wrapped;
-  }
-
-  // 2.2 包装各类“变更后刷新”入口
-  ['refreshAfterSellerChange','refreshAfterProductChange','refreshAfterOrderChange','refreshAfterBatchChange','renderAll'].forEach((k)=>{
-    if (typeof w[k] === 'function' && !w[k].__patched_v10) {
-      const _fn = w[k];
-      const wrapped = function(...args){
-        const r = _fn.apply(this, args);
-        bump();
-        return r;
-      };
-      wrapped.__patched_v10 = true;
-      w[k] = wrapped;
-    }
-  });
-
-  // 2.3 包装导入订单 CSV：导入完成后立即刷新UI（并确保落盘完成后再刷新）
-  if (typeof w.importOrdersCsvFile === 'function' && !w.importOrdersCsvFile.__patched_v10) {
-    const _import = w.importOrdersCsvFile;
-    const wrapped = async function(...args){
-      const r = await _import.apply(this, args);
-      // 某些浏览器上，文件读取/批量写入完成后 UI 仍停留在旧视图，强制刷新
-      bump();
-      // 确保保存完成后再刷新（若 saveNow 是 async）
-      if (typeof w.saveNow === 'function') {
-        await safe(()=>w.saveNow());
-      }
-      bump();
-      return r;
-    };
-    wrapped.__patched_v10 = true;
-    w.importOrdersCsvFile = wrapped;
-  }
-
-  // 3) 清空/重置后：默认关闭自动推送（直到手动开启）
-  // 兼容：不同版本函数名可能不同，做多路包装。
-  const forceAutoPushOff = ()=>{
-    try{ localStorage.setItem('OPS_CLOUD_AUTOPUSH','0'); }catch(e){}
-    // 若页面里有按钮/文本同步状态，尝试刷新
-    safe(()=>w.renderCloud && w.renderCloud());
-    safe(()=>w.updateCloudUI && w.updateCloudUI());
-  };
-
-  ['clearAllData','hardResetAll','resetAllData','wipeAllData','clearData','btnClearAllData_onclick'].forEach((k)=>{
-    if (typeof w[k] === 'function' && !w[k].__patched_v10) {
-      const _fn = w[k];
-      const wrapped = async function(...args){
-        const r = await _fn.apply(this, args);
-        forceAutoPushOff();
-        bump();
-        return r;
-      };
-      wrapped.__patched_v10 = true;
-      w[k] = wrapped;
-    }
-  });
-
-  // 兜底：页面加载完成后再补一次渲染（防止首屏渲染早于异步load）
-  window.addEventListener('load', ()=>{ setTimeout(bump, 0); setTimeout(bump, 200); });
-})();
-</script>
 </body>
 </html>
