@@ -427,7 +427,7 @@ function getCloudCfg(){
     const first = (keys)=>{
       for(const k of keys){
         const v = (localStorage.getItem(k)||"").trim();
-        if(v) return v;
+        if(v) return sanitizeStateForSave(v);
       }
       return "";
     };
@@ -824,7 +824,7 @@ function _mergeListById(localArr, cloudArr){
   };
   (cloudArr||[]).forEach(it=>push(it,"cloud"));
   (localArr||[]).forEach(it=>push(it,"local"));
-  return out;
+  return sanitizeStateForSave(out);
 }
 function mergeSnapshotsPlanA(localSnap, cloudSnap){
   const L = localSnap && typeof localSnap==="object" ? localSnap : {};
@@ -2829,7 +2829,44 @@ function __approxJsonSize(obj){
   try{ return new Blob([JSON.stringify(obj)]).size; }catch(_e){ return 0; }
 }
 
+
+  // --- Persist Safety: sanitize state before saving (avoid non-clonable UI refs) ---
+  function sanitizeStateForSave(state){
+    try{
+      const seen = new WeakSet();
+      const safe = JSON.parse(JSON.stringify(state, (k,v)=>{
+        // Drop UI / runtime-only fields
+        if (k && (k.startsWith("__ui") || k.startsWith("__dom") || k.startsWith("_el") || k.startsWith("_node") || k==="__row" || k==="__tr" || k==="__cache")) return undefined;
+        // Drop DOM nodes / Window objects
+        if (v && typeof v === "object"){
+          if (typeof Node !== "undefined" && v instanceof Node) return undefined;
+          if (typeof Window !== "undefined" && v === window) return undefined;
+          if (seen.has(v)) return undefined;
+          seen.add(v);
+        }
+        return v;
+      }));
+      // Ensure essential arrays exist
+      safe.sellers = Array.isArray(safe.sellers)? safe.sellers : [];
+      safe.products = Array.isArray(safe.products)? safe.products : [];
+      safe.orders = Array.isArray(safe.orders)? safe.orders : [];
+      safe.batches = Array.isArray(safe.batches)? safe.batches : [];
+      return safe;
+    }catch(e){
+      // Fallback: minimal clone
+      return {
+        sellers: Array.isArray(state?.sellers)? state.sellers : [],
+        products: Array.isArray(state?.products)? state.products : [],
+        orders: Array.isArray(state?.orders)? state.orders : [],
+        batches: Array.isArray(state?.batches)? state.batches : [],
+        meta: state?.meta || {}
+      };
+    }
+  }
+
 async function saveMainStateSmart(state){
+    state = sanitizeStateForSave(state);
+
   if(!SPLIT_STORE_ENABLED) return await idbSet(MAIN_STATE_KEY, state);
 
   const orders = Array.isArray(state && state.orders) ? state.orders : [];
