@@ -9322,7 +9322,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     // init auto-push flag
     try{
       const v = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
-      __setCloudMeta({ autoEnabled: (v===null ? true : !(v==="0" || v==="false")) });
+      __setCloudMeta({ autoEnabled: (v===null ? false : !(v==="0" || v==="false")) });
     }catch(_e){
       __setCloudMeta({ autoEnabled: true });
     }
