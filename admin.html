@@ -11579,7 +11579,7 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
         safeMergeAndPush({ force:true });
       }, true);
     }
-    // Pull: merge cloud into local (默认不删除云端/本地已有数据)，再写入主库并刷新
+    // Pull: prefer existing FINAL pull if present, else basic pull->write main->reload
     if(bPull){
       bPull.addEventListener("click", function(ev){
         try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); }catch(e){}
@@ -11595,21 +11595,10 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
           if(!appKey){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
           const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
           if(!cloud.exists){ alert("云端无快照。"); return; }
-
-          // merge: cloud-first (archive) + local updates (if newer)
-          const local = await getLocalSnapshot();
-          const localState = (local && local.state) ? local.state : {};
-          const cloudState = cloud.state || {};
-          const mergedState = (typeof mergeStates === "function")
-            ? mergeStates(localState, cloudState)
-            : (typeof mergeSnapshotsPlanA === "function" ? mergeSnapshotsPlanA(localState, cloudState) : cloudState);
-
-          try{ localStorage.setItem("OPS_CLOUD_LAST_PULL_HASH", String(cloud.hash||"")); }catch(_e){}
-
           // write to main IDB
           if(typeof idbSet==="function"){
-            await idbSet(MAIN_KEY, mergedState);
-            toastSafe("云端拉取完成：已合并并写入 IndexedDB 主库（main_state_v1），即将刷新。");
+            await idbSet(MAIN_KEY, cloud.state);
+            toastSafe("云端拉取完成：已写入 IndexedDB 主库（main_state_v1），即将刷新。");
             location.reload();
             return;
           }
@@ -11622,13 +11611,13 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
               try{
                 const tx = db.transaction(MAIN_STORE, "readwrite");
                 const st = tx.objectStore(MAIN_STORE);
-                const put = st.put(mergedState, MAIN_KEY);
+                const put = st.put(cloud.state, MAIN_KEY);
                 put.onerror = ()=>reject(put.error||new Error("put failed"));
                 put.onsuccess = ()=>resolve();
               }catch(e){ reject(e); }
             };
           });
-          toastSafe("云端拉取完成：已合并并写入 IndexedDB 主库（raw put），即将刷新。");
+          toastSafe("云端拉取完成：已写入 IndexedDB 主库（raw put），即将刷新。");
           location.reload();
         })().catch(e=>alert("云端拉取失败：\n"+(e && e.message?e.message:String(e))));
       }, true);
@@ -11655,110 +11644,6 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     }
   }
 
-  // ===== Auto Pull (Plan A): poll cloud hash and merge into local (NO DELETE) =====
-  let _autoPullEnabled = true;
-  let _pullRunning = false;
-  const AUTO_PULL_START_DELAY_MS = 8 * 1000;
-  const AUTO_PULL_INTERVAL_MS = 60 * 1000;
-  const LS_AUTOPULL_KEY = "OPS_CLOUD_AUTOPULL";
-  const LS_LASTPULL_HASH = "OPS_CLOUD_LAST_PULL_HASH";
-
-  function _readAutoPullFlag(){
-    try{
-      const v = localStorage.getItem(LS_AUTOPULL_KEY);
-      if(v === null || v === undefined || v === "") return true; // default ON
-      return !(v === "0" || v === "false");
-    }catch(e){ return true; }
-  }
-
-  async function cloudPullMergeQuiet(){
-    const wrap = getCloudWrap(); if(!wrap) return { ok:false, reason:"no_wrap" };
-    const { client, cfg } = wrap;
-    const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
-    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
-    if(!appKey) return { ok:false, reason:"no_app_key" };
-
-    const local = await getLocalSnapshot();
-    const localState0 = (local && local.state) ? local.state : {};
-    const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
-    if(!cloud || !cloud.exists) return { ok:true, skipped:true, reason:"cloud_empty" };
-
-    // Merge: cloud-first then local (NO DELETE). Prefer updatedAt when present.
-    let mergedState = null;
-    if(typeof mergeStates === "function"){
-      mergedState = mergeStates(localState0, cloud.state || {});
-    }else if(typeof mergeSnapshotsPlanA === "function"){
-      mergedState = mergeSnapshotsPlanA(localState0, cloud.state || {});
-    }else{
-      // fallback: cloud overwrites local (still no delete in arrays because snapshot contains full arrays)
-      mergedState = cloud.state || localState0;
-    }
-
-    // If nothing changes by hash, skip write
-    let mergedHash = null;
-    try{ mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(mergedState||{})) : null; }catch(_e){}
-    const lastPullHash = (function(){ try{ return localStorage.getItem(LS_LASTPULL_HASH)||""; }catch(e){ return ""; } })();
-    if(mergedHash && cloud.hash && String(cloud.hash)===String(lastPullHash)){
-      return { ok:true, skipped:true, reason:"no_change", hash: cloud.hash };
-    }
-
-    // write merged to main IDB
-    if(typeof idbSet === "function"){
-      await idbSet(MAIN_KEY, mergedState);
-    }else{
-      await new Promise((resolve, reject)=>{
-        const req = indexedDB.open(MAIN_DB);
-        req.onerror = ()=>reject(req.error||new Error("open failed"));
-        req.onsuccess = ()=>{
-          const db = req.result;
-          try{
-            const tx = db.transaction(MAIN_STORE, "readwrite");
-            const st = tx.objectStore(MAIN_STORE);
-            const put = st.put(mergedState, MAIN_KEY);
-            put.onerror = ()=>reject(put.error||new Error("put failed"));
-            put.onsuccess = ()=>resolve();
-          }catch(e){ reject(e); }
-        };
-      });
-    }
-
-    try{ localStorage.setItem(LS_LASTPULL_HASH, String(cloud.hash||mergedHash||"")); }catch(e){}
-    return { ok:true, merged:true, hash: cloud.hash||mergedHash||"" };
-  }
-
-  async function autoPullTick(){
-    if(!_autoPullEnabled) return;
-    if(_pullRunning) return;
-    _pullRunning = true;
-    try{
-      const wrap = getCloudWrap();
-      if(!wrap){ _pullRunning=false; return; }
-      const { client, cfg } = wrap;
-      const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
-      const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
-      if(!appKey){ _pullRunning=false; return; }
-
-      // cheap status check
-      const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
-      if(!cloud || !cloud.exists){ _pullRunning=false; return; }
-      const last = (function(){ try{ return localStorage.getItem(LS_LASTPULL_HASH)||""; }catch(e){ return ""; } })();
-      if(last && cloud.hash && String(last)===String(cloud.hash)){
-        _pullRunning=false; return;
-      }
-
-      const r = await cloudPullMergeQuiet();
-      if(r && r.ok && !r.skipped){
-        toastSafe("检测到云端更新：已合并拉取到本地，正在刷新…");
-        setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 600);
-      }
-    }catch(e){
-      // avoid noisy alerts in auto mode
-      try{ console.warn("[AUTO-PULL] failed", e); }catch(_e){}
-    }finally{
-      _pullRunning = false;
-    }
-  }
-
   function startAuto(){
     // Allow users to disable via localStorage if needed
     try{
@@ -11767,23 +11652,13 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
       if(v === "1" || v === "true"){ _autoEnabled = true; }
     }catch(e){}
         try{ if(window.__setCloudMeta) window.__setCloudMeta({ autoEnabled: _autoEnabled }); }catch(_e){}
-    if(_autoEnabled){
-      setTimeout(()=>{ autoTick(); }, AUTO_START_DELAY_MS);
-      setInterval(()=>{ autoTick(); }, AUTO_INTERVAL_MS);
-      log("自动推送已启动（Plan A，安全合并推送；间隔 "+Math.round(AUTO_INTERVAL_MS/1000)+"s）。");
-    }else{
+if(!_autoEnabled){
       log("自动推送已禁用（localStorage: OPS_CLOUD_AUTOPUSH=0）。");
+      return;
     }
-
-    // Auto Pull: enabled by default (OPS_CLOUD_AUTOPULL)
-    try{ _autoPullEnabled = _readAutoPullFlag(); }catch(e){ _autoPullEnabled = true; }
-    if(_autoPullEnabled){
-      setTimeout(()=>{ autoPullTick(); }, AUTO_PULL_START_DELAY_MS);
-      setInterval(()=>{ autoPullTick(); }, AUTO_PULL_INTERVAL_MS);
-      log("自动拉取已启动（Plan A，合并拉取不删除云端；间隔 "+Math.round(AUTO_PULL_INTERVAL_MS/1000)+"s）。");
-    }else{
-      log("自动拉取已禁用（localStorage: OPS_CLOUD_AUTOPULL=0）。");
-    }
+    setTimeout(()=>{ autoTick(); }, AUTO_START_DELAY_MS);
+    setInterval(()=>{ autoTick(); }, AUTO_INTERVAL_MS);
+    log("自动推送已启动（Plan A，安全合并推送；间隔 "+Math.round(AUTO_INTERVAL_MS/1000)+"s）。");
   }
 
 
@@ -13183,4 +13058,510 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
 })();
 </script>
 </body>
+<!-- ===================== Cloud Sync v2 (ops_orders_v1, NO DELETE) ===================== -->
+<script>
+(function(){
+  'use strict';
+
+  // Cloud Sync Design (B):
+  // - Cloud orders table (ops_orders_v1) is an archive: INSERT/UPDATE only, NO DELETE.
+  // - Pull: cloud -> local merge (no delete).
+  // - Push: local -> cloud UPSERT only; never overwrites cloud with an "empty snapshot".
+  // - Auto-pull runs even when auto-push is off.
+
+  const ORDERS_TABLE = 'ops_orders_v1';
+  const AUTO_PULL_INTERVAL_MS = 60 * 1000;
+  const LS_LAST_CLOUD_HASH = 'OPS_CLOUD_ORDERS_LAST_HASH_V1';
+  const LS_LAST_PULL_AT = 'OPS_CLOUD_ORDERS_LAST_PULL_AT_V1';
+
+  function nowIso(){ return new Date().toISOString(); }
+
+  function safeStr(v){ return (v==null?'':String(v)); }
+  function normTrim(v){ return safeStr(v).trim(); }
+
+  function djb2Hash(str){
+    str = safeStr(str);
+    let h = 5381;
+    for(let i=0;i<str.length;i++) h = ((h<<5)+h) + str.charCodeAt(i);
+    return (h>>>0).toString(16);
+  }
+
+  function getOrderNo(o){
+    try{ if(window.U && typeof U.orderNo==='function') return normTrim(U.orderNo(o)); }catch(_e){}
+    return normTrim(o && (o.orderNo || o.order_no || o.orderId || o.order_id || ''));
+  }
+  function getSellerName(o){
+    return normTrim(o && (o.sellerName || o.seller_name || o.seller || o.sellerName2 || ''));
+  }
+  function getMarket(o){ return normTrim(o && (o.market || o.country || o.site || '')); }
+  function getAsin(o){ return normTrim(o && (o.asin || o.ASIN || '')); }
+  function getProductName(o){ return normTrim(o && (o.productName || o.product_name || o.title || o.name || '')); }
+
+  function getPayStatus(o){
+    return normTrim(o && (o.pay_status || o.payStatus || (o.pay && o.pay.status) || (o.payment && o.payment.status) || ''));
+  }
+  function getReviewStatus(o){
+    try{ if(typeof window.normReviewStatus==='function') return normTrim(window.normReviewStatus(o)); }catch(_e){}
+    return normTrim(o && (o.review_status || o.reviewStatus || (o.review && o.review.status) || ''));
+  }
+  function getPayoutStatus2(o){
+    try{ if(typeof window.getPayoutStatus==='function') return normTrim(window.getPayoutStatus(o)); }catch(_e){}
+    return normTrim(o && (o.payout_status || o.payoutStatus || (o.payout && o.payout.status) || ''));
+  }
+
+  function getReviewLink(o){
+    return normTrim(o && (o.review_link || o.reviewLink || (o.review && o.review.link) || ''));
+  }
+  function getNote(o){
+    return safeStr(o && (o.note || o.memo || o.remark || ''));
+  }
+
+  function getPayScreenshot(o){
+    return normTrim(o && (o.pay_screenshot_url || o.payScreenshotUrl || o.payScreenshot || (o.pay && (o.pay.screenshot_url || o.pay.screenshot || o.pay.url)) || ''));
+  }
+  function getReviewScreenshot(o){
+    return normTrim(o && (o.review_screenshot_url || o.reviewScreenshotUrl || o.reviewScreenshot || (o.review && (o.review.screenshot_url || o.review.screenshot || o.review.url)) || ''));
+  }
+  function getPayoutScreenshot(o){
+    return normTrim(o && (o.payout_screenshot_url || o.payoutScreenshotUrl || o.payoutScreenshot || (o.payout && (o.payout.screenshot_url || o.payout.screenshot || o.payout.url)) || ''));
+  }
+
+  function localOrderKey(sellerName, orderNo){
+    return normTrim(sellerName) + '::' + normTrim(orderNo);
+  }
+
+  function cloudRowKey(r){
+    return localOrderKey(r && r.seller_name, r && r.order_no);
+  }
+
+  function getLocalCloudUpdatedAt(o){
+    // prefer cloud timestamp that we saved
+    const v = o && (o._cloud_updated_at || o.cloud_updated_at || o.cloudUpdatedAt || o._cloudUpdatedAt);
+    if(!v) return 0;
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  function setLocalCloudUpdatedAt(o, iso){
+    try{ o._cloud_updated_at = iso; }catch(_e){}
+  }
+
+  function computeOrderSyncHash(o){
+    const core = {
+      order_no: getOrderNo(o),
+      seller_name: getSellerName(o),
+      market: getMarket(o),
+      asin: getAsin(o),
+      product_name: getProductName(o),
+      pay_status: getPayStatus(o),
+      review_status: getReviewStatus(o),
+      payout_status: getPayoutStatus2(o),
+      pay_screenshot_url: getPayScreenshot(o),
+      review_screenshot_url: getReviewScreenshot(o),
+      payout_screenshot_url: getPayoutScreenshot(o),
+      review_link: getReviewLink(o),
+      note: getNote(o)
+    };
+    return djb2Hash(JSON.stringify(core));
+  }
+
+  function ensureOrderId(){
+    try{
+      if(!window.S) return 'O0';
+      if(!S.seq) S.seq = {seller:1,product:1,order:1,batch:1,payoutBatch:1};
+      const n = Number(S.seq.order||1);
+      S.seq.order = n + 1;
+      return 'O' + String(n);
+    }catch(_e){
+      return 'O' + String(Date.now());
+    }
+  }
+
+  function cloudRowToLocalOrder(r){
+    const o = {
+      id: ensureOrderId(),
+      orderNo: normTrim(r.order_no),
+      sellerName: normTrim(r.seller_name),
+      market: normTrim(r.market),
+      asin: normTrim(r.asin),
+      productName: normTrim(r.product_name),
+      note: safeStr(r.note||''),
+      review: { status: normTrim(r.review_status) },
+      payout: { status: normTrim(r.payout_status) },
+      pay: { status: normTrim(r.pay_status) },
+      // store urls in both flat and nested shapes for compatibility
+      pay_screenshot_url: normTrim(r.pay_screenshot_url),
+      review_screenshot_url: normTrim(r.review_screenshot_url),
+      payout_screenshot_url: normTrim(r.payout_screenshot_url),
+      review_link: normTrim(r.review_link)
+    };
+    // also mirror into nested objects where the UI may read
+    try{ if(o.pay) o.pay.screenshot = o.pay_screenshot_url; }catch(_e){}
+    try{ if(o.review){ o.review.screenshot = o.review_screenshot_url; o.review.link = o.review_link; } }catch(_e){}
+    try{ if(o.payout) o.payout.screenshot = o.payout_screenshot_url; }catch(_e){}
+    setLocalCloudUpdatedAt(o, r.updated_at || r.created_at || nowIso());
+    o._cloud_hash = djb2Hash(JSON.stringify(r));
+    return o;
+  }
+
+  function mergeCloudOrdersIntoLocal(rows){
+    if(!window.S) return { added:0, updated:0, total:0 };
+    if(!Array.isArray(S.orders)) S.orders = [];
+
+    const idx = new Map();
+    for(const o of S.orders){
+      if(!o) continue;
+      const k = localOrderKey(getSellerName(o), getOrderNo(o));
+      if(k && k!=='::') idx.set(k, o);
+    }
+
+    let added = 0, updated = 0;
+    for(const r of (rows||[])){
+      const k = cloudRowKey(r);
+      if(!k || k==='::') continue;
+      const cloudTs = Date.parse(r.updated_at || r.created_at || '');
+      const cloudTime = Number.isFinite(cloudTs) ? cloudTs : 0;
+
+      const local = idx.get(k);
+      if(!local){
+        const o = cloudRowToLocalOrder(r);
+        S.orders.push(o);
+        idx.set(k, o);
+        added++;
+        continue;
+      }
+
+      const localCloudTime = getLocalCloudUpdatedAt(local);
+      if(cloudTime > localCloudTime){
+        // update local from cloud (non-destructive)
+        try{
+          local.market = normTrim(r.market);
+          local.asin = normTrim(r.asin);
+          local.productName = normTrim(r.product_name);
+          local.note = safeStr(r.note||'');
+
+          // statuses
+          local.pay = local.pay || {};
+          local.review = local.review || {};
+          local.payout = local.payout || {};
+          local.pay.status = normTrim(r.pay_status);
+          local.review.status = normTrim(r.review_status);
+          local.payout.status = normTrim(r.payout_status);
+
+          // urls
+          const ps = normTrim(r.pay_screenshot_url);
+          const rs = normTrim(r.review_screenshot_url);
+          const pos = normTrim(r.payout_screenshot_url);
+          const rl = normTrim(r.review_link);
+
+          local.pay_screenshot_url = ps;
+          local.review_screenshot_url = rs;
+          local.payout_screenshot_url = pos;
+          local.review_link = rl;
+          if(local.pay) local.pay.screenshot = ps;
+          if(local.review){ local.review.screenshot = rs; local.review.link = rl; }
+          if(local.payout) local.payout.screenshot = pos;
+        }catch(_e){}
+
+        setLocalCloudUpdatedAt(local, r.updated_at || r.created_at || nowIso());
+        local._cloud_hash = djb2Hash(JSON.stringify(r));
+        updated++;
+      }
+    }
+
+    // keep seq consistent
+    try{ if(typeof window.computeSeq==='function') computeSeq(); }catch(_e){}
+
+    return { added, updated, total: (S.orders||[]).length };
+  }
+
+  function localOrderToCloudRow(o, appKey){
+    const seller = getSellerName(o);
+    const orderNo = getOrderNo(o);
+    return {
+      app_key: appKey,
+      order_no: orderNo,
+      seller_name: seller,
+      market: getMarket(o),
+      asin: getAsin(o),
+      product_name: getProductName(o),
+      pay_status: getPayStatus(o),
+      review_status: getReviewStatus(o),
+      payout_status: getPayoutStatus2(o),
+      pay_screenshot_url: getPayScreenshot(o),
+      review_screenshot_url: getReviewScreenshot(o),
+      payout_screenshot_url: getPayoutScreenshot(o),
+      review_link: getReviewLink(o),
+      note: getNote(o),
+      updated_at: nowIso()
+    };
+  }
+
+  async function fetchAllCloudOrders(client, appKey){
+    const pageSize = 2000; // safe for large datasets
+    let offset = 0;
+    const out = [];
+    while(true){
+      const { data, error } = await client
+        .from(ORDERS_TABLE)
+        .select('*')
+        .eq('app_key', appKey)
+        .order('updated_at', { ascending:false })
+        .range(offset, offset + pageSize - 1);
+      if(error) throw error;
+      const arr = Array.isArray(data) ? data : [];
+      out.push(...arr);
+      if(arr.length < pageSize) break;
+      offset += pageSize;
+      // avoid locking UI
+      await new Promise(r=>setTimeout(r, 10));
+    }
+    return out;
+  }
+
+  async function cloudPullOrders(opts){
+    const o = opts || {};
+    const quiet = !!o.quiet;
+    const wrap = (typeof window.getCloudClientOrNull==='function') ? window.getCloudClientOrNull({quiet:true}) : null;
+    if(!wrap || !wrap.client || !wrap.cfg) {
+      if(!quiet && typeof window.toast==='function') toast('请先设置云端（Supabase）');
+      return { ok:false, error:'missing_cloud_cfg' };
+    }
+    const { client, cfg } = wrap;
+    const appKey = String(cfg.appKey || cfg.app_key || '').trim();
+    if(!appKey){
+      if(!quiet && typeof window.toast==='function') toast('云端 app_key 为空');
+      return { ok:false, error:'missing_app_key' };
+    }
+
+    const rows = await fetchAllCloudOrders(client, appKey);
+    const merged = mergeCloudOrdersIntoLocal(rows);
+    try{ if(typeof window.saveNow==='function') await saveNow({skipPayoutSnapshot:false}); else if(typeof window.save==='function') save(); }catch(_e){}
+    try{ localStorage.setItem(LS_LAST_PULL_AT, String(Date.now())); }catch(_e){}
+    // compute a lightweight cloud hash for auto-pull change detection
+    try{
+      const sample = rows.slice(0, 200).map(r=>[r.seller_name,r.order_no,r.updated_at].join('|')).join('||');
+      localStorage.setItem(LS_LAST_CLOUD_HASH, djb2Hash(sample + '::' + rows.length));
+    }catch(_e){}
+
+    if(!quiet && typeof window.toast==='function') toast('云端拉取合并完成：新增'+merged.added+' 更新'+merged.updated,'ok');
+    return { ok:true, merged, rows: rows.length };
+  }
+
+  async function cloudPushOrders(opts){
+    const o = opts || {};
+    const force = !!o.force;
+    const quiet = !!o.quiet;
+
+    const wrap = (typeof window.getCloudClientOrNull==='function') ? window.getCloudClientOrNull({quiet:true}) : null;
+    if(!wrap || !wrap.client || !wrap.cfg) {
+      if(!quiet && typeof window.toast==='function') toast('请先设置云端（Supabase）');
+      return { ok:false, error:'missing_cloud_cfg' };
+    }
+    const { client, cfg } = wrap;
+    const appKey = String(cfg.appKey || cfg.app_key || '').trim();
+    if(!appKey){
+      if(!quiet && typeof window.toast==='function') toast('云端 app_key 为空');
+      return { ok:false, error:'missing_app_key' };
+    }
+
+    // 关键安全策略：永不推送“空覆盖”。即使 force，也只 upsert 现有订单行，不会删除云端。
+    const localOrders = (window.S && Array.isArray(S.orders)) ? S.orders : [];
+    const candidates = [];
+    for(const ord of localOrders){
+      if(!ord) continue;
+      const seller = getSellerName(ord);
+      const orderNo = getOrderNo(ord);
+      if(!seller || !orderNo) continue;
+      const h = computeOrderSyncHash(ord);
+      const prev = ord._cloud_sync_hash;
+      if(force || !prev || prev !== h){
+        candidates.push({ ord, h });
+      }
+    }
+
+    if(candidates.length===0){
+      if(!quiet && typeof window.toast==='function') toast('云端推送：无变更，无需推送','ok');
+      return { ok:true, pushed:0, skipped: localOrders.length };
+    }
+
+    const batchSize = 300;
+    let pushed = 0;
+    for(let i=0;i<candidates.length;i+=batchSize){
+      const chunk = candidates.slice(i, i+batchSize);
+      const rows = chunk.map(x=>localOrderToCloudRow(x.ord, appKey));
+      const { error } = await client.from(ORDERS_TABLE).upsert(rows, { onConflict: 'app_key,seller_name,order_no' });
+      if(error) throw error;
+      // mark success on local
+      for(const x of chunk){
+        try{
+          x.ord._cloud_sync_hash = x.h;
+          setLocalCloudUpdatedAt(x.ord, nowIso());
+        }catch(_e){}
+      }
+      pushed += chunk.length;
+      await new Promise(r=>setTimeout(r, 20));
+    }
+
+    try{ if(typeof window.saveNow==='function') await saveNow({skipPayoutSnapshot:false}); }catch(_e){}
+
+    if(!quiet && typeof window.toast==='function') toast('云端推送完成：更新/新增 '+pushed+' 条','ok');
+    return { ok:true, pushed, total: localOrders.length };
+  }
+
+  async function cloudStatusOrders(opts){
+    const o = opts || {};
+    const quiet = !!o.quiet;
+    const wrap = (typeof window.getCloudClientOrNull==='function') ? window.getCloudClientOrNull({quiet:true}) : null;
+    if(!wrap || !wrap.client || !wrap.cfg) {
+      if(!quiet && typeof window.toast==='function') toast('请先设置云端（Supabase）');
+      return { ok:false, error:'missing_cloud_cfg' };
+    }
+    const { client, cfg } = wrap;
+    const appKey = String(cfg.appKey || cfg.app_key || '').trim();
+    if(!appKey){
+      if(!quiet && typeof window.toast==='function') toast('云端 app_key 为空');
+      return { ok:false, error:'missing_app_key' };
+    }
+    const { count, error } = await client.from(ORDERS_TABLE).select('*', { count:'exact', head:true }).eq('app_key', appKey);
+    if(error) throw error;
+    return { ok:true, count: (typeof count==='number'?count:0) };
+  }
+
+  // ---------------- UI bindings (override existing handlers safely) ----------------
+  function bindButtons(){
+    const bPull = document.getElementById('btnCloudPull');
+    const bPush = document.getElementById('btnCloudPush');
+    const bStatus = document.getElementById('btnCloudStatus');
+    const bForcePush = document.getElementById('btnCloudPushForce') || document.getElementById('btnCloudPush2') || document.getElementById('btnForcePush');
+    const bForcePull = document.getElementById('btnCloudPullForce') || document.getElementById('btnForcePull');
+
+    if(bPull){
+      bPull.onclick = async ()=>{
+        try{ await cloudPullOrders({quiet:false}); if(typeof window.render==='function') render(); }catch(e){
+          console.error(e);
+          const msg = (e && e.message) ? e.message : String(e);
+          if(typeof window.toast==='function') toast('云端拉取失败：'+msg,'err');
+          alert('云端拉取失败：\n'+msg);
+        }
+      };
+    }
+    if(bPush){
+      bPush.onclick = async (ev)=>{
+        try{
+          const force = !!(ev && ev.shiftKey);
+          await cloudPushOrders({quiet:false, force});
+        }catch(e){
+          console.error(e);
+          const msg = (e && e.message) ? e.message : String(e);
+          if(typeof window.toast==='function') toast('云端推送失败：'+msg,'err');
+          alert('云端推送失败：\n'+msg);
+        }
+      };
+    }
+    if(bStatus){
+      bStatus.onclick = async ()=>{
+        try{
+          const st = await cloudStatusOrders({quiet:true});
+          const locOrders = (window.S && Array.isArray(S.orders)) ? S.orders.length : 0;
+          const txt = [
+            location.host + ' 显示',
+            '',
+            '本地来源: IndexedDB('+ (typeof window.MAIN_DB_NAME!=='undefined'?window.MAIN_DB_NAME:'ops_v642_main') +'/kv/'+ (typeof window.MAIN_STATE_KEY!=='undefined'?window.MAIN_STATE_KEY:'main_state_v1') +') via idbGet',
+            '本地统计: 订单'+locOrders,
+            '',
+            '云端(Orders v1)存在: ' + (st.ok ? 'YES' : 'NO'),
+            '云端统计: 订单' + (st.ok ? st.count : 0),
+            '',
+            '策略: 云端不可删除（只增/更新），拉取为合并（不删本地）。'
+          ].join('\n');
+          alert(txt);
+        }catch(e){
+          console.error(e);
+          const msg = (e && e.message) ? e.message : String(e);
+          alert('云端状态失败：\n'+msg);
+        }
+      };
+    }
+
+    // if there are legacy force buttons, map them too
+    if(bForcePush){
+      bForcePush.onclick = async ()=>{
+        try{ await cloudPushOrders({quiet:false, force:true}); }catch(e){
+          console.error(e);
+          const msg = (e && e.message) ? e.message : String(e);
+          alert('强制推送失败：\n'+msg);
+        }
+      };
+    }
+    if(bForcePull){
+      bForcePull.onclick = async ()=>{
+        try{ await cloudPullOrders({quiet:false}); if(typeof window.render==='function') render(); }catch(e){
+          console.error(e);
+          const msg = (e && e.message) ? e.message : String(e);
+          alert('强制拉取失败：\n'+msg);
+        }
+      };
+    }
+  }
+
+  // ---------------- Auto Pull Loop ----------------
+  let __autoPullTimer = null;
+  async function autoPullTick(){
+    try{
+      // Only run if cloud cfg exists
+      const wrap = (typeof window.getCloudClientOrNull==='function') ? window.getCloudClientOrNull({quiet:true}) : null;
+      if(!wrap || !wrap.client || !wrap.cfg) return;
+
+      // Quick change detection: compare cloud count + last updated among top rows
+      // We do a lightweight query first to avoid heavy full pulls.
+      const { client, cfg } = wrap;
+      const appKey = String(cfg.appKey || cfg.app_key || '').trim();
+      if(!appKey) return;
+
+      const { data, error } = await client
+        .from(ORDERS_TABLE)
+        .select('seller_name,order_no,updated_at')
+        .eq('app_key', appKey)
+        .order('updated_at', { ascending:false })
+        .limit(200);
+      if(error) return;
+      const sample = (Array.isArray(data)?data:[]).map(r=>[r.seller_name,r.order_no,r.updated_at].join('|')).join('||');
+      const h = djb2Hash(sample + '::' + (Array.isArray(data)?data.length:0));
+      const last = (function(){ try{return localStorage.getItem(LS_LAST_CLOUD_HASH)||'';}catch(_e){return '';} })();
+      if(h && h !== last){
+        await cloudPullOrders({quiet:true});
+        try{ if(typeof window.render==='function') render(); }catch(_e){}
+      }
+    }catch(_e){
+      // silent
+    }
+  }
+
+  function startAutoPull(){
+    if(__autoPullTimer) return;
+    __autoPullTimer = setInterval(autoPullTick, AUTO_PULL_INTERVAL_MS);
+    // run once shortly after load
+    setTimeout(autoPullTick, 1200);
+  }
+
+  // Expose for debugging
+  window.cloudPullOrdersV1 = cloudPullOrders;
+  window.cloudPushOrdersV1 = cloudPushOrders;
+  window.cloudStatusOrdersV1 = cloudStatusOrders;
+
+  // Override legacy exported functions if exist
+  window.cloudPull = cloudPullOrders;
+  window.cloudPush = cloudPushOrders;
+
+  // Bind after DOM ready
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', ()=>{ bindButtons(); startAutoPull(); });
+  }else{
+    bindButtons(); startAutoPull();
+  }
+
+})();
+</script>
+
 </html>
