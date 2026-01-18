@@ -8643,6 +8643,20 @@ async function payoutSingleConfirm(){
     $("payoutSingleModal").style.display = "none";
     _payoutSingleOrderId = null;
 
+    // 立即让返款列表缓存失效（避免“已结算仍停留在返款列表”的延迟显示）
+    try{
+      S.__rev = (S.__rev||0) + 1;
+      if(UI && UI.__cache){
+        UI.__cache.payoutSig = "";
+        UI.__cache.payoutArr = null;
+      }
+      if(typeof refreshAfterOrderChange==="function") refreshAfterOrderChange();
+      else{
+        if(typeof markDirty==="function"){ markDirty("payout"); markDirty("orders"); markDirty("kpi"); markDirty("batches"); }
+        if(typeof scheduleRender==="function") scheduleRender();
+      }
+    }catch(e){}
+
     // 重新渲染返款页（不影响订单页）
     if($("tab-payout")) renderPayout();
     await saveNow();
@@ -8779,6 +8793,20 @@ if(typeof window.confirmPayoutModal !== "function"){
       if(typeof persistPayoutSnapshot==="function") persistPayoutSnapshot();
 
       // cleanup UI selection + close
+      // 立即让返款列表缓存失效（避免“已结算仍停留在返款列表”的延迟显示）
+      try{
+        S.__rev = (S.__rev||0) + 1;
+        if(UI && UI.__cache){
+          UI.__cache.payoutSig = "";
+          UI.__cache.payoutArr = null;
+        }
+        if(typeof refreshAfterOrderChange==="function") refreshAfterOrderChange();
+        else{
+          if(typeof markDirty==="function"){ markDirty("payout"); markDirty("orders"); markDirty("kpi"); markDirty("batches"); }
+          if(typeof scheduleRender==="function") scheduleRender();
+        }
+      }catch(e){}
+
       UI.payoutSelected = new Set();
       renderPayoutSelectedTags();
       if(typeof closePayoutModal==="function") closePayoutModal();
