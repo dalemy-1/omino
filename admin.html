@@ -10449,7 +10449,8 @@ async function cloudStatusFixed(){
   }
 
   // Override globals + rebind buttons
-  // [PATCH] Do NOT override cloudStatus/cloudPush here (prevents accidental overwrite to ops_cloud_snapshots).
+  window.cloudStatus = cloudStatusFixed;
+  window.cloudPush = cloudPushFixed;
 
   document.addEventListener("DOMContentLoaded", ()=>{
     const bCfg = document.getElementById("btnCloudCfg");
@@ -10457,8 +10458,8 @@ async function cloudStatusFixed(){
     const bPull = document.getElementById("btnCloudPull");
     const bStatus = document.getElementById("btnCloudStatus");
 
-    if(bPush) bPush.onclick = (e)=>{ try{ if(window.cloudPush) window.cloudPush({force: !!(e && e.shiftKey)}); }catch(_e){} };
-    if(bStatus) bStatus.onclick = ()=>{ try{ if(window.cloudStatus) window.cloudStatus(); }catch(_e){} };
+    if(bPush) bPush.onclick = ()=>{ cloudPushFixed(); };
+    if(bStatus) bStatus.onclick = ()=>{ cloudStatusFixed(); };
 
     // Keep original pull/cfg if already wired by main app
     if(bCfg && !bCfg.onclick && typeof window.cloudPromptAndSave==="function") bCfg.onclick = ()=>window.cloudPromptAndSave();
@@ -11049,8 +11050,35 @@ async function cloudPullFINAL(){
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
       let obj = null;
-      try{ obj = data.payload ? JSON.parse(data.payload) : null; }catch(e){ obj = null; }
-      if(obj && obj.env) obj = obj.env; //兼容旧封装
+      // payload can be:
+      // - stringified wrapper {env:{...}}
+      // - packed {enc:'json'|'gzip-base64', data:'...'}
+      // - raw json string of state
+      async function _decodeCloudPayload(payloadStr){
+        if(!payloadStr) return null;
+        let tmp=null;
+        try{ tmp = JSON.parse(payloadStr); }catch(e){ tmp = null; }
+        if(tmp==null) return null;
+        if(tmp.env && typeof tmp.env==='object') return tmp.env;
+        if(tmp.enc && tmp.data){
+          if(tmp.enc==='json'){
+            try{ return JSON.parse(tmp.data); }catch(e){ return null; }
+          }
+          if(tmp.enc==='gzip-base64'){
+            try{
+              const bin = atob(tmp.data);
+              const u8 = new Uint8Array(bin.length);
+              for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
+              if(typeof DecompressionStream==='undefined') return null;
+              const ds = new DecompressionStream('gzip');
+              const text = await new Response(new Blob([u8]).stream().pipeThrough(ds)).text();
+              return JSON.parse(text);
+            }catch(e){ return null; }
+          }
+        }
+        return tmp;
+      }
+      obj = await _decodeCloudPayload(data.payload);
 
       // Chunked payload support (manifest + chunks)
       if(obj && obj.__chunked__){
@@ -11339,41 +11367,74 @@ async function cloudPullFINAL(){
   }
   function _clientHasFrom(x){ return !!(x && typeof x.from==="function"); }
 async function fetchCloudSnapshot(client, appKey, cfgFallback){
+    // Decode payload formats across V23/V25/V30:
+    // - jsonb object: {sellers,products,orders,batches}
+    // - wrapper: {env:{...}}
+    // - packed string: {enc:'json',data:'{...}'} or {enc:'gzip-base64',data:'...'}
+    async function _decodeToState(payloadVal){
+      if(payloadVal==null) return null;
+
+      // If jsonb object already
+      if(typeof payloadVal === 'object'){
+        // unwrap common wrapper
+        if(payloadVal.env && typeof payloadVal.env==='object') return payloadVal.env;
+
+        // packed object (rare): {enc,data}
+        if(payloadVal.enc && payloadVal.data){
+          if(payloadVal.enc==='json'){
+            try{ return JSON.parse(payloadVal.data); }catch(e){ return null; }
+          }
+          if(payloadVal.enc==='gzip-base64'){
+            try{
+              const bin = atob(payloadVal.data);
+              const u8 = new Uint8Array(bin.length);
+              for(let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i);
+              if(typeof DecompressionStream==='undefined') return null;
+              const ds = new DecompressionStream('gzip');
+              const text = await new Response(new Blob([u8]).stream().pipeThrough(ds)).text();
+              return JSON.parse(text);
+            }catch(e){ return null; }
+          }
+        }
+
+        // assume it's already the state
+        return payloadVal;
+      }
+
+      // If string: could be raw JSON, wrapper JSON, or packed JSON
+      if(typeof payloadVal === 'string'){
+        let obj=null;
+        try{ obj = JSON.parse(payloadVal); }catch(e){ obj=null; }
+        if(obj==null) return null;
+        // wrapper
+        if(obj.env && typeof obj.env==='object') return obj.env;
+        // packed
+        if(obj.enc && obj.data){
+          return await _decodeToState(obj);
+        }
+        // raw state object
+        return obj;
+      }
+
+      return null;
+    }
+
     // If supabase-js client is missing, fall back to PostgREST directly
     if(!_clientHasFrom(client)){
       const cfg = cfgFallback || (client && client.cfg) || null;
-      if(!cfg || !cfg.url || !cfg.anon) throw new Error("cloud_cfg_missing_for_rest");
+      if(!cfg || !cfg.url || !cfg.anon) throw new Error('cloud_cfg_missing_for_rest');
       const data = await _restSelectOne(cfg, TABLE, appKey);
       if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
-      let obj = null;
-      if(data.payload==null){
-        obj = null;
-      }else if(typeof data.payload==="string"){
-        try{ obj = JSON.parse(data.payload); }catch(e){ obj = null; }
-      }else if(typeof data.payload==="object"){
-        obj = data.payload;
-      }else{ obj = null; }
-      if(obj && obj.env) obj = obj.env;
-      const st = normState(obj);
-      return { exists:true, state: st, hash: data.hash || null, updated_at: data.updated_at || null };
+      const decoded = await _decodeToState(data.payload);
+      return { exists:true, state: normState(decoded), hash: data.hash || null, updated_at: data.updated_at || null };
     }
 
-    const { data, error } = await client.from(TABLE).select("*").eq("app_key", appKey).maybeSingle();
+    const { data, error } = await client.from(TABLE).select('*').eq('app_key', appKey).maybeSingle();
     if(error) throw error;
     if(!data) return { exists:false, state:normState(null), hash:null, updated_at:null };
-    let obj = null;
-    // payload may be stored as jsonb (object) or as historical stringified JSON
-    if(data.payload==null){
-      obj = null;
-    }else if(typeof data.payload==="string"){
-      try{ obj = JSON.parse(data.payload); }catch(e){ obj = null; }
-    }else if(typeof data.payload==="object"){
-      obj = data.payload;
-    }else{
-      obj = null;
-    }
-    if(obj && obj.env) obj = obj.env; // compat wrapper
-    return { exists:true, state: normState(obj), hash: data.hash || null, updated_at: data.updated_at || null };
+
+    const decoded = await _decodeToState(data.payload);
+    return { exists:true, state: normState(decoded), hash: data.hash || null, updated_at: data.updated_at || null };
   }
 
   function pickUpdatedAt(x){
@@ -11821,6 +11882,52 @@ if(!_autoEnabled){
     return arr.map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,8);
   }
 
+
+  // ---- payload packing to avoid Supabase statement timeout (57014) ----
+  async function packPayload(obj){
+    const json = JSON.stringify(obj);
+    // below threshold: store as plain JSON wrapper
+    if(json.length < 400000){
+      return { enc: 'json', data: obj };
+    }
+    // try gzip via CompressionStream
+    if(typeof CompressionStream === 'function'){
+      try{
+        const cs = new CompressionStream('gzip');
+        const blob = new Blob([json], { type: 'application/json' });
+        const stream = blob.stream().pipeThrough(cs);
+        const ab = await new Response(stream).arrayBuffer();
+        const u8 = new Uint8Array(ab);
+        let s = '';
+        for(let i=0;i<u8.length;i++) s += String.fromCharCode(u8[i]);
+        const b64 = btoa(s);
+        return { enc: 'gzip-base64', data: b64, bytes: u8.length, json_chars: json.length };
+      }catch(e){
+        console.warn('[CLEAN-SYNC] gzip pack failed, fallback to json wrapper', e);
+      }
+    }
+    // fallback: store as json wrapper (may still fail for very large payload)
+    return { enc: 'json', data: obj, note: 'no_gzip' };
+  }
+
+  async function unpackPayload(payload){
+    if(!payload) return null;
+    // new wrapper formats
+    if(payload.enc === 'json') return payload.data;
+    if(payload.enc === 'gzip-base64'){
+      if(typeof DecompressionStream !== 'function'){
+        throw new Error('当前浏览器不支持 DecompressionStream，无法解压云端快照（gzip-base64）。建议用 Chrome 最新版。');
+      }
+      const bin = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
+      const ds = new DecompressionStream('gzip');
+      const stream = new Blob([bin]).stream().pipeThrough(ds);
+      const txt = await new Response(stream).text();
+      return JSON.parse(txt || '{}');
+    }
+    // backward compatibility: payload already plain state object
+    return payload;
+  }
+
   function restHeaders(anon){
     return {
       'apikey': anon,
@@ -11845,12 +11952,12 @@ if(!_autoEnabled){
     const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
     const r = await fetch(url, {
       method:'POST',
-      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify([row])
     });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
-    // return representation array or empty
+    // return may be empty when return=minimal
     try{ const arr = JSON.parse(text || '[]'); return arr[0] || null; }catch(_){ return null; }
   }
 
@@ -11866,97 +11973,6 @@ if(!_autoEnabled){
     return { rec, raw, norm };
   }
 
-  // =====================
-  // Cloud Archive v1 (orders row upsert)
-  // 目标：
-  // - 云端作为“存档库”，只允许新增/更新订单与状态字段
-  // - 避免大快照 upsert 导致 57014 statement timeout / 空快照覆盖
-  // - 云端永不删除（由数据库 RLS + trigger 保障）
-  // =====================
-  const CLOUD_ORDERS_TABLE = 'ops_orders_v1';
-  const PUSH_CHUNK = 200;
-
-  function _pick(o, keys){
-    for(const k of keys){
-      const v = o && o[k];
-      if(v!=null && String(v).trim()!=='') return v;
-    }
-    return null;
-  }
-  function _orderNo(o){
-    return String(_pick(o, ['orderNo','order_no','orderId','order_id','orderNumber','order_number'])||'').trim();
-  }
-  function _sellerName(o){
-    return String(_pick(o, ['sellerName','seller','seller_name','sellerLabel'])||'').trim();
-  }
-  function _market(o){
-    return String(_pick(o, ['market','country'])||'').trim();
-  }
-  function _asin(o){
-    return String(_pick(o, ['asin','ASIN'])||'').trim();
-  }
-  function _productName(o){
-    return String(_pick(o, ['productName','product_name','product','name'])||'').trim();
-  }
-  function _payStatus(o){
-    const settled = !!(o && o.principal && (o.principal.settled===true || o.principal.settled===1 || String(o.principal.settled||'').toLowerCase()==='true'));
-    return settled ? 'paid' : 'unpaid';
-  }
-  function _reviewStatus(o){
-    try{ return normReviewStatus(o); }catch(_){
-      const v = _pick(o, ['review_status','reviewStatus','review']);
-      return v==null? 'PENDING' : String(v).toUpperCase();
-    }
-  }
-  function _payoutStatus(o){
-    try{ return getPayoutStatus(o); }catch(_){
-      return String(_pick(o, ['payout_status','payoutStatus','payout_state'])||'').trim() || 'not_ready';
-    }
-  }
-  function _payScreenshot(o){
-    const p = (o && o.principal) ? o.principal : {};
-    return String(_pick(o, ['pay_screenshot_url','payScreenshot','pay_screenshot','principalScreenshot','principal_screenshot']) || _pick(p, ['screenshot','pay_screenshot','pay_screenshot_url']) || '').trim();
-  }
-  function _reviewScreenshot(o){
-    const r = (o && o.review) ? o.review : {};
-    return String(_pick(o, ['review_screenshot_url','reviewScreenshot','review_screenshot','review_proof']) || _pick(r, ['screenshot','review_screenshot','review_screenshot_url']) || '').trim();
-  }
-  function _payoutScreenshot(o){
-    const p = (o && o.payout) ? o.payout : {};
-    return String(_pick(o, ['payout_screenshot_url','payoutScreenshot','payout_screenshot','payout_proof']) || _pick(p, ['screenshot','payout_screenshot','payout_screenshot_url']) || '').trim();
-  }
-  function _reviewLink(o){
-    const r = (o && o.review) ? o.review : {};
-    return String(_pick(o, ['review_link','reviewLink']) || _pick(r, ['link','url']) || '').trim();
-  }
-  function _note(o){
-    return String(_pick(o, ['note','remark','memo']) || '').trim();
-  }
-
-  async function restUpsertOrders(cfg, rows){
-    const base = cfg.url.replace(/\/+$/,'');
-    const url = `${base}/rest/v1/${CLOUD_ORDERS_TABLE}?on_conflict=app_key,seller_name,order_no`;
-    const r = await fetch(url, {
-      method:'POST',
-      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(rows)
-    });
-    const text = await r.text();
-    if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,400)}`);
-    return true;
-  }
-
-  async function restSelectOrdersPage(cfg, limit, offset){
-    const base = cfg.url.replace(/\/+$/,'');
-    const app = encodeURIComponent(cfg.app);
-    const url = `${base}/rest/v1/${CLOUD_ORDERS_TABLE}?select=app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,pay_screenshot_url,review_screenshot_url,payout_screenshot_url,review_link,note,created_at,updated_at&app_key=eq.${app}&limit=${limit}&offset=${offset}`;
-    const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
-    const text = await r.text();
-    if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,400)}`);
-    const arr = JSON.parse(text||'[]');
-    return Array.isArray(arr) ? arr : [];
-  }
-
   async function cloudStatus(){
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app){
@@ -11964,25 +11980,27 @@ if(!_autoEnabled){
       return;
     }
     const local = await getLocalStateForPush();
-    let cloudCount = 0;
-    let cloudUpdated = '';
-    try{
-      const page = await restSelectOrdersPage(cfg, 1, 0);
-      // 无法直接 count（避免 schema 依赖），这里用“是否存在”+更新时间探测
-      if(page && page.length){
-        cloudCount = -1; // unknown
-        cloudUpdated = page[0].updated_at || '';
-      }
-    }catch(e){ uiAlert('云端状态失败：' + e.message); return; }
+    let cloud = null;
+    try{ cloud = await restSelect(cfg); }catch(e){ uiAlert('云端状态失败：' + e.message); return; }
 
+    let cloudNorm = { sellers:[], products:[], orders:[], batches:[] };
+    if(cloud && cloud.payload){
+      try{
+        const rawCloud = await unpackPayload(cloud.payload);
+        cloudNorm = normalizeState(rawCloud||{});
+      }catch(e){
+        // fallback: attempt direct normalize (legacy plain payload)
+        cloudNorm = normalizeState(cloud.payload||{});
+      }
+    }
     const lines = [
       `本地来源: IndexedDB(${CANON_DB}/${CANON_STORE}/${CANON_KEY})`,
       `本地统计: 卖家${local.norm.sellers.length} 产品${local.norm.products.length} 订单${local.norm.orders.length} 批次${local.norm.batches.length}`,
       '',
-      `云端表: ${CLOUD_ORDERS_TABLE}（订单存档：只增不删）`,
-      `云端存在: YES`,
-      cloudUpdated ? `云端最近 updated_at: ${cloudUpdated}` : '云端最近 updated_at: -',
-      (cloudCount===-1) ? `云端订单数: （未统计，拉取可校验）` : `云端订单数: ${cloudCount}`
+      `云端存在: ${cloud ? 'YES' : 'NO'}`,
+      cloud ? `云端 hash: ${cloud.hash||''}` : '',
+      cloud ? `云端 updated_at: ${cloud.updated_at||''}` : '',
+      cloud ? `云端统计: 卖家${cloudNorm.sellers.length} 产品${cloudNorm.products.length} 订单${cloudNorm.orders.length} 批次${cloudNorm.batches.length}` : ''
     ].filter(Boolean).join('\n');
     uiAlert(lines);
   }
@@ -11991,114 +12009,48 @@ if(!_autoEnabled){
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
     const local = await getLocalStateForPush();
-    const orders = Array.isArray(local.norm.orders) ? local.norm.orders : [];
-    if(!orders.length){
-      return { ok:true, counts: { sellers: local.norm.sellers.length, products: local.norm.products.length, orders:0, batches: local.norm.batches.length }, hash: 'empty' };
+    // If still zero, we show raw keys for diagnosis in console
+    if((local.norm.sellers.length + local.norm.products.length + local.norm.orders.length + local.norm.batches.length) === 0){
+      console.warn('[CLEAN-SYNC] local state normalized to empty. keys=', local.norm._rawKeys, 'rec=', local.rec);
+    }
+    const snapshot = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
+    const counts = { sellers: snapshot.sellers.length, products: snapshot.products.length, orders: snapshot.orders.length, batches: snapshot.batches.length };
+
+    // safety: prevent empty snapshot from overwriting non-empty cloud unless manual force
+    let cloud = null;
+    try{ cloud = await restSelect(cfg); }catch(_){ cloud = null; }
+    if(cloud && cloud.payload){
+      try{
+        const rawCloud0 = await unpackPayload(cloud.payload);
+        const cloudNorm0 = normalizeState(rawCloud0||{});
+        const cloudTotal = cloudNorm0.sellers.length + cloudNorm0.products.length + cloudNorm0.orders.length + cloudNorm0.batches.length;
+        const localTotal = counts.sellers + counts.products + counts.orders + counts.batches;
+        if(localTotal === 0 && cloudTotal > 0){
+          throw new Error('安全拦截：本地快照为空，已阻止覆盖云端。请先确认本地数据是否加载正确，必要时用【强制推送】。');
+        }
+      }catch(e){ /* ignore unpack errors for safety check */ }
     }
 
-    // 订单行级 upsert（分批）
-    let okN = 0;
-    const now = nowISO();
-    for(let i=0;i<orders.length;i+=PUSH_CHUNK){
-      const slice = orders.slice(i, i+PUSH_CHUNK);
-      const rows = slice.map(o=>{
-        const seller = _sellerName(o);
-        const ono = _orderNo(o);
-        return {
-          app_key: cfg.app,
-          seller_name: seller,
-          order_no: ono,
-          market: _market(o),
-          asin: _asin(o),
-          product_name: _productName(o),
-          pay_status: _payStatus(o),
-          review_status: _reviewStatus(o),
-          payout_status: _payoutStatus(o),
-          pay_screenshot_url: _payScreenshot(o) || null,
-          review_screenshot_url: _reviewScreenshot(o) || null,
-          payout_screenshot_url: _payoutScreenshot(o) || null,
-          review_link: _reviewLink(o) || null,
-          note: _note(o) || null,
-          updated_at: now
-        };
-      }).filter(r=>r.seller_name && r.order_no);
-      if(!rows.length) continue;
-      await restUpsertOrders(cfg, rows);
-      okN += rows.length;
-    }
-
-    const hash = await sha256Hex(cfg.app + '|' + String(okN) + '|' + now);
-    return { ok:true, counts: { sellers: local.norm.sellers.length, products: local.norm.products.length, orders: okN, batches: local.norm.batches.length }, hash };
+    const hash = await sha256Hex(JSON.stringify(snapshot));
+    const packed = await packPayload(snapshot);
+    const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload: packed };
+    await restUpsert(cfg, row);
+    return { ok:true, counts, hash, packed_enc: packed.enc };
   }
 
   async function cloudPull(opts){
-    opts = opts||{};
+  opts = opts||{};
+  const force = !!opts.force;
+
     const cfg = readCfg();
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
-
-    const local = await getLocalStateForPush();
-    const baseState = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
-    const map = new Map();
-    (Array.isArray(baseState.orders)?baseState.orders:[]).forEach(o=>{
-      const k = _sellerName(o)+'||'+_orderNo(o);
-      if(k!=='||') map.set(k, o);
-    });
-
-    // 分页拉取云端订单
-    const pulled = [];
-    const limit = 1000;
-    for(let offset=0;;offset+=limit){
-      const page = await restSelectOrdersPage(cfg, limit, offset);
-      if(!page.length) break;
-      pulled.push(...page);
-      if(page.length < limit) break;
-      if(pulled.length > 200000) break; // safety
-    }
-
-    // 合并：云端为存档权威（状态字段覆盖本地）
-    for(const r of pulled){
-      const k = String(r.seller_name||'').trim()+'||'+String(r.order_no||'').trim();
-      if(!k || k==='||') continue;
-      const existed = map.get(k);
-      if(existed){
-        // 覆盖状态字段
-        existed.payout_status = r.payout_status || existed.payout_status;
-        existed.review = existed.review || {};
-        existed.review.status = r.review_status || existed.review.status;
-        existed.review.link = r.review_link || existed.review.link;
-        existed.review.screenshot = r.review_screenshot_url || existed.review.screenshot;
-        existed.principal = existed.principal || {};
-        existed.principal.settled = (String(r.pay_status||'').toLowerCase()==='paid');
-        existed.note = (r.note!=null ? r.note : existed.note);
-        existed.asin = r.asin || existed.asin;
-        existed.productName = r.product_name || existed.productName;
-        existed.market = r.market || existed.market;
-        existed.sellerName = r.seller_name || existed.sellerName;
-        existed.orderNo = r.order_no || existed.orderNo;
-      }else{
-        // 新订单：按当前系统可识别的最小结构构造
-        map.set(k, {
-          id: k,
-          orderNo: r.order_no,
-          orderId: r.order_no,
-          sellerName: r.seller_name,
-          market: r.market||'',
-          asin: r.asin||'',
-          productName: r.product_name||'',
-          note: r.note||'',
-          review: { status: r.review_status||'PENDING', link: r.review_link||'', screenshot: r.review_screenshot_url||'' },
-          principal: { settled: (String(r.pay_status||'').toLowerCase()==='paid') },
-          payout_status: r.payout_status||'not_ready',
-          payout: { status: r.payout_status||'not_ready', screenshot: r.payout_screenshot_url||'' }
-        });
-      }
-    }
-
-    const mergedOrders = Array.from(map.values());
-    const record = { key: CANON_KEY, value: { sellers: baseState.sellers, products: baseState.products, orders: mergedOrders, batches: baseState.batches }, updated_at: nowISO() };
+    const cloud = await restSelect(cfg);
+    if(!cloud || !cloud.payload) throw new Error('云端无快照（payload 为空）');
+    const rawCloud = await unpackPayload(cloud.payload);
+    const norm = normalizeState(rawCloud||{});
+    const record = { key: CANON_KEY, value: { sellers: norm.sellers, products: norm.products, orders: norm.orders, batches: norm.batches }, updated_at: nowISO() };
     await idbKvPut(record);
-    const hash = await sha256Hex(cfg.app + '|pull|' + String(pulled.length) + '|' + nowISO());
-    return { ok:true, counts: { sellers: baseState.sellers.length, products: baseState.products.length, orders: pulled.length, batches: baseState.batches.length }, hash };
+    return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: cloud.hash };
   }
 
   function bind(){
@@ -12784,15 +12736,326 @@ if(!_autoEnabled){
 
 
 <script>
-// [PATCH] Force cloud buttons to use current window.cloudPush/cloudPull/cloudStatus (last-write-wins).
-window.addEventListener('DOMContentLoaded', ()=>{
-  const bPush=document.getElementById('btnCloudPush');
-  const bPull=document.getElementById('btnCloudPull');
-  const bStatus=document.getElementById('btnCloudStatus');
-  if(bPush) bPush.onclick=(e)=>{ try{ if(window.cloudPush) window.cloudPush({force: !!(e&&e.shiftKey)}); }catch(err){ console.error(err); } };
-  if(bPull) bPull.onclick=(e)=>{ try{ if(window.cloudPull) window.cloudPull({force: !!(e&&e.shiftKey)}); }catch(err){ console.error(err); } };
-  if(bStatus) bStatus.onclick=()=>{ try{ if(window.cloudStatus) window.cloudStatus(); }catch(err){ console.error(err); } };
-}, { once:true });
+// ===== Robust Cloud Sync Override (V31): prevent empty/partial overwrite + reduce payload size + support enc payload =====
+(function(){
+  const TABLE='ops_cloud_snapshots_v1';
+  const AUTOPUSH_KEY='OPS_CLOUD_AUTOPUSH';
+
+  function _byId(id){ return document.getElementById(id); }
+  function _nowHash(){ return Date.now().toString(16); }
+  function _safeJsonParse(t){ try{return JSON.parse(t);}catch(e){return null;} }
+
+  function _countState(st){
+    try{
+      if(typeof window._countSnapshot==='function') return window._countSnapshot(st||{});
+    }catch(e){}
+    const s=st||{};
+    return {
+      sellers: Array.isArray(s.sellers)?s.sellers.length: (s.sellers?Object.keys(s.sellers).length:0),
+      products: Array.isArray(s.products)?s.products.length: (s.products?Object.keys(s.products).length:0),
+      orders: Array.isArray(s.orders)?s.orders.length: (s.orders?Object.keys(s.orders).length:0),
+      batches: Array.isArray(s.batches)?s.batches.length: (s.batches?Object.keys(s.batches).length:0),
+    };
+  }
+
+  async function _gzipBase64(str){
+    // Best effort. If unsupported, return null.
+    try{
+      if(!('CompressionStream' in window)) return null;
+      const cs = new CompressionStream('gzip');
+      const b = new Blob([str], {type:'application/json'});
+      const stream = b.stream().pipeThrough(cs);
+      const ab = await new Response(stream).arrayBuffer();
+      let bin = '';
+      const bytes = new Uint8Array(ab);
+      const chunk=0x8000;
+      for(let i=0;i<bytes.length;i+=chunk){
+        bin += String.fromCharCode.apply(null, bytes.subarray(i,i+chunk));
+      }
+      return btoa(bin);
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function _ungzipBase64(b64){
+    try{
+      if(!('DecompressionStream' in window)) return null;
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+      const ds = new DecompressionStream('gzip');
+      const stream = new Blob([bytes]).stream().pipeThrough(ds);
+      const txt = await new Response(stream).text();
+      return txt;
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function _decodePayload(payload){
+    // payload may be {v, state, meta} OR {enc:'gzip', data:'base64'} OR JSON string
+    if(payload==null) return null;
+    if(typeof payload==='string'){
+      const j=_safeJsonParse(payload);
+      if(j) return _decodePayload(j);
+      return null;
+    }
+    if(typeof payload!=='object') return null;
+
+    if(payload.enc && payload.data){
+      if(payload.enc==='gzip-base64' || payload.enc==='gzip'){
+        const txt = await _ungzipBase64(payload.data);
+        if(!txt) return null;
+        const j=_safeJsonParse(txt);
+        if(!j) return null;
+        return _decodePayload(j);
+      }
+      if(payload.enc==='json' && typeof payload.data==='string'){
+        const j=_safeJsonParse(payload.data);
+        if(!j) return null;
+        return _decodePayload(j);
+      }
+    }
+
+    // common wrappers
+    if(payload.state && typeof payload.state==='object') return payload.state;
+    if(payload.v && payload.state) return payload.state;
+
+    return payload; // fallback
+  }
+
+  async function _getCloudClient(){
+    if(typeof window.getCloudClientOrNull==='function') return window.getCloudClientOrNull();
+    return null;
+  }
+
+  async function _readLocalPrimary(){
+    // Prefer helper if exists
+    if(typeof window.getLocalSnapshotPreferIDB==='function'){
+      const r = await window.getLocalSnapshotPreferIDB();
+      const st = r && (r.data||r.state||r);
+      return { state: st||{}, source: (r&&r.source)||'unknown' };
+    }
+    // Fallback to global S if exists
+    const st = (typeof window.S==='object' && window.S) ? window.S : {};
+    return { state: st, source:'window.S' };
+  }
+
+  async function _fetchCloudRow(sb, app_key){
+    const { data, error } = await sb.from(TABLE).select('app_key,hash,updated_at,created_at,payload').eq('app_key', app_key).maybeSingle();
+    if(error) throw error;
+    return data||null;
+  }
+
+  async function robustCloudStatus(){
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+    try{
+      const row = await _fetchCloudRow(sb, cfg.app_key);
+      if(!row) return alert('云端无快照（该 app_key 尚未推送过）。');
+      const st = await _decodePayload(row.payload||{});
+      const c = _countState(st||{});
+      alert(
+        '云端快照状态\n\n' +
+        'app_key: ' + row.app_key + '\n' +
+        'hash: ' + row.hash + '\n' +
+        'updated_at: ' + row.updated_at + '\n' +
+        'created_at: ' + row.created_at + '\n\n' +
+        '内容统计：卖家' + c.sellers + ' 产品' + c.products + ' 订单' + c.orders + ' 批次' + c.batches
+      );
+    }catch(e){
+      console.error(e);
+      alert('云端状态失败：' + (e && (e.message||e.toString()) ));
+    }
+  }
+
+  async function robustCloudPush(opts){
+    opts = opts||{};
+    const force = !!opts.force;
+    const quiet = !!opts.quiet;
+
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+
+    // local
+    const local = await _readLocalPrimary();
+    const localState0 = local.state || {};
+    const lc0 = _countState(localState0);
+
+    // cloud existing (for safety)
+    let cloudRow = null, cloudState = null, cc = {sellers:0,products:0,orders:0,batches:0};
+    try{
+      cloudRow = await _fetchCloudRow(sb, cfg.app_key);
+      if(cloudRow){
+        cloudState = await _decodePayload(cloudRow.payload||{});
+        cc = _countState(cloudState||{});
+      }
+    }catch(e){
+      // ignore status failure; still allow push if force
+      if(!force){
+        console.warn('cloud precheck failed', e);
+      }
+    }
+
+    // Safety gate: prevent accidental cloud wipe when local is empty/smaller.
+    // Policy target: 云端数据默认“禁止删除”。
+    // - 非强制推送：只允许“增量/覆盖”，不允许把云端已有数据变少。
+    // - 强制推送：允许本地覆盖云端（用于特殊场景）。
+    if(!force && cloudRow){
+      const localSum0 = lc0.sellers+lc0.products+lc0.orders+lc0.batches;
+      const cloudSum0 = cc.sellers+cc.products+cc.orders+cc.batches;
+      if(localSum0===0 && cloudSum0>0){
+        alert('已阻止推送：本地数据为空，但云端存在数据。\n\n如确需覆盖云端，请点“强制推送”。');
+        return;
+      }
+      // If local has orders=0 but cloud has orders>0, treat as dangerous
+      if(lc0.orders===0 && cc.orders>0){
+        alert('已阻止推送：本地订单为 0，但云端订单为 '+cc.orders+'。\n\n如确需覆盖云端，请点“强制推送”。');
+        return;
+      }
+      // Additional hard guard: do not allow any category to shrink (cloud delete) unless force
+      if(lc0.sellers < cc.sellers || lc0.products < cc.products || lc0.orders < cc.orders || lc0.batches < cc.batches){
+        alert(
+          '已阻止推送：检测到“会减少云端数据”的推送（默认禁止删除云端数据）。\n\n' +
+          '云端：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches+'\n' +
+          '本地：卖家'+lc0.sellers+' 产品'+lc0.products+' 订单'+lc0.orders+' 批次'+lc0.batches+'\n\n' +
+          '如确需用本地覆盖云端，请点“强制推送”。'
+        );
+        return;
+      }
+    }
+
+    // Merge policy (no-delete by default): cloud-first union, then local overrides by id.
+    function _idOf(o){
+      if(!o || typeof o!=='object') return '';
+      return String(o.id || o.order_id || o.product_id || o.seller_id || o.batch_id || o.key || '');
+    }
+    function _mergeArrNoDelete(cloudArr, localArr){
+      const out = [];
+      const map = new Map();
+      (cloudArr||[]).forEach(it=>{ const k=_idOf(it); if(k){ map.set(k, it); } else { out.push(it); } });
+      (localArr||[]).forEach(it=>{ const k=_idOf(it); if(k){ map.set(k, it); } else { out.push(it); } });
+      // preserve stable order: cloud-first keys, then local-only keys
+      const seen = new Set();
+      (cloudArr||[]).forEach(it=>{ const k=_idOf(it); if(k && map.has(k) && !seen.has(k)){ out.push(map.get(k)); seen.add(k); } });
+      (localArr||[]).forEach(it=>{ const k=_idOf(it); if(k && map.has(k) && !seen.has(k)){ out.push(map.get(k)); seen.add(k); } });
+      return out;
+    }
+
+    const mergedState = (!force && cloudState) ? {
+      sellers: _mergeArrNoDelete(cloudState.sellers||[], localState0.sellers||[]),
+      products: _mergeArrNoDelete(cloudState.products||[], localState0.products||[]),
+      orders: _mergeArrNoDelete(cloudState.orders||[], localState0.orders||[]),
+      batches: _mergeArrNoDelete(cloudState.batches||[], localState0.batches||[])
+    } : localState0;
+
+    const lc = _countState(mergedState||{});
+
+    // Build payload (no payload_str to avoid doubling size)
+    const hash = _nowHash();
+    const raw = { v:2, state: mergedState||{}, meta:{ source: local.source||'unknown', pushed_at: new Date().toISOString(), policy:'no-delete-default' } };
+
+    // Try compress if large
+    let payloadObj = raw;
+    try{
+      const rawStr = JSON.stringify(raw);
+      // lower threshold: push is snapshot-level, always prefer compression once medium/large
+      if(rawStr.length > 200*1024){
+        const b64 = await _gzipBase64(rawStr);
+        if(b64 && b64.length < rawStr.length){
+          payloadObj = { enc:'gzip-base64', data: b64, v:1, note:'auto-gzip' };
+        }else{
+          // fall back to plain json string wrapper (still avoids deep object clone issues)
+          payloadObj = { enc:'json', data: rawStr, v:1 };
+        }
+      }
+    }catch(e){}
+
+    // Upsert with returning minimal when supported
+    try{
+      const { error } = await sb.from(TABLE).upsert(
+        { app_key: cfg.app_key, hash, payload: payloadObj },
+        { onConflict:'app_key', returning:'minimal' }
+      );
+      if(error) throw error;
+      const msg = '云端推送成功：卖家'+lc.sellers+' 产品'+lc.products+' 订单'+lc.orders+' 批次'+lc.batches+'（hash='+hash+'）';
+      if(!quiet){
+        if(typeof window.toast==='function') window.toast(msg); else alert(msg);
+      }
+    }catch(e){
+      console.error(e);
+      const m = (e && (e.message||e.toString())) || 'unknown';
+      alert('云端推送失败：' + m + '\n\n若出现 57014/statement timeout：建议先关闭自动推送，仅手动推送；或使用“导出JSON→导入JSON”在不同设备/域名迁移。');
+    }
+  }
+
+  async function robustCloudPull(opts){
+    opts = opts||{};
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+    try{
+      const row = await _fetchCloudRow(sb, cfg.app_key);
+      if(!row) return alert('云端无快照（该 app_key 尚未推送过）。');
+      const st = await _decodePayload(row.payload||{});
+      if(!st) return alert('云端快照 payload 为空或无法解析。');
+      const c = _countState(st||{});
+      const ok = confirm(
+        '将云端快照覆盖到本地（IndexedDB/LocalStorage）。\n\n' +
+        '云端内容统计：卖家'+c.sellers+' 产品'+c.products+' 订单'+c.orders+' 批次'+c.batches+'\n' +
+        'hash='+row.hash+'\n\n继续吗？'
+      );
+      if(!ok) return;
+      if(typeof window._writePrimaryState==='function'){
+        await window._writePrimaryState(st);
+      }else if(typeof window.setLocalSnapshot==='function'){
+        await window.setLocalSnapshot(st);
+      }else{
+        // last resort: try helper from earlier override
+        if(typeof window.getLocalSnapshotPreferIDB==='function'){
+          // reuse earlier helper name if exposed
+          // do nothing
+        }
+        // try write via IDB helpers if present
+        try{
+          if(typeof window._idbSetAnyKv==='function'){
+            await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',st);
+          }
+        }catch(e){}
+        try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(st||{})); }catch(e){}
+      }
+      if(typeof window.toast==='function') window.toast('云端拉取完成：卖家'+c.sellers+' 产品'+c.products+' 订单'+c.orders+' 批次'+c.batches+'（hash='+row.hash+'）');
+      setTimeout(()=>location.reload(), 400);
+    }catch(e){
+      console.error(e);
+      alert('云端拉取失败：' + (e && (e.message||e.toString()) ));
+    }
+  }
+
+  // Default autpush OFF if not set
+  try{
+    if(localStorage.getItem(AUTOPUSH_KEY)==null) localStorage.setItem(AUTOPUSH_KEY,'0');
+  }catch(e){}
+
+  // Override globals and bind buttons
+  window.cloudStatus = robustCloudStatus;
+  window.cloudPush = robustCloudPush;
+  window.cloudPull = robustCloudPull;
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const bPush = _byId('btnCloudPush');
+    const bPushForce = _byId('btnCloudPushForce');
+    const bStatus = _byId('btnCloudStatus');
+    const bPull = _byId('btnCloudPull');
+    if(bPush) bPush.onclick = ()=>robustCloudPush({force:false});
+    if(bPushForce) bPushForce.onclick = ()=>robustCloudPush({force:true});
+    if(bStatus) bStatus.onclick = ()=>robustCloudStatus();
+    if(bPull) bPull.onclick = ()=>robustCloudPull();
+  }, { once:true });
+})();
 </script>
 </body>
 </html>
