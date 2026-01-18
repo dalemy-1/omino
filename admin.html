@@ -10449,8 +10449,7 @@ async function cloudStatusFixed(){
   }
 
   // Override globals + rebind buttons
-  window.cloudStatus = cloudStatusFixed;
-  window.cloudPush = cloudPushFixed;
+  // [PATCH] Do NOT override cloudStatus/cloudPush here (prevents accidental overwrite to ops_cloud_snapshots).
 
   document.addEventListener("DOMContentLoaded", ()=>{
     const bCfg = document.getElementById("btnCloudCfg");
@@ -10458,8 +10457,8 @@ async function cloudStatusFixed(){
     const bPull = document.getElementById("btnCloudPull");
     const bStatus = document.getElementById("btnCloudStatus");
 
-    if(bPush) bPush.onclick = ()=>{ cloudPushFixed(); };
-    if(bStatus) bStatus.onclick = ()=>{ cloudStatusFixed(); };
+    if(bPush) bPush.onclick = (e)=>{ try{ if(window.cloudPush) window.cloudPush({force: !!(e && e.shiftKey)}); }catch(_e){} };
+    if(bStatus) bStatus.onclick = ()=>{ try{ if(window.cloudStatus) window.cloudStatus(); }catch(_e){} };
 
     // Keep original pull/cfg if already wired by main app
     if(bCfg && !bCfg.onclick && typeof window.cloudPromptAndSave==="function") bCfg.onclick = ()=>window.cloudPromptAndSave();
@@ -12783,5 +12782,17 @@ if(!_autoEnabled){
 })();
 </script>
 
+
+<script>
+// [PATCH] Force cloud buttons to use current window.cloudPush/cloudPull/cloudStatus (last-write-wins).
+window.addEventListener('DOMContentLoaded', ()=>{
+  const bPush=document.getElementById('btnCloudPush');
+  const bPull=document.getElementById('btnCloudPull');
+  const bStatus=document.getElementById('btnCloudStatus');
+  if(bPush) bPush.onclick=(e)=>{ try{ if(window.cloudPush) window.cloudPush({force: !!(e&&e.shiftKey)}); }catch(err){ console.error(err); } };
+  if(bPull) bPull.onclick=(e)=>{ try{ if(window.cloudPull) window.cloudPull({force: !!(e&&e.shiftKey)}); }catch(err){ console.error(err); } };
+  if(bStatus) bStatus.onclick=()=>{ try{ if(window.cloudStatus) window.cloudStatus(); }catch(err){ console.error(err); } };
+}, { once:true });
+</script>
 </body>
 </html>
