@@ -11579,7 +11579,7 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
         safeMergeAndPush({ force:true });
       }, true);
     }
-    // Pull: prefer existing FINAL pull if present, else basic pull->write main->reload
+    // Pull: merge cloud into local (默认不删除云端/本地已有数据)，再写入主库并刷新
     if(bPull){
       bPull.addEventListener("click", function(ev){
         try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); }catch(e){}
@@ -11595,10 +11595,21 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
           if(!appKey){ alert("云端未配置：缺少 app_key（请点【云端设置】）。"); return; }
           const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
           if(!cloud.exists){ alert("云端无快照。"); return; }
+
+          // merge: cloud-first (archive) + local updates (if newer)
+          const local = await getLocalSnapshot();
+          const localState = (local && local.state) ? local.state : {};
+          const cloudState = cloud.state || {};
+          const mergedState = (typeof mergeStates === "function")
+            ? mergeStates(localState, cloudState)
+            : (typeof mergeSnapshotsPlanA === "function" ? mergeSnapshotsPlanA(localState, cloudState) : cloudState);
+
+          try{ localStorage.setItem("OPS_CLOUD_LAST_PULL_HASH", String(cloud.hash||"")); }catch(_e){}
+
           // write to main IDB
           if(typeof idbSet==="function"){
-            await idbSet(MAIN_KEY, cloud.state);
-            toastSafe("云端拉取完成：已写入 IndexedDB 主库（main_state_v1），即将刷新。");
+            await idbSet(MAIN_KEY, mergedState);
+            toastSafe("云端拉取完成：已合并并写入 IndexedDB 主库（main_state_v1），即将刷新。");
             location.reload();
             return;
           }
@@ -11611,13 +11622,13 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
               try{
                 const tx = db.transaction(MAIN_STORE, "readwrite");
                 const st = tx.objectStore(MAIN_STORE);
-                const put = st.put(cloud.state, MAIN_KEY);
+                const put = st.put(mergedState, MAIN_KEY);
                 put.onerror = ()=>reject(put.error||new Error("put failed"));
                 put.onsuccess = ()=>resolve();
               }catch(e){ reject(e); }
             };
           });
-          toastSafe("云端拉取完成：已写入 IndexedDB 主库（raw put），即将刷新。");
+          toastSafe("云端拉取完成：已合并并写入 IndexedDB 主库（raw put），即将刷新。");
           location.reload();
         })().catch(e=>alert("云端拉取失败：\n"+(e && e.message?e.message:String(e))));
       }, true);
@@ -11644,6 +11655,110 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
     }
   }
 
+  // ===== Auto Pull (Plan A): poll cloud hash and merge into local (NO DELETE) =====
+  let _autoPullEnabled = true;
+  let _pullRunning = false;
+  const AUTO_PULL_START_DELAY_MS = 8 * 1000;
+  const AUTO_PULL_INTERVAL_MS = 60 * 1000;
+  const LS_AUTOPULL_KEY = "OPS_CLOUD_AUTOPULL";
+  const LS_LASTPULL_HASH = "OPS_CLOUD_LAST_PULL_HASH";
+
+  function _readAutoPullFlag(){
+    try{
+      const v = localStorage.getItem(LS_AUTOPULL_KEY);
+      if(v === null || v === undefined || v === "") return true; // default ON
+      return !(v === "0" || v === "false");
+    }catch(e){ return true; }
+  }
+
+  async function cloudPullMergeQuiet(){
+    const wrap = getCloudWrap(); if(!wrap) return { ok:false, reason:"no_wrap" };
+    const { client, cfg } = wrap;
+    const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
+    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
+    if(!appKey) return { ok:false, reason:"no_app_key" };
+
+    const local = await getLocalSnapshot();
+    const localState0 = (local && local.state) ? local.state : {};
+    const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
+    if(!cloud || !cloud.exists) return { ok:true, skipped:true, reason:"cloud_empty" };
+
+    // Merge: cloud-first then local (NO DELETE). Prefer updatedAt when present.
+    let mergedState = null;
+    if(typeof mergeStates === "function"){
+      mergedState = mergeStates(localState0, cloud.state || {});
+    }else if(typeof mergeSnapshotsPlanA === "function"){
+      mergedState = mergeSnapshotsPlanA(localState0, cloud.state || {});
+    }else{
+      // fallback: cloud overwrites local (still no delete in arrays because snapshot contains full arrays)
+      mergedState = cloud.state || localState0;
+    }
+
+    // If nothing changes by hash, skip write
+    let mergedHash = null;
+    try{ mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(mergedState||{})) : null; }catch(_e){}
+    const lastPullHash = (function(){ try{ return localStorage.getItem(LS_LASTPULL_HASH)||""; }catch(e){ return ""; } })();
+    if(mergedHash && cloud.hash && String(cloud.hash)===String(lastPullHash)){
+      return { ok:true, skipped:true, reason:"no_change", hash: cloud.hash };
+    }
+
+    // write merged to main IDB
+    if(typeof idbSet === "function"){
+      await idbSet(MAIN_KEY, mergedState);
+    }else{
+      await new Promise((resolve, reject)=>{
+        const req = indexedDB.open(MAIN_DB);
+        req.onerror = ()=>reject(req.error||new Error("open failed"));
+        req.onsuccess = ()=>{
+          const db = req.result;
+          try{
+            const tx = db.transaction(MAIN_STORE, "readwrite");
+            const st = tx.objectStore(MAIN_STORE);
+            const put = st.put(mergedState, MAIN_KEY);
+            put.onerror = ()=>reject(put.error||new Error("put failed"));
+            put.onsuccess = ()=>resolve();
+          }catch(e){ reject(e); }
+        };
+      });
+    }
+
+    try{ localStorage.setItem(LS_LASTPULL_HASH, String(cloud.hash||mergedHash||"")); }catch(e){}
+    return { ok:true, merged:true, hash: cloud.hash||mergedHash||"" };
+  }
+
+  async function autoPullTick(){
+    if(!_autoPullEnabled) return;
+    if(_pullRunning) return;
+    _pullRunning = true;
+    try{
+      const wrap = getCloudWrap();
+      if(!wrap){ _pullRunning=false; return; }
+      const { client, cfg } = wrap;
+      const cfg2 = (typeof getCloudCfgOrNull==="function") ? getCloudCfgOrNull() : (wrap && wrap.cfg) || cfg || null;
+      const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : "";
+      if(!appKey){ _pullRunning=false; return; }
+
+      // cheap status check
+      const cloud = await fetchCloudSnapshot(client, appKey, cfg2);
+      if(!cloud || !cloud.exists){ _pullRunning=false; return; }
+      const last = (function(){ try{ return localStorage.getItem(LS_LASTPULL_HASH)||""; }catch(e){ return ""; } })();
+      if(last && cloud.hash && String(last)===String(cloud.hash)){
+        _pullRunning=false; return;
+      }
+
+      const r = await cloudPullMergeQuiet();
+      if(r && r.ok && !r.skipped){
+        toastSafe("检测到云端更新：已合并拉取到本地，正在刷新…");
+        setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 600);
+      }
+    }catch(e){
+      // avoid noisy alerts in auto mode
+      try{ console.warn("[AUTO-PULL] failed", e); }catch(_e){}
+    }finally{
+      _pullRunning = false;
+    }
+  }
+
   function startAuto(){
     // Allow users to disable via localStorage if needed
     try{
@@ -11652,13 +11767,23 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
       if(v === "1" || v === "true"){ _autoEnabled = true; }
     }catch(e){}
         try{ if(window.__setCloudMeta) window.__setCloudMeta({ autoEnabled: _autoEnabled }); }catch(_e){}
-if(!_autoEnabled){
+    if(_autoEnabled){
+      setTimeout(()=>{ autoTick(); }, AUTO_START_DELAY_MS);
+      setInterval(()=>{ autoTick(); }, AUTO_INTERVAL_MS);
+      log("自动推送已启动（Plan A，安全合并推送；间隔 "+Math.round(AUTO_INTERVAL_MS/1000)+"s）。");
+    }else{
       log("自动推送已禁用（localStorage: OPS_CLOUD_AUTOPUSH=0）。");
-      return;
     }
-    setTimeout(()=>{ autoTick(); }, AUTO_START_DELAY_MS);
-    setInterval(()=>{ autoTick(); }, AUTO_INTERVAL_MS);
-    log("自动推送已启动（Plan A，安全合并推送；间隔 "+Math.round(AUTO_INTERVAL_MS/1000)+"s）。");
+
+    // Auto Pull: enabled by default (OPS_CLOUD_AUTOPULL)
+    try{ _autoPullEnabled = _readAutoPullFlag(); }catch(e){ _autoPullEnabled = true; }
+    if(_autoPullEnabled){
+      setTimeout(()=>{ autoPullTick(); }, AUTO_PULL_START_DELAY_MS);
+      setInterval(()=>{ autoPullTick(); }, AUTO_PULL_INTERVAL_MS);
+      log("自动拉取已启动（Plan A，合并拉取不删除云端；间隔 "+Math.round(AUTO_PULL_INTERVAL_MS/1000)+"s）。");
+    }else{
+      log("自动拉取已禁用（localStorage: OPS_CLOUD_AUTOPULL=0）。");
+    }
   }
 
 
