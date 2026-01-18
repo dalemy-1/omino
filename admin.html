@@ -12033,7 +12033,7 @@ if(!_autoEnabled){
 
     const hash = await sha256Hex(JSON.stringify(snapshot));
     const packed = await packPayload(snapshot);
-    const row = { app_key: cfg.app, hash, updated_at: nowISO(), counts, payload: packed };
+    const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload: packed };
     await restUpsert(cfg, row);
     return { ok:true, counts, hash, packed_enc: packed.enc };
   }
