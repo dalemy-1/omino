@@ -11882,6 +11882,52 @@ if(!_autoEnabled){
     return arr.map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,8);
   }
 
+
+  // ---- payload packing to avoid Supabase statement timeout (57014) ----
+  async function packPayload(obj){
+    const json = JSON.stringify(obj);
+    // below threshold: store as plain JSON wrapper
+    if(json.length < 400000){
+      return { enc: 'json', data: obj };
+    }
+    // try gzip via CompressionStream
+    if(typeof CompressionStream === 'function'){
+      try{
+        const cs = new CompressionStream('gzip');
+        const blob = new Blob([json], { type: 'application/json' });
+        const stream = blob.stream().pipeThrough(cs);
+        const ab = await new Response(stream).arrayBuffer();
+        const u8 = new Uint8Array(ab);
+        let s = '';
+        for(let i=0;i<u8.length;i++) s += String.fromCharCode(u8[i]);
+        const b64 = btoa(s);
+        return { enc: 'gzip-base64', data: b64, bytes: u8.length, json_chars: json.length };
+      }catch(e){
+        console.warn('[CLEAN-SYNC] gzip pack failed, fallback to json wrapper', e);
+      }
+    }
+    // fallback: store as json wrapper (may still fail for very large payload)
+    return { enc: 'json', data: obj, note: 'no_gzip' };
+  }
+
+  async function unpackPayload(payload){
+    if(!payload) return null;
+    // new wrapper formats
+    if(payload.enc === 'json') return payload.data;
+    if(payload.enc === 'gzip-base64'){
+      if(typeof DecompressionStream !== 'function'){
+        throw new Error('当前浏览器不支持 DecompressionStream，无法解压云端快照（gzip-base64）。建议用 Chrome 最新版。');
+      }
+      const bin = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
+      const ds = new DecompressionStream('gzip');
+      const stream = new Blob([bin]).stream().pipeThrough(ds);
+      const txt = await new Response(stream).text();
+      return JSON.parse(txt || '{}');
+    }
+    // backward compatibility: payload already plain state object
+    return payload;
+  }
+
   function restHeaders(anon){
     return {
       'apikey': anon,
@@ -11906,12 +11952,12 @@ if(!_autoEnabled){
     const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
     const r = await fetch(url, {
       method:'POST',
-      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify([row])
     });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
-    // return representation array or empty
+    // return may be empty when return=minimal
     try{ const arr = JSON.parse(text || '[]'); return arr[0] || null; }catch(_){ return null; }
   }
 
@@ -11939,7 +11985,13 @@ if(!_autoEnabled){
 
     let cloudNorm = { sellers:[], products:[], orders:[], batches:[] };
     if(cloud && cloud.payload){
-      cloudNorm = normalizeState(cloud.payload);
+      try{
+        const rawCloud = await unpackPayload(cloud.payload);
+        cloudNorm = normalizeState(rawCloud||{});
+      }catch(e){
+        // fallback: attempt direct normalize (legacy plain payload)
+        cloudNorm = normalizeState(cloud.payload||{});
+      }
     }
     const lines = [
       `本地来源: IndexedDB(${CANON_DB}/${CANON_STORE}/${CANON_KEY})`,
@@ -11961,11 +12013,29 @@ if(!_autoEnabled){
     if((local.norm.sellers.length + local.norm.products.length + local.norm.orders.length + local.norm.batches.length) === 0){
       console.warn('[CLEAN-SYNC] local state normalized to empty. keys=', local.norm._rawKeys, 'rec=', local.rec);
     }
-    const payload = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
-    const hash = await sha256Hex(JSON.stringify(payload));
-    const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload };
+    const snapshot = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
+    const counts = { sellers: snapshot.sellers.length, products: snapshot.products.length, orders: snapshot.orders.length, batches: snapshot.batches.length };
+
+    // safety: prevent empty snapshot from overwriting non-empty cloud unless manual force
+    let cloud = null;
+    try{ cloud = await restSelect(cfg); }catch(_){ cloud = null; }
+    if(cloud && cloud.payload){
+      try{
+        const rawCloud0 = await unpackPayload(cloud.payload);
+        const cloudNorm0 = normalizeState(rawCloud0||{});
+        const cloudTotal = cloudNorm0.sellers.length + cloudNorm0.products.length + cloudNorm0.orders.length + cloudNorm0.batches.length;
+        const localTotal = counts.sellers + counts.products + counts.orders + counts.batches;
+        if(localTotal === 0 && cloudTotal > 0){
+          throw new Error('安全拦截：本地快照为空，已阻止覆盖云端。请先确认本地数据是否加载正确，必要时用【强制推送】。');
+        }
+      }catch(e){ /* ignore unpack errors for safety check */ }
+    }
+
+    const hash = await sha256Hex(JSON.stringify(snapshot));
+    const packed = await packPayload(snapshot);
+    const row = { app_key: cfg.app, hash, updated_at: nowISO(), counts, payload: packed };
     await restUpsert(cfg, row);
-    return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash };
+    return { ok:true, counts, hash, packed_enc: packed.enc };
   }
 
   async function cloudPull(opts){
@@ -11976,7 +12046,8 @@ if(!_autoEnabled){
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
     const cloud = await restSelect(cfg);
     if(!cloud || !cloud.payload) throw new Error('云端无快照（payload 为空）');
-    const norm = normalizeState(cloud.payload);
+    const rawCloud = await unpackPayload(cloud.payload);
+    const norm = normalizeState(rawCloud||{});
     const record = { key: CANON_KEY, value: { sellers: norm.sellers, products: norm.products, orders: norm.orders, batches: norm.batches }, updated_at: nowISO() };
     await idbKvPut(record);
     return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: cloud.hash };
@@ -12016,7 +12087,7 @@ if(!_autoEnabled){
     // AUTO-PUSH default: enabled (can be toggled via UI)
     try{
       const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
     }catch(_){}
   }
 
@@ -12040,7 +12111,7 @@ if(!_autoEnabled){
   // AUTO-PUSH default: ON (legacy patches may read OPS_CLOUD_AUTOPUSH)
   try{
     const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
   }catch(e){}
   const MAX_LOGS = 30;
   const logs = [];
