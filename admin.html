@@ -2393,6 +2393,7 @@ window.state = S;
 
 
 const UI = {
+  showVoided: false,
   tab:"orders",
   sellerEditId:null,
   productEditId:null,
@@ -3633,7 +3634,7 @@ function renderOrders(){
         <td class="right action-col">
           <button class="btn" onclick="Actions.editOrder('${esc(o.id)}')">编辑</button>
           <button class="btn" onclick="Actions.openReview('${esc(o.id)}')">回评</button>
-          <button class="btn danger" onclick="Actions.deleteOrder('${esc(o.id)}')">删除</button>
+          <button class="btn danger" onclick="Actions.voidOrder('${esc(o.id)}')">作废</button>
         </td>
       `;
       frag.appendChild(tr);
@@ -4000,9 +4001,27 @@ const Actions = {
     saveNow();
       refreshAfterOrderChange();
   },
+  // NOTE: 云端订单不可删除。此处将“删除”改为“作废/归档”（仅更新字段）。
+  voidOrder(id){
+    const o = S.orders.find(x=>x.id===id);
+    if(!o) return;
+    const ok = confirm('作废后：订单不会删除，只会标记为作废并从默认列表隐藏（可通过筛选查看）。继续？');
+    if(!ok) return;
+    try{ o.voided = true; }catch(e){}
+    try{
+      const tag = '[VOID]';
+      const n = String(o.note||'');
+      if(!n.includes(tag)) o.note = (n ? (n + ' | ') : '') + tag;
+    }catch(e){}
+    try{ o.updatedAt = Date.now(); if(!o.createdAt) o.createdAt = o.updatedAt; }catch(e){}
+    save();
+    refreshAfterOrderChange();
+    try{ if(typeof window.scheduleAutoPush==='function') window.scheduleAutoPush(); }catch(e){}
+    showNotice('已作废','订单已标记为作废（云端将仅同步更新，不会删除）。');
+  },
   deleteOrder(id){
-    // safer delete: open confirmation modal
-    openDeleteModal(id);
+    // backward compatible: treat as void
+    Actions.voidOrder(id);
   },
 
   /* ---- Review ---- */
