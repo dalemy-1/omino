@@ -11822,6 +11822,62 @@ if(!_autoEnabled){
     return arr.map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,8);
   }
 
+  // --- Snapshot compression helpers (to avoid REST upsert statement timeout on large datasets) ---
+  // Uses built-in gzip streams when available (Chrome/Edge). Falls back to plain payload.
+  function _b64FromBytes(bytes){
+    let bin='';
+    const chunk=0x8000;
+    for(let i=0;i<bytes.length;i+=chunk){
+      bin += String.fromCharCode.apply(null, bytes.subarray(i,i+chunk));
+    }
+    return btoa(bin);
+  }
+  function _bytesFromB64(b64){
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+    return out;
+  }
+  async function gzipB64Encode(str){
+    if(typeof CompressionStream==='undefined') return null;
+    const inBytes = new TextEncoder().encode(str);
+    const cs = new CompressionStream('gzip');
+    const stream = new Blob([inBytes]).stream().pipeThrough(cs);
+    const ab = await new Response(stream).arrayBuffer();
+    return _b64FromBytes(new Uint8Array(ab));
+  }
+  async function gzipB64Decode(b64){
+    if(typeof DecompressionStream==='undefined') throw new Error('DecompressionStream not supported');
+    const inBytes = _bytesFromB64(b64);
+    const ds = new DecompressionStream('gzip');
+    const stream = new Blob([inBytes]).stream().pipeThrough(ds);
+    const ab = await new Response(stream).arrayBuffer();
+    return new TextDecoder().decode(ab);
+  }
+  async function packPayloadForCloud(payloadObj){
+    const raw = JSON.stringify(payloadObj);
+    // compress only when payload is large enough
+    if(raw.length < 200_000) return { payload: payloadObj, raw, packed: false };
+    try{
+      const b64 = await gzipB64Encode(raw);
+      if(!b64) return { payload: payloadObj, raw, packed: false };
+      const wrapped = { __packed: 'gzip-b64', data: b64, raw_len: raw.length };
+      return { payload: wrapped, raw, packed: true };
+    }catch(e){
+      console.warn('[CLOUD] gzip pack failed, fallback to plain payload:', e);
+      return { payload: payloadObj, raw, packed: false };
+    }
+  }
+  async function unpackPayloadFromCloud(maybePayload){
+    if(!maybePayload) return null;
+    if(maybePayload && typeof maybePayload==='object' && maybePayload.__packed==='gzip-b64' && maybePayload.data){
+      const raw = await gzipB64Decode(maybePayload.data);
+      return JSON.parse(raw);
+    }
+    return maybePayload;
+  }
+
+
   function restHeaders(anon){
     return {
       'apikey': anon,
@@ -11831,35 +11887,10 @@ if(!_autoEnabled){
     };
   }
 
-
-  function explainFetchError(e, cfg){
-    const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : '';
-    const base = (cfg && cfg.url) ? cfg.url : '';
-    const msg = (e && e.message) ? e.message : String(e||'');
-    // Browser CORS block often surfaces as: TypeError: Failed to fetch
-    if(/Failed to fetch/i.test(msg) || /NetworkError/i.test(msg) || /CORS/i.test(msg))
-      return `网络请求失败（常见原因：Supabase CORS 未放行当前域名）。
-
-当前页面域名：${origin}
-Supabase 项目：${base}
-
-处理方法（任选其一）：
-1）到 Supabase 控制台 -> Settings -> API -> CORS Allowed Origins，加入：${origin}
-2）或改为同域名 /api/sync 代理模式（Next.js API Route），避免浏览器直连 REST 被 CORS 拦截。`;
-    return `网络请求失败：${msg}`;
-  }
-
   async function restSelect(cfg){
     const base = cfg.url.replace(/\/+$/,'');
     const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=eq.${encodeURIComponent(cfg.app)}&limit=1`;
-    let r;
-    try{
-      r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
-    }catch(e){
-      const hint = explainFetchError(e, cfg);
-      if(hint) throw new Error(hint);
-      throw e;
-    }
+    const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,200)}`);
     const arr = JSON.parse(text || '[]');
@@ -11869,18 +11900,11 @@ Supabase 项目：${base}
   async function restUpsert(cfg, row){
     const base = cfg.url.replace(/\/+$/,'');
     const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
-    let r;
-    try{
-      r = await fetch(url, {
+    const r = await fetch(url, {
       method:'POST',
-      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify([row])
-      });
-    }catch(e){
-      const hint = explainFetchError(e, cfg);
-      if(hint) throw new Error(hint);
-      throw e;
-    }
+    });
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
     // return representation array or empty
@@ -11911,7 +11935,8 @@ Supabase 项目：${base}
 
     let cloudNorm = { sellers:[], products:[], orders:[], batches:[] };
     if(cloud && cloud.payload){
-      cloudNorm = normalizeState(cloud.payload);
+      const cloudPayload = await unpackPayloadFromCloud(cloud.payload);
+      cloudNorm = normalizeState(cloudPayload);
     }
     const lines = [
       `本地来源: IndexedDB(${CANON_DB}/${CANON_STORE}/${CANON_KEY})`,
@@ -11933,11 +11958,18 @@ Supabase 项目：${base}
     if((local.norm.sellers.length + local.norm.products.length + local.norm.orders.length + local.norm.batches.length) === 0){
       console.warn('[CLEAN-SYNC] local state normalized to empty. keys=', local.norm._rawKeys, 'rec=', local.rec);
     }
-    const payload = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
-    const hash = await sha256Hex(JSON.stringify(payload));
+    const payloadObj = { sellers: local.norm.sellers, products: local.norm.products, orders: local.norm.orders, batches: local.norm.batches };
+    const payloadStr = JSON.stringify(payloadObj);
+    const hash = await sha256Hex(payloadStr);
+
+    // Large snapshots may hit Supabase REST statement_timeout (57014).
+    // Use gzip+base64 envelope when payload is big to keep requests small and stable.
+    const packed = await packPayloadForCloud(payloadObj);
+    const payload = packed.payload;
+
     const row = { app_key: cfg.app, hash, updated_at: nowISO(), payload };
     await restUpsert(cfg, row);
-    return { ok:true, counts: { sellers: payload.sellers.length, products: payload.products.length, orders: payload.orders.length, batches: payload.batches.length }, hash };
+    return { ok:true, counts: { sellers: payloadObj.sellers.length, products: payloadObj.products.length, orders: payloadObj.orders.length, batches: payloadObj.batches.length }, hash };
   }
 
   async function cloudPull(opts){
@@ -11948,7 +11980,8 @@ Supabase 项目：${base}
     if(!cfg.url || !cfg.anon || !cfg.app) throw new Error('缺失云端配置：请先填写并保存 URL / anon / app_key');
     const cloud = await restSelect(cfg);
     if(!cloud || !cloud.payload) throw new Error('云端无快照（payload 为空）');
-    const norm = normalizeState(cloud.payload);
+    const cloudPayload = await unpackPayloadFromCloud(cloud.payload);
+    const norm = normalizeState(cloudPayload);
     const record = { key: CANON_KEY, value: { sellers: norm.sellers, products: norm.products, orders: norm.orders, batches: norm.batches }, updated_at: nowISO() };
     await idbKvPut(record);
     return { ok:true, counts: { sellers:norm.sellers.length, products:norm.products.length, orders:norm.orders.length, batches:norm.batches.length }, hash: cloud.hash };
@@ -11988,7 +12021,7 @@ Supabase 项目：${base}
     // AUTO-PUSH default: enabled (can be toggled via UI)
     try{
       const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
+      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
     }catch(_){}
   }
 
@@ -12012,7 +12045,7 @@ Supabase 项目：${base}
   // AUTO-PUSH default: ON (legacy patches may read OPS_CLOUD_AUTOPUSH)
   try{
     const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
+    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
   }catch(e){}
   const MAX_LOGS = 30;
   const logs = [];
