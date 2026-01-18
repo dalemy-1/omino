@@ -11831,10 +11831,35 @@ if(!_autoEnabled){
     };
   }
 
+
+  function explainFetchError(e, cfg){
+    const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : '';
+    const base = (cfg && cfg.url) ? cfg.url : '';
+    const msg = (e && e.message) ? e.message : String(e||'');
+    // Browser CORS block often surfaces as: TypeError: Failed to fetch
+    if(/Failed to fetch/i.test(msg) || /NetworkError/i.test(msg) || /CORS/i.test(msg))
+      return `网络请求失败（常见原因：Supabase CORS 未放行当前域名）。
+
+当前页面域名：${origin}
+Supabase 项目：${base}
+
+处理方法（任选其一）：
+1）到 Supabase 控制台 -> Settings -> API -> CORS Allowed Origins，加入：${origin}
+2）或改为同域名 /api/sync 代理模式（Next.js API Route），避免浏览器直连 REST 被 CORS 拦截。`;
+    return `网络请求失败：${msg}`;
+  }
+
   async function restSelect(cfg){
     const base = cfg.url.replace(/\/+$/,'');
     const url = `${base}/rest/v1/${CLOUD_TABLE}?select=app_key,hash,updated_at,payload&app_key=eq.${encodeURIComponent(cfg.app)}&limit=1`;
-    const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
+    let r;
+    try{
+      r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
+    }catch(e){
+      const hint = explainFetchError(e, cfg);
+      if(hint) throw new Error(hint);
+      throw e;
+    }
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_select_failed ${r.status} ${text.slice(0,200)}`);
     const arr = JSON.parse(text || '[]');
@@ -11844,11 +11869,18 @@ if(!_autoEnabled){
   async function restUpsert(cfg, row){
     const base = cfg.url.replace(/\/+$/,'');
     const url = `${base}/rest/v1/${CLOUD_TABLE}?on_conflict=app_key`;
-    const r = await fetch(url, {
+    let r;
+    try{
+      r = await fetch(url, {
       method:'POST',
       headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=representation' },
       body: JSON.stringify([row])
-    });
+      });
+    }catch(e){
+      const hint = explainFetchError(e, cfg);
+      if(hint) throw new Error(hint);
+      throw e;
+    }
     const text = await r.text();
     if(!r.ok) throw new Error(`rest_upsert_failed ${r.status} ${text.slice(0,200)}`);
     // return representation array or empty
@@ -11956,7 +11988,7 @@ if(!_autoEnabled){
     // AUTO-PUSH default: enabled (can be toggled via UI)
     try{
       const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+      if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
     }catch(_){}
   }
 
@@ -11980,7 +12012,7 @@ if(!_autoEnabled){
   // AUTO-PUSH default: ON (legacy patches may read OPS_CLOUD_AUTOPUSH)
   try{
     const cur = (localStorage.getItem('OPS_CLOUD_AUTOPUSH')||'').trim();
-    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','1');
+    if(!cur) localStorage.setItem('OPS_CLOUD_AUTOPUSH','0');
   }catch(e){}
   const MAX_LOGS = 30;
   const logs = [];
