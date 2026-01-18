@@ -12663,5 +12663,288 @@ if(!_autoEnabled){
 })();
 </script>
 
+
+<script>
+// ===== Robust Cloud Sync Override (V31): prevent empty/partial overwrite + reduce payload size + support enc payload =====
+(function(){
+  const TABLE='ops_cloud_snapshots_v1';
+  const AUTOPUSH_KEY='OPS_CLOUD_AUTOPUSH';
+
+  function _byId(id){ return document.getElementById(id); }
+  function _nowHash(){ return Date.now().toString(16); }
+  function _safeJsonParse(t){ try{return JSON.parse(t);}catch(e){return null;} }
+
+  function _countState(st){
+    try{
+      if(typeof window._countSnapshot==='function') return window._countSnapshot(st||{});
+    }catch(e){}
+    const s=st||{};
+    return {
+      sellers: Array.isArray(s.sellers)?s.sellers.length: (s.sellers?Object.keys(s.sellers).length:0),
+      products: Array.isArray(s.products)?s.products.length: (s.products?Object.keys(s.products).length:0),
+      orders: Array.isArray(s.orders)?s.orders.length: (s.orders?Object.keys(s.orders).length:0),
+      batches: Array.isArray(s.batches)?s.batches.length: (s.batches?Object.keys(s.batches).length:0),
+    };
+  }
+
+  async function _gzipBase64(str){
+    // Best effort. If unsupported, return null.
+    try{
+      if(!('CompressionStream' in window)) return null;
+      const cs = new CompressionStream('gzip');
+      const b = new Blob([str], {type:'application/json'});
+      const stream = b.stream().pipeThrough(cs);
+      const ab = await new Response(stream).arrayBuffer();
+      let bin = '';
+      const bytes = new Uint8Array(ab);
+      const chunk=0x8000;
+      for(let i=0;i<bytes.length;i+=chunk){
+        bin += String.fromCharCode.apply(null, bytes.subarray(i,i+chunk));
+      }
+      return btoa(bin);
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function _ungzipBase64(b64){
+    try{
+      if(!('DecompressionStream' in window)) return null;
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+      const ds = new DecompressionStream('gzip');
+      const stream = new Blob([bytes]).stream().pipeThrough(ds);
+      const txt = await new Response(stream).text();
+      return txt;
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function _decodePayload(payload){
+    // payload may be {v, state, meta} OR {enc:'gzip', data:'base64'} OR JSON string
+    if(payload==null) return null;
+    if(typeof payload==='string'){
+      const j=_safeJsonParse(payload);
+      if(j) return _decodePayload(j);
+      return null;
+    }
+    if(typeof payload!=='object') return null;
+
+    if(payload.enc && payload.data){
+      if(payload.enc==='gzip-base64' || payload.enc==='gzip'){
+        const txt = await _ungzipBase64(payload.data);
+        if(!txt) return null;
+        const j=_safeJsonParse(txt);
+        if(!j) return null;
+        return _decodePayload(j);
+      }
+      if(payload.enc==='json' && typeof payload.data==='string'){
+        const j=_safeJsonParse(payload.data);
+        if(!j) return null;
+        return _decodePayload(j);
+      }
+    }
+
+    // common wrappers
+    if(payload.state && typeof payload.state==='object') return payload.state;
+    if(payload.v && payload.state) return payload.state;
+
+    return payload; // fallback
+  }
+
+  async function _getCloudClient(){
+    if(typeof window.getCloudClientOrNull==='function') return window.getCloudClientOrNull();
+    return null;
+  }
+
+  async function _readLocalPrimary(){
+    // Prefer helper if exists
+    if(typeof window.getLocalSnapshotPreferIDB==='function'){
+      const r = await window.getLocalSnapshotPreferIDB();
+      const st = r && (r.data||r.state||r);
+      return { state: st||{}, source: (r&&r.source)||'unknown' };
+    }
+    // Fallback to global S if exists
+    const st = (typeof window.S==='object' && window.S) ? window.S : {};
+    return { state: st, source:'window.S' };
+  }
+
+  async function _fetchCloudRow(sb, app_key){
+    const { data, error } = await sb.from(TABLE).select('app_key,hash,updated_at,created_at,payload').eq('app_key', app_key).maybeSingle();
+    if(error) throw error;
+    return data||null;
+  }
+
+  async function robustCloudStatus(){
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+    try{
+      const row = await _fetchCloudRow(sb, cfg.app_key);
+      if(!row) return alert('云端无快照（该 app_key 尚未推送过）。');
+      const st = await _decodePayload(row.payload||{});
+      const c = _countState(st||{});
+      alert(
+        '云端快照状态\n\n' +
+        'app_key: ' + row.app_key + '\n' +
+        'hash: ' + row.hash + '\n' +
+        'updated_at: ' + row.updated_at + '\n' +
+        'created_at: ' + row.created_at + '\n\n' +
+        '内容统计：卖家' + c.sellers + ' 产品' + c.products + ' 订单' + c.orders + ' 批次' + c.batches
+      );
+    }catch(e){
+      console.error(e);
+      alert('云端状态失败：' + (e && (e.message||e.toString()) ));
+    }
+  }
+
+  async function robustCloudPush(opts){
+    opts = opts||{};
+    const force = !!opts.force;
+    const quiet = !!opts.quiet;
+
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+
+    // local
+    const local = await _readLocalPrimary();
+    const lc = _countState(local.state||{});
+
+    // cloud existing (for safety)
+    let cloudRow = null, cloudState = null, cc = {sellers:0,products:0,orders:0,batches:0};
+    try{
+      cloudRow = await _fetchCloudRow(sb, cfg.app_key);
+      if(cloudRow){
+        cloudState = await _decodePayload(cloudRow.payload||{});
+        cc = _countState(cloudState||{});
+      }
+    }catch(e){
+      // ignore status failure; still allow push if force
+      if(!force){
+        console.warn('cloud precheck failed', e);
+      }
+    }
+
+    // Safety gate: prevent accidental cloud wipe when local is empty/smaller.
+    if(!force && cloudRow){
+      const localSum = lc.sellers+lc.products+lc.orders+lc.batches;
+      const cloudSum = cc.sellers+cc.products+cc.orders+cc.batches;
+      if(localSum===0 && cloudSum>0){
+        alert('已阻止推送：本地数据为空，但云端存在数据。\n\n如确需覆盖云端，请点“强制推送”。');
+        return;
+      }
+      // If local has orders=0 but cloud has orders>0, treat as dangerous
+      if(lc.orders===0 && cc.orders>0){
+        alert('已阻止推送：本地订单为 0，但云端订单为 '+cc.orders+'。\n\n如确需覆盖云端，请点“强制推送”。');
+        return;
+      }
+    }
+
+    // Build payload (no payload_str to avoid doubling size)
+    const hash = _nowHash();
+    const raw = { v:1, state: local.state||{}, meta:{ source: local.source||'unknown', pushed_at: new Date().toISOString() } };
+
+    // Try compress if large
+    let payloadObj = raw;
+    try{
+      const rawStr = JSON.stringify(raw);
+      // 1.2MB threshold for compression attempt
+      if(rawStr.length > 1200*1024){
+        const b64 = await _gzipBase64(rawStr);
+        if(b64 && b64.length < rawStr.length){
+          payloadObj = { enc:'gzip-base64', data: b64, v:1, note:'auto-gzip' };
+        }else{
+          // fall back to plain json string wrapper (still avoids deep object clone issues)
+          payloadObj = { enc:'json', data: rawStr, v:1 };
+        }
+      }
+    }catch(e){}
+
+    // Upsert with returning minimal when supported
+    try{
+      const { error } = await sb.from(TABLE).upsert(
+        { app_key: cfg.app_key, hash, payload: payloadObj },
+        { onConflict:'app_key', returning:'minimal' }
+      );
+      if(error) throw error;
+      const msg = '云端推送成功：卖家'+lc.sellers+' 产品'+lc.products+' 订单'+lc.orders+' 批次'+lc.batches+'（hash='+hash+'）';
+      if(!quiet){
+        if(typeof window.toast==='function') window.toast(msg); else alert(msg);
+      }
+    }catch(e){
+      console.error(e);
+      const m = (e && (e.message||e.toString())) || 'unknown';
+      alert('云端推送失败：' + m + '\n\n若出现 57014/statement timeout：建议先关闭自动推送，仅手动推送；或使用“导出JSON→导入JSON”在不同设备/域名迁移。');
+    }
+  }
+
+  async function robustCloudPull(opts){
+    opts = opts||{};
+    const cloud = await _getCloudClient();
+    if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
+    const { client: sb, cfg } = cloud;
+    try{
+      const row = await _fetchCloudRow(sb, cfg.app_key);
+      if(!row) return alert('云端无快照（该 app_key 尚未推送过）。');
+      const st = await _decodePayload(row.payload||{});
+      if(!st) return alert('云端快照 payload 为空或无法解析。');
+      const c = _countState(st||{});
+      const ok = confirm(
+        '将云端快照覆盖到本地（IndexedDB/LocalStorage）。\n\n' +
+        '云端内容统计：卖家'+c.sellers+' 产品'+c.products+' 订单'+c.orders+' 批次'+c.batches+'\n' +
+        'hash='+row.hash+'\n\n继续吗？'
+      );
+      if(!ok) return;
+      if(typeof window._writePrimaryState==='function'){
+        await window._writePrimaryState(st);
+      }else if(typeof window.setLocalSnapshot==='function'){
+        await window.setLocalSnapshot(st);
+      }else{
+        // last resort: try helper from earlier override
+        if(typeof window.getLocalSnapshotPreferIDB==='function'){
+          // reuse earlier helper name if exposed
+          // do nothing
+        }
+        // try write via IDB helpers if present
+        try{
+          if(typeof window._idbSetAnyKv==='function'){
+            await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',st);
+          }
+        }catch(e){}
+        try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(st||{})); }catch(e){}
+      }
+      if(typeof window.toast==='function') window.toast('云端拉取完成：卖家'+c.sellers+' 产品'+c.products+' 订单'+c.orders+' 批次'+c.batches+'（hash='+row.hash+'）');
+      setTimeout(()=>location.reload(), 400);
+    }catch(e){
+      console.error(e);
+      alert('云端拉取失败：' + (e && (e.message||e.toString()) ));
+    }
+  }
+
+  // Default autpush OFF if not set
+  try{
+    if(localStorage.getItem(AUTOPUSH_KEY)==null) localStorage.setItem(AUTOPUSH_KEY,'0');
+  }catch(e){}
+
+  // Override globals and bind buttons
+  window.cloudStatus = robustCloudStatus;
+  window.cloudPush = robustCloudPush;
+  window.cloudPull = robustCloudPull;
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const bPush = _byId('btnCloudPush');
+    const bPushForce = _byId('btnCloudPushForce');
+    const bStatus = _byId('btnCloudStatus');
+    const bPull = _byId('btnCloudPull');
+    if(bPush) bPush.onclick = ()=>robustCloudPush({force:false});
+    if(bPushForce) bPushForce.onclick = ()=>robustCloudPush({force:true});
+    if(bStatus) bStatus.onclick = ()=>robustCloudStatus();
+    if(bPull) bPull.onclick = ()=>robustCloudPull();
+  }, { once:true });
+})();
+</script>
 </body>
 </html>
