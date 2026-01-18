@@ -12882,7 +12882,8 @@ if(!_autoEnabled){
 
     // local
     const local = await _readLocalPrimary();
-    const lc = _countState(local.state||{});
+    const localState0 = local.state || {};
+    const lc0 = _countState(localState0);
 
     // cloud existing (for safety)
     let cloudRow = null, cloudState = null, cc = {sellers:0,products:0,orders:0,batches:0};
@@ -12900,30 +12901,69 @@ if(!_autoEnabled){
     }
 
     // Safety gate: prevent accidental cloud wipe when local is empty/smaller.
+    // Policy target: 云端数据默认“禁止删除”。
+    // - 非强制推送：只允许“增量/覆盖”，不允许把云端已有数据变少。
+    // - 强制推送：允许本地覆盖云端（用于特殊场景）。
     if(!force && cloudRow){
-      const localSum = lc.sellers+lc.products+lc.orders+lc.batches;
-      const cloudSum = cc.sellers+cc.products+cc.orders+cc.batches;
-      if(localSum===0 && cloudSum>0){
+      const localSum0 = lc0.sellers+lc0.products+lc0.orders+lc0.batches;
+      const cloudSum0 = cc.sellers+cc.products+cc.orders+cc.batches;
+      if(localSum0===0 && cloudSum0>0){
         alert('已阻止推送：本地数据为空，但云端存在数据。\n\n如确需覆盖云端，请点“强制推送”。');
         return;
       }
       // If local has orders=0 but cloud has orders>0, treat as dangerous
-      if(lc.orders===0 && cc.orders>0){
+      if(lc0.orders===0 && cc.orders>0){
         alert('已阻止推送：本地订单为 0，但云端订单为 '+cc.orders+'。\n\n如确需覆盖云端，请点“强制推送”。');
+        return;
+      }
+      // Additional hard guard: do not allow any category to shrink (cloud delete) unless force
+      if(lc0.sellers < cc.sellers || lc0.products < cc.products || lc0.orders < cc.orders || lc0.batches < cc.batches){
+        alert(
+          '已阻止推送：检测到“会减少云端数据”的推送（默认禁止删除云端数据）。\n\n' +
+          '云端：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches+'\n' +
+          '本地：卖家'+lc0.sellers+' 产品'+lc0.products+' 订单'+lc0.orders+' 批次'+lc0.batches+'\n\n' +
+          '如确需用本地覆盖云端，请点“强制推送”。'
+        );
         return;
       }
     }
 
+    // Merge policy (no-delete by default): cloud-first union, then local overrides by id.
+    function _idOf(o){
+      if(!o || typeof o!=='object') return '';
+      return String(o.id || o.order_id || o.product_id || o.seller_id || o.batch_id || o.key || '');
+    }
+    function _mergeArrNoDelete(cloudArr, localArr){
+      const out = [];
+      const map = new Map();
+      (cloudArr||[]).forEach(it=>{ const k=_idOf(it); if(k){ map.set(k, it); } else { out.push(it); } });
+      (localArr||[]).forEach(it=>{ const k=_idOf(it); if(k){ map.set(k, it); } else { out.push(it); } });
+      // preserve stable order: cloud-first keys, then local-only keys
+      const seen = new Set();
+      (cloudArr||[]).forEach(it=>{ const k=_idOf(it); if(k && map.has(k) && !seen.has(k)){ out.push(map.get(k)); seen.add(k); } });
+      (localArr||[]).forEach(it=>{ const k=_idOf(it); if(k && map.has(k) && !seen.has(k)){ out.push(map.get(k)); seen.add(k); } });
+      return out;
+    }
+
+    const mergedState = (!force && cloudState) ? {
+      sellers: _mergeArrNoDelete(cloudState.sellers||[], localState0.sellers||[]),
+      products: _mergeArrNoDelete(cloudState.products||[], localState0.products||[]),
+      orders: _mergeArrNoDelete(cloudState.orders||[], localState0.orders||[]),
+      batches: _mergeArrNoDelete(cloudState.batches||[], localState0.batches||[])
+    } : localState0;
+
+    const lc = _countState(mergedState||{});
+
     // Build payload (no payload_str to avoid doubling size)
     const hash = _nowHash();
-    const raw = { v:1, state: local.state||{}, meta:{ source: local.source||'unknown', pushed_at: new Date().toISOString() } };
+    const raw = { v:2, state: mergedState||{}, meta:{ source: local.source||'unknown', pushed_at: new Date().toISOString(), policy:'no-delete-default' } };
 
     // Try compress if large
     let payloadObj = raw;
     try{
       const rawStr = JSON.stringify(raw);
-      // 1.2MB threshold for compression attempt
-      if(rawStr.length > 1200*1024){
+      // lower threshold: push is snapshot-level, always prefer compression once medium/large
+      if(rawStr.length > 200*1024){
         const b64 = await _gzipBase64(rawStr);
         if(b64 && b64.length < rawStr.length){
           payloadObj = { enc:'gzip-base64', data: b64, v:1, note:'auto-gzip' };
