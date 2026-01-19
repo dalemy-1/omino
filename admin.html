@@ -5072,11 +5072,12 @@ async function importOrdersCsvFile(file){
   let add=0, skip=0;
 
   for(const r of rows){
-    const orderId = String(r["订单号"]||r["订单号(19位)"]||r["订单号（19位）"]||"").trim();
+    const orderId = String(__getAny(r, ['order_no','订单号','订单号(19位)','订单号（19位）'])).trim();
     if(!orderId) continue;
-    const sellerName = String(r["卖家"]||"").trim();
-    const asin = String(r["ASIN"]||"").trim();
-    const title = String(r["产品名称"]||r["产品名"]||r["产品名称/标题"]||"").trim();
+    const sellerName = String(__getAny(r, ['seller_name','卖家'])).trim();
+    const asin = String(__getAny(r, ['asin','ASIN'])).trim();
+    const title = String(__getAny(r, ['product_name','产品名称','产品名','产品名称/标题','标题'])).trim();
+    const marketFromFile = String(__getAny(r, ['market','国家','Market','国家/Market'])).trim();
 
     // seller
     let seller = sellerByName.get(sellerName);
@@ -5092,12 +5093,12 @@ async function importOrdersCsvFile(file){
     if(!product && asin){
       const pid = U.id("P", S.seq.product++);
       const mk = __inferMarketFromName(title) || (seller.market||"");
-      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: U.toNum(r["卖家折扣"]), buyerCommission: U.toNum(r["买手佣金"]), remark:"", createdAt: now};
+      product = {id:pid, name:title||asin, asin, market: mk, sellerId: seller.id, reviewType: __mapReviewReq(r["留评需求"]), discount: sellerDiscount, buyerCommission: buyerComm, remark:"", createdAt: now};
       S.products.push(product);
       productByAsin.set(asin, product);
     }
 
-    const market = __inferMarketFromName(title) || (product?.market||seller.market||"");
+    const market = marketFromFile || __inferMarketFromName(title) || (product?.market||seller.market||);
     const currency = U.marketToCurrency(market||"") || "";
 
     const key = U.orderKey(seller.id, orderId, asin||"");
@@ -5111,7 +5112,14 @@ async function importOrdersCsvFile(file){
     const principalCny = U.toNum(r["本金金额"]);
     const commissionCny = U.toNum(r["佣金"]);
     const estRecv = U.toNum(r["预估收款"]);
-    const payoutAmt = U.toNum(r["返款金额"]);
+    const payoutAmt = U.toNum(__getAny(r, ['返款金额','payout_amount']));
+
+    const tax = U.toNum(__getAny(r,['税','tax']));
+    const actualAmount = U.toNum(__getAny(r,['实际金额','actual_amount']));
+    const orderComm = U.toNum(__getAny(r,['下单佣金','order_commission']));
+    const reviewComm = U.toNum(__getAny(r,['上评佣金','review_commission']));
+    const sellerDiscount = U.toNum(__getAny(r,['卖家折扣','seller_discount']));
+    const buyerComm = U.toNum(__getAny(r,['买手佣金','buyer_commission']));
 
     const dateRaw = String(r["下单时间"]||"").trim();
     const date = U.normalizeDate ? U.normalizeDate(dateRaw) : dateRaw.replace(/\//g,"-");
@@ -5137,7 +5145,16 @@ async function importOrdersCsvFile(file){
       title: title,
       fx,
       reviewReq,
-      note: "",
+      note: (function(){
+        var meta = {};
+        if(!isNaN(tax) && tax!==0) meta.tax = tax;
+        if(!isNaN(actualAmount) && actualAmount!==0) meta.actual_amount = actualAmount;
+        if(!isNaN(orderComm) && orderComm!==0) meta.order_commission = orderComm;
+        if(!isNaN(reviewComm) && reviewComm!==0) meta.review_commission = reviewComm;
+        if(!isNaN(sellerDiscount) && sellerDiscount!==0) meta.seller_discount = sellerDiscount;
+        if(!isNaN(buyerComm) && buyerComm!==0) meta.buyer_commission = buyerComm;
+        return Object.keys(meta).length ? ('META:'+JSON.stringify(meta)) : '';
+      })(),
       date: date || U.today(),
       principal: { settled: principalSettled, batchId: null, amountCny: principalCny||0, settledAmountCny: principalSettled?(principalCny||0):0 },
       commission:{ settled: commissionSettled, batchId: null, amountCny: commissionCny||0, settledAmountCny: commissionSettled?(commissionCny||0):0 },
@@ -11665,12 +11682,6 @@ async function fetchCloudSnapshot(client, appKey, cfgFallback){
   }
 
   function startAuto(){
-    // orders master mode: disable Plan A auto push to avoid CLEAN-SYNC empty-state interference
-    try{ if(window.PATCH7_ON){ _autoEnabled = false; } }catch(_e){}
-    if(!_autoEnabled){
-      log("自动推送已禁用（orders master mode）。");
-      return;
-    }
     // Allow users to disable via localStorage if needed
     try{
       const v = localStorage.getItem("OPS_CLOUD_AUTOPUSH");
@@ -12719,6 +12730,17 @@ if(!_autoEnabled){
           o.commission.amountCny = commissionCny || o.commission.amountCny || 0;
           o.commission.settled = !!commissionSettled;
           if(o.commission.settled) o.commission.settledAmountCny = o.commission.amountCny;
+
+          // payoutStatus: map from CSV "返佣状态" if provided
+          // - If CSV indicates settled/paid, set PAID; otherwise PENDING
+          try{
+            const csRaw = String(r.commissionStatus||"").trim();
+            if(csRaw){
+              const up = csRaw.toUpperCase();
+              const paid = (up.includes('DONE') || up.includes('PAID') || csRaw.includes('已') || csRaw.includes('完成'));
+              o.payoutStatus = paid ? 'PAID' : 'PENDING';
+            }
+          }catch(_e){}
 
           // optional fields (kept for later reporting)
           o.estimatedReceivableCny = estRecv || o.estimatedReceivableCny || 0;
@@ -13772,19 +13794,23 @@ if(!_autoEnabled){
       var product_name = norm(prod.name||o.productName||'');
 
       // statuses
-      var pay_status = (o.principalStatus==='DONE' || o.payStatus==='DONE' || o.principalPaid===True) ? 'DONE' : (o.principalStatus||o.payStatus||'PENDING');
+      var pay_status = (o.principal && typeof o.principal==='object') ? (o.principal.settled ? 'DONE' : 'PENDING') : (o.payStatus||o.principalStatus||'PENDING');
       if(!pay_status) pay_status='PENDING';
-      var review_status = (o.reviewStatus||o.review_state||'PENDING');
-      var payout_status = (o.payoutStatus||o.payout_status||'PENDING');
+
+      var review_status = (o.review && typeof o.review==='object' && o.review.status) ? o.review.status : (o.reviewStatus||o.review_state||'PENDING');
+      var payout_status = (o.payout && typeof o.payout==='object' && (o.payout.status||o.payoutStatus)) ? (o.payout.status||o.payoutStatus) : (o.payoutStatus||o.payout_status||'PENDING');
 
       // best-effort normalize to allowed values
-      var okSet = {PENDING:1,DONE:1,WAIVED:1,PAID:1};
+      var okSet = {PENDING:1,DONE:1,WAIVED:1,PAID:1,paid:1};
       if(!okSet[review_status]){
         if(String(review_status).toUpperCase().includes('DONE')) review_status='DONE';
         else if(String(review_status).toUpperCase().includes('WAIV')) review_status='WAIVED';
         else review_status='PENDING';
       }
-      if(!okSet[payout_status]) payout_status='PENDING';
+      if(!okSet[payout_status]){
+        if(String(payout_status).toLowerCase().includes('paid') || String(payout_status).toUpperCase().includes('DONE')) payout_status='PAID';
+        else payout_status='PENDING';
+      }
       if(!okSet[pay_status]) pay_status='PENDING';
 
       var note = norm(o.note||'');
@@ -13802,6 +13828,9 @@ if(!_autoEnabled){
         pay_status: pay_status,
         review_status: review_status,
         payout_status: payout_status,
+        review_req: norm(o.reviewReq || o.reviewType || (prod && prod.reviewType) || '') || null,
+        unit_price: (o.amount!=null ? Number(o.amount) : null),
+        fx_rate: (o.fx!=null ? Number(o.fx) : null),
         review_link: norm(o.reviewLink||o.review_link||'') || null,
         note: note || null,
         updated_at: new Date(o.updatedAt||Date.now()).toISOString()
@@ -13831,7 +13860,7 @@ if(!_autoEnabled){
         var from = page*limit;
         var to = from+limit-1;
         var q = sb.from('ops_orders_v1')
-          .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,created_at,updated_at')
+          .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,created_at,updated_at,review_req,unit_price,fx_rate')
           .eq('app_key', appKey)
           .order('created_at', {ascending:true})
           .range(from, to);
@@ -13875,7 +13904,9 @@ if(!_autoEnabled){
             productId: prod? prod.id : '',
             market: norm(row.market),
             asin: norm(row.asin),
-            amount: null,
+            amount: (row.unit_price!=null ? Number(row.unit_price) : null),
+            fx: (row.fx_rate!=null ? Number(row.fx_rate) : null),
+            reviewReq: norm(row.review_req||''),
             discount: null,
             note: norm(row.note),
             reviewStatus: norm(row.review_status||'PENDING'),
@@ -13895,6 +13926,9 @@ if(!_autoEnabled){
             existing.payStatus = norm(row.pay_status||existing.payStatus||'PENDING');
             existing.reviewStatus = norm(row.review_status||existing.reviewStatus||'PENDING');
             existing.payoutStatus = norm(row.payout_status||existing.payoutStatus||'PENDING');
+            if(row.unit_price!=null) existing.amount = Number(row.unit_price);
+            if(row.fx_rate!=null) existing.fx = Number(row.fx_rate);
+            if(row.review_req!=null) existing.reviewReq = norm(row.review_req);
             if(row.review_link) existing.reviewLink = norm(row.review_link);
             if(row.note) existing.note = norm(row.note);
             existing.updatedAt = cloudUpdated;
@@ -14100,8 +14134,8 @@ if(!_autoEnabled){
     try{
       var S = window.S || (window.S = {sellers:[],products:[],orders:[],batches:[]});
       if(!S.sellers) S.sellers=[]; if(!S.products) S.products=[]; if(!S.orders) S.orders=[]; if(!S.batches) S.batches=[];
-      // 直接采用云端行作为 orders（snake_case 兼容页面渲染）
-      S.orders = rows || [];
+      // v6.4.2 已在 cloudPullOrdersMaster 内部完成 merge 到本地结构；这里不再用 raw rows 覆盖 S.orders（避免订单变 0/结构不兼容）
+      // (no-op)
       // 轻量补齐卖家列表（只做展示/筛选用，避免破坏原结构）
       try{
         var setSeller=new Set();
@@ -14111,10 +14145,8 @@ if(!_autoEnabled){
           S.sellers = Array.from(setSeller).map(function(name){ return {name:name}; });
         }
       }catch(_){ }
-
-      // 写入 IndexedDB
-      if(typeof window.idbSet==='function'){
-        await window.idbSet('main_state_v1', S);
+      // 写入 IndexedDB：走系统原生 saveNow（会写 main_state_v1）
+      try{ if(window.saveNow) await window.saveNow(); }catch(e){ }
       }
       // 触发刷新渲染
       if(typeof window.render==='function') window.render();
@@ -14132,7 +14164,6 @@ if(!_autoEnabled){
       ui('云端拉取：开始（订单主表 ops_orders_v1）');
       var res = await window.cloudPullOrdersMaster();
       var rows = (res && res.orders) ? res.orders : [];
-      try{ console.log('[PULLFIX] cloudPullOrdersMaster returned', {cloudCount: res && res.cloudCount, rows: rows.length}); }catch(_e){}
       await applyCloudOrdersToLocal(rows);
       ui('云端拉取：完成，写入本地 '+rows.length+' 条订单');
       return {ok:true, count: rows.length};
