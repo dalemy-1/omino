@@ -8,7 +8,12 @@
 <style>
 
 :root{
-  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text:#111827;
+  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text
+function shortReviewType(val){
+  const s = String(val||"");
+  // 仅用于展示：前 4 个中文（或4个字符）
+  return s.length>4 ? s.slice(0,4) : s;
+}:#111827;
   --border:#e5e7eb; --primary:#2563eb; --primary2:#1d4ed8;
   --good:#16a34a; --danger:#ef4444; --warn:#f59e0b; --soft:#f9fafb;
 }
@@ -13224,31 +13229,12 @@ if(!_autoEnabled){
   }
 
   async function _writeLocal(state){
-    // Write to primary local store used by this build.
-    try{
-      if(typeof window._writePrimaryState==='function') { await window._writePrimaryState(state); return; }
-    }catch(e){}
-    try{
-      if(typeof window.setLocalSnapshot==='function') { await window.setLocalSnapshot(state); return; }
-    }catch(e){}
-
-    // Preferred: IndexedDB kv main_state_v1 via idbSet.
-    try{
-      if(typeof idbSet === 'function' && typeof MAIN_STATE_KEY !== 'undefined'){
-        await idbSet(MAIN_STATE_KEY, state);
-        return;
-      }
-    }catch(e){}
-
-    // Legacy fallback: _idbSetAnyKv signature (db, store, key, val)
-    try{
-      if(typeof window._idbSetAnyKv==='function'){
-        await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',state);
-        return;
-      }
-    }catch(e){}
-
-    // Last resort: localStorage
+    if(typeof window._writePrimaryState==='function') return window._writePrimaryState(state);
+    if(typeof window.setLocalSnapshot==='function') return window.setLocalSnapshot(state);
+    if(typeof window._idbSetAnyKv==='function'){
+      await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',state);
+      return;
+    }
     try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state||{})); }catch(e){}
   }
 
@@ -13279,93 +13265,44 @@ if(!_autoEnabled){
     opts = opts||{};
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
-    const { client: sb, cfg } = cloud;
-    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
+	    const { client: sb, cfg } = cloud;
+	    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
     const local = await _readLocal();
     const st = local.state || {};
-    // Ensure shape
-    if(!st.sellers || !Array.isArray(st.sellers)) st.sellers = [];
-    if(!st.products || !Array.isArray(st.products)) st.products = [];
-    if(!st.orders || !Array.isArray(st.orders)) st.orders = [];
-    if(!st.batches || !Array.isArray(st.batches)) st.batches = [];
-    if(!st.seq) st.seq = {seller:1, product:1, order:1, batch:1, payoutBatch:1};
-
-
-    // Ensure shape
-    st.sellers = Array.isArray(st.sellers) ? st.sellers : [];
-    st.products = Array.isArray(st.products) ? st.products : [];
-    st.orders = Array.isArray(st.orders) ? st.orders : [];
-    st.batches = Array.isArray(st.batches) ? st.batches : [];
-    st.seq = st.seq && typeof st.seq==='object' ? st.seq : {seller:1, product:1, order:1, batch:1, payoutBatch:1};
-
     let pulled = 0;
     try{
+      // paginate (Supabase default limit 1000)
       const pageSize = 1000;
       let from = 0;
       while(true){
-        // Stable ordering to avoid pagination drift when many rows share the same updated_at
         const { data, error } = await sb.from(ORDER_TABLE)
           .select('*')
-          .eq('app_key', appKey)
+	          .eq('app_key', appKey)
           .order('updated_at', { ascending:false })
-          .order('id', { ascending:false })
           .range(from, from + pageSize - 1);
         if(error) throw error;
         const rows = data || [];
         if(!rows.length) break;
-        for(const row of rows){
-          if(_upsertLocalOrder(st, row)) pulled++;
+        for(const r of rows){
+          if(_upsertLocalOrder(st, r)) pulled++;
         }
         if(rows.length < pageSize) break;
         from += pageSize;
       }
 
-      // Persist first (IndexedDB is source of truth for this build)
+      // normalize + KPI recompute if available
+      try{ if(typeof window.normalizeOrders==='function') window.normalizeOrders(); }catch(e){}
+      try{ if(typeof window.recalcKPI==='function') window.recalcKPI(); }catch(e){}
+      try{ if(typeof window.render==='function') window.render(); }catch(e){}
+
       await _writeLocal(st);
-
-      // Apply to in-memory state used by UI (S is a lexical variable in this build)
-      try{
-        if(typeof S !== 'undefined' && S){
-          S.sellers = st.sellers;
-          S.products = st.products;
-          S.orders = st.orders;
-          S.batches = st.batches;
-          S.seq = st.seq;
-          window.state = S;
-        }else{
-          // fallback if build uses window.S
-          window.S = st;
-          window.state = st;
-        }
-      }catch(_e){}
-
-      // recompute + render
-      try{ if(typeof computeSeq==='function') computeSeq(); }catch(_e){}
-      try{ if(typeof recalcKPI==='function') recalcKPI(); }catch(_e){}
-      try{ if(typeof renderAll==='function') renderAll(); }catch(_e){}
-      try{ if(typeof render==='function') render(); }catch(_e){}
-
-      try{ toast2('云端拉取完成：已合并订单 '+pulled+' 条；本地orders='+((st.orders&&st.orders.length)||0)+'。'); }catch(_e){ alert('云端拉取完成：'+pulled); }
+      toast2('云端拉取完成：已合并订单 '+pulled+' 条（不会删除本地/云端）。');
+      setTimeout(()=>location.reload(), 300);
     }catch(e){
       console.error(e);
       alert('云端拉取失败：' + (e && (e.message||e.toString())));
     }
   }
-
-  // After window load, overwrite any earlier snapshot-based bindings
-  window.addEventListener('load', ()=>{
-    try{
-      const byId = (id)=>document.getElementById(id);
-      const bPull = byId('btnCloudPull');
-      const bStatus = byId('btnCloudStatus');
-      const bPush = byId('btnCloudPush');
-      const bPushForce = byId('btnCloudPushForce');
-      if(bPull) bPull.onclick = ()=>ordersCloudPull({force:false});
-      if(bStatus) bStatus.onclick = ()=>ordersCloudStatus();
-      if(bPush) bPush.onclick = ()=>ordersCloudPush({force:false});
-      if(bPushForce) bPushForce.onclick = ()=>ordersCloudPush({force:true});
-    }catch(e){}
-  });
 
   async function ordersCloudPush(opts){
     opts = opts||{};
@@ -13532,21 +13469,6 @@ if(!_autoEnabled){
     bindByText('云端推送', ()=>ordersCloudPush({force:false}));
     bindByText('强制推送', ()=>ordersCloudPush({force:true}));
 
-    // Final lock: ensure legacy window.onload bindings cannot override our pull
-    window.addEventListener('load', ()=>{
-      try{
-        const bPull = document.getElementById('btnCloudPull');
-        if(bPull){
-          bPull.onclick = (ev)=>{ try{ ev && ev.preventDefault && ev.preventDefault(); ev && ev.stopPropagation && ev.stopPropagation(); }catch(e){}; return ordersCloudPull({force:false}); };
-        }
-        const bPullForce = document.getElementById('btnCloudPullForce');
-        if(bPullForce){
-          bPullForce.onclick = (ev)=>{ try{ ev && ev.preventDefault && ev.preventDefault(); ev && ev.stopPropagation && ev.stopPropagation(); }catch(e){}; return ordersCloudPull({force:true}); };
-        }
-      }catch(e){}
-    }, true);
-
-
 
     // Also bind top-bar buttons that are rendered without IDs (match by visible text)
     const bindTopbarByText = ()=>{
@@ -13565,19 +13487,6 @@ if(!_autoEnabled){
     };
     // run twice to beat late render/bind from legacy scripts
     bindTopbarByText();
-
-    // FINAL OVERRIDE: some older scripts re-bind buttons on window 'load' and route to snapshot cloudPull.
-    // Re-bind again at capture phase on load to guarantee orders-table pull is used.
-    window.addEventListener('load', function(){
-      try{
-        var bp = document.getElementById('btnCloudPull');
-        if(bp) bp.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudPull({force:false}); };
-        var bs = document.getElementById('btnCloudStatus');
-        if(bs) bs.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudStatus(); };
-        var bps = document.getElementById('btnCloudPush');
-        if(bps) bps.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudPush({force:false}); };
-      }catch(e){}
-    }, true);
     setTimeout(bindTopbarByText, 300);
     setTimeout(bindTopbarByText, 1200);
 }, { once:true });
@@ -14284,6 +14193,11 @@ if(!_autoEnabled){
       S0.products = products;
       S0.orders = orders;
 
+
+      // [PATCH_PULLFIX_V1] 同步写回词法全局（UI 实际读取的是 S/state，而不仅是 window.S）
+      try{ if(typeof S!=='undefined') S = S0; }catch(_e){}
+      try{ if(typeof state!=='undefined') state = S0; }catch(_e){}
+      try{ window.S = S0; window.state = S0; }catch(_e){}
       // Write into IndexedDB primary
       try{
         if(typeof window._idbSetAnyKv==='function'){
@@ -14350,6 +14264,52 @@ if(!_autoEnabled){
   window.cloudPush = cloudPushMaster;
   window.applyCloudOrdersToLocal = applyCloudOrdersToLocal;
 
+
+  // [PATCH_PULLFIX_V1] 强制覆盖 cloudPullOrdersMaster：只负责从 ops_orders_v1 拉取 rows，并返回 {orders:[...]}。
+  // 原文件的 cloudPullOrdersMaster 会直接 merge 到 S 并返回 {added/updated}，不含 orders，导致上层 rows=[] 写空本地。
+  window.cloudPullOrdersMaster = async function(opts){
+    opts = opts || {};
+    var sb = null;
+    try{
+      if(window.getSb) sb = window.getSb();
+      if(!sb && window.getCloudClientOrNull) sb = window.getCloudClientOrNull();
+      if(!sb && window._getCloudClient) sb = window._getCloudClient();
+    }catch(e){}
+    if(!sb || !sb.from) throw new Error('supabase_client_missing');
+
+    var appKey = 'dalemy';
+    try{ appKey = (window.getAppKey && window.getAppKey()) || (localStorage.getItem('OPS_CLOUD_APPKEY')||'dalemy'); }catch(e){}
+    appKey = String(appKey||'dalemy').trim() || 'dalemy';
+
+    var limit = Number(opts.limit||1000) || 1000;
+    if(limit<1) limit=1000;
+    if(limit>5000) limit=5000;
+    var page = 0;
+    var all = [];
+
+    while(true){
+      var from = page*limit;
+      var to = from + limit - 1;
+      // 用稳定排序（updated_at + id）避免 12908 vs 12814 漏行
+      var q = sb.from('ops_orders_v1')
+        .select('*')
+        .eq('app_key', appKey)
+        .order('updated_at', {ascending:true})
+        .order('id', {ascending:true})
+        .range(from, to);
+
+      var r = await q;
+      if(r.error) throw r.error;
+      var rows = r.data || [];
+      all = all.concat(rows);
+      if(rows.length < limit) break;
+      page++;
+      if(page>5000) break; // safety
+    }
+
+    return {appKey: appKey, cloudCount: all.length, orders: all};
+  };
+
   // 禁用旧 PlanA 的 safeMergeAndPush（它会把空本地写回/误判）
   if(typeof window.safeMergeAndPush==='function'){
     window.safeMergeAndPush = async function(){ log('[PATCH_PULLFIX_V1] safeMergeAndPush disabled (orders master mode)'); return {ok:true, disabled:true}; };
@@ -14379,309 +14339,6 @@ if(!_autoEnabled){
     }catch(e){ log('[PATCH_PULLFIX_V1] bind failed', e); }
   }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
-})();
-
-
-/* ===================== PATCH_PULLFIX_V1_LOCK v3 (final): force cloud pull -> fill S (lexical) + IDB persist + render ===================== */
-;(function(){
-  try{
-    // Fix legacy python-style booleans that can break older code paths
-    if(typeof window.True==='undefined') window.True=true;
-    if(typeof window.False==='undefined') window.False=false;
-  }catch(e){}
-
-  function log(){ try{ console.log.apply(console, ['[PULLFIX_V3]'].concat([].slice.call(arguments))); }catch(e){} }
-
-  function esc(s){
-    s = (s==null)?'':String(s);
-    return s.replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-  }
-
-  function normReviewReq(v){
-    var s = (v==null)?'':String(v).trim();
-    if(!s) return 'TEXT';
-    // Accept canonical keys
-    var up = s.toUpperCase();
-    if(up==='TEXT'||up==='IMG'||up==='IMAGE'||up==='PIC'||up==='PICTURE'||up==='VIDEO'||up==='WAIVED'){}
-    // Chinese mapping
-    if(/免评/.test(s)) return 'WAIVED';
-    if(/视频/.test(s)) return 'VIDEO';
-    if(/图|图片|照片/.test(s)) return 'IMG';
-    if(up==='VIDEO') return 'VIDEO';
-    if(up==='IMG'||up==='IMAGE') return 'IMG';
-    if(up==='WAIVED') return 'WAIVED';
-    return 'TEXT';
-  }
-
-  function sellerIdOf(name){ return 'S|' + String(name||'').trim(); }
-  function productIdOf(market, name, asin){ return 'P|' + String(market||'').trim() + '|' + String(name||'').trim() + '|' + String(asin||'').trim(); }
-
-  function ensureState(){
-    // The app uses lexical global S (not window.S). We must keep them aligned.
-    try{
-      if(typeof S==='undefined' || !S || typeof S!=='object') S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
-      if(!Array.isArray(S.sellers)) S.sellers=[];
-      if(!Array.isArray(S.products)) S.products=[];
-      if(!Array.isArray(S.orders)) S.orders=[];
-      if(!Array.isArray(S.batches)) S.batches=[];
-      if(!S.seq) S.seq={seller:1,product:1,order:1,batch:1};
-      window.S = S;
-      window.state = S;
-    }catch(e){
-      window.S = window.S||{sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
-      window.state = window.S;
-    }
-    return (typeof S!=='undefined' && S) ? S : window.S;
-  }
-
-  function findBtnExact(label){
-    var L=String(label||'').trim();
-    var btns=[].slice.call(document.querySelectorAll('button, a.btn, input[type=button], input[type=submit]'));
-    for(var i=0;i<btns.length;i++){
-      var el=btns[i];
-      var t=(el.innerText||el.value||'').trim();
-      if(t===L) return el;
-    }
-    return null;
-  }
-
-  async function getCloud(){
-    try{ if(typeof window.getCloudClientOrNull==='function') return window.getCloudClientOrNull(); }catch(e){}
-    return null;
-  }
-
-  async function writeIDB(state){
-    // Prefer native idbSet(MAIN_STATE_KEY, S) of this build
-    try{
-      if(typeof idbSet==='function' && typeof MAIN_STATE_KEY!=='undefined'){
-        await idbSet(MAIN_STATE_KEY, state);
-        return true;
-      }
-    }catch(e){ log('idbSet failed', e); }
-    // Fallback to kv helpers
-    try{
-      if(typeof window._idbSetAnyKv==='function'){
-        await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1', state);
-        return true;
-      }
-    }catch(e){}
-    try{
-      if(typeof _idbSetAnyKv==='function'){
-        await _idbSetAnyKv('ops_v642_main','kv','main_state_v1', state);
-        return true;
-      }
-    }catch(e){}
-    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state||{})); }catch(e){}
-    return false;
-  }
-
-  function upsertSeller(S0, sellerName){
-    sellerName = String(sellerName||'').trim();
-    var sid = sellerIdOf(sellerName);
-    var sm = S0._sellerMap || (S0._sellerMap = new Map((S0.sellers||[]).map(s=>[String(s.id), s])));
-    var s = sm.get(sid);
-    if(!s){
-      s = { id: sid, name: sellerName, marketFx:{}, commission:{}, note:'' };
-      S0.sellers.push(s);
-      sm.set(sid, s);
-    }
-    return sid;
-  }
-
-  function upsertProduct(S0, market, productName, asin, reviewReq){
-    var pid = productIdOf(market, productName, asin);
-    var pm = S0._productMap || (S0._productMap = new Map((S0.products||[]).map(p=>[String(p.id), p])));
-    var p = pm.get(pid);
-    if(!p){
-      p = { id: pid, name: String(productName||'').trim(), asin: String(asin||'').trim(), market: String(market||'').trim(), reviewType: normReviewReq(reviewReq), discount:0, buyerCommission:0, note:'' };
-      S0.products.push(p);
-      pm.set(pid, p);
-    }else{
-      if(productName && !p.name) p.name=String(productName).trim();
-      if(asin && !p.asin) p.asin=String(asin).trim();
-      if(market && !p.market) p.market=String(market).trim();
-      if(reviewReq) p.reviewType = normReviewReq(reviewReq);
-    }
-    return pid;
-  }
-
-  function upsertOrder(S0, row){
-    var orderNo = String(row.order_no||row.orderNo||row.order_id||row.orderId||'').trim();
-    if(!orderNo) return false;
-
-    var sellerName = String(row.seller_name||row.sellerName||'').trim();
-    var market = String(row.market||'').trim();
-    var productName = String(row.product_name||row.productName||'').trim();
-    var asin = String(row.asin||'').trim();
-    var reviewReq = row.review_req ?? row.reviewReq ?? row.review_requirement;
-
-    var sid = upsertSeller(S0, sellerName);
-    var pid = upsertProduct(S0, market, productName, asin, reviewReq);
-
-    // stable local order key: seller + orderNo + product + asin
-    var key = sid + '|' + orderNo + '|' + pid;
-    var om = S0._orderMap || (S0._orderMap = new Map((S0.orders||[]).map(o=>[String(o._bizKey||o.id||o.orderId), o])));
-    var o = om.get(key);
-    if(!o){
-      o = {
-        id: String(row.id||'') || ('O|' + key),
-        _bizKey: key,
-        orderId: orderNo,
-        date: (row.created_at||row.updated_at||new Date().toISOString()).slice(0,10),
-        sellerId: sid,
-        productId: pid,
-        market: market,
-        asin: asin,
-        reviewReq: normReviewReq(reviewReq),
-        amount: Number(row.unit_price ?? row.amount ?? 0) || 0,
-        discount: Number(row.seller_discount ?? row.discount ?? row.sellerDiscount ?? 0) || 0,
-        buyerCommission: Number(row.buyer_commission ?? row.buyerCommission ?? row.order_commission ?? 0) || 0,
-        tax: Number(row.tax ?? 0) || 0,
-        fxOverride: (row.fx_rate!=null && row.fx_rate!=='') ? row.fx_rate : (row.fx!=null ? row.fx : ''),
-        principal: { settled:false, batchId:'', fx:'', amountCny:'' },
-        commission: { settled:false, batchId:'', amountCny:'' },
-        review: { status: String(row.review_status||'PENDING'), date:'', link:String(row.review_link||''), note:'', doneType:'' },
-        payout: { status: String(row.payout_status||'not_ready'), batch_id:'', paid_at:'', screenshot:String(row.payout_screenshot_url||'') },
-        note: String(row.note||'')
-      };
-      S0.orders.unshift(o);
-      om.set(key, o);
-    }
-
-    // Update mutable fields
-    o.market = market || o.market;
-    o.asin = asin || o.asin;
-    o.productId = pid || o.productId;
-    o.sellerId = sid || o.sellerId;
-    o.reviewReq = normReviewReq(reviewReq) || o.reviewReq;
-
-    // amounts
-    if(row.unit_price!=null && row.unit_price!=='') o.amount = Number(row.unit_price)||0;
-    if(row.seller_discount!=null && row.seller_discount!=='') o.discount = Number(row.seller_discount)||0;
-    if(row.buyer_commission!=null && row.buyer_commission!=='') o.buyerCommission = Number(row.buyer_commission)||0;
-    if(row.fx_rate!=null && row.fx_rate!=='') o.fxOverride = row.fx_rate;
-
-    // statuses
-    if(row.pay_status){
-      var ps = String(row.pay_status).toLowerCase();
-      if(ps==='paid' || ps==='yes' || ps==='1') o.principal.settled = true;
-    }
-    if(row.review_status) o.review.status = String(row.review_status||'');
-    if(row.review_link) o.review.link = String(row.review_link||'');
-    if(row.payout_status) o.payout.status = String(row.payout_status||'');
-
-    return true;
-  }
-
-  async function cloudPullMaster(){
-    var cloud = await getCloud();
-    if(!cloud){ alert('未设置云端（请先点“云端设置”）。'); return; }
-    var sb = cloud.client;
-    var cfg = cloud.cfg||{};
-    var appKey = String(cfg.appKey||cfg.app_key||'').trim();
-    if(!appKey){ alert('云端配置缺少 app_key'); return; }
-
-    // Ensure local state is loaded
-    try{ if(typeof load==='function') await load(); }catch(e){}
-    var S0 = ensureState();
-
-    var pulled = 0;
-    var pageSize = 1000;
-    var from = 0;
-
-    try{
-      while(true){
-        var q = sb.from('ops_orders_v1').select('*').eq('app_key', appKey)
-          .order('updated_at', {ascending:false}).order('id', {ascending:false})
-          .range(from, from + pageSize - 1);
-        var res = await q;
-        if(res.error) throw res.error;
-        var rows = res.data || [];
-        if(!rows.length) break;
-        for(var i=0;i<rows.length;i++){
-          if(upsertOrder(S0, rows[i])) pulled++;
-        }
-        if(rows.length < pageSize) break;
-        from += pageSize;
-      }
-
-      // drop temp maps
-      try{ delete S0._sellerMap; delete S0._productMap; delete S0._orderMap; }catch(e){}
-
-      // Persist then render
-      await writeIDB(S0);
-      try{ if(typeof computeSeq==='function') computeSeq(); }catch(e){}
-      try{ if(typeof window.render==='function') window.render(); }catch(e){}
-
-      try{
-        // update KPI counters that some builds rely on
-        if(document.getElementById('kpiOrders')) document.getElementById('kpiOrders').textContent = (S0.orders||[]).length;
-      }catch(e){}
-
-      try{ if(typeof toast2==='function') toast2('云端拉取完成：已写入本地并刷新列表（合并 '+pulled+' 条）'); }catch(e){ alert('云端拉取完成：合并 '+pulled+' 条'); }
-      log('pull done', {pulled: pulled, local: (S0.orders||[]).length});
-    }catch(e){
-      console.error(e);
-      alert('云端拉取失败：' + (e && (e.message||e.toString())));
-    }
-  }
-
-  function bind(){
-    try{
-      var bPull = findBtnExact('云端拉取');
-      if(bPull){
-        bPull.addEventListener('click', function(ev){
-          ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
-          cloudPullMaster();
-        }, true);
-      }
-      // Expose for debugging
-      window.cloudPullMaster = cloudPullMaster;
-      log('bound cloud pull (capture)');
-    }catch(e){ log('bind failed', e); }
-  }
-
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
-})();
-</script>
-
-
-<script>
-// PATCH_PULLFIX_V1_LOCK_V3: force bind cloud buttons to orders-table implementation AFTER all other handlers.
-(function(){
-  function bind(){
-    try{
-      var bPull = document.getElementById('btnCloudPull');
-      var bStatus = document.getElementById('btnCloudStatus');
-      var bPush = document.getElementById('btnCloudPush');
-      var bPushForce = document.getElementById('btnCloudPushForce');
-      if(bPull){
-        bPull.addEventListener('click', function(ev){
-          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
-          return (window.ordersCloudPull||window.cloudPull||function(){})();
-        }, true);
-      }
-      if(bStatus){
-        bStatus.addEventListener('click', function(ev){
-          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
-          return (window.ordersCloudStatus||window.cloudStatus||function(){})();
-        }, true);
-      }
-      if(bPush){
-        bPush.addEventListener('click', function(ev){
-          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
-          return (window.ordersCloudPush||window.cloudPush||function(){})({force:false});
-        }, true);
-      }
-      if(bPushForce){
-        bPushForce.addEventListener('click', function(ev){
-          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
-          return (window.ordersCloudPush||window.cloudPush||function(){})({force:true});
-        }, true);
-      }
-    }catch(e){}
-  }
-  window.addEventListener('load', bind, true);
 })();
 </script>
 
