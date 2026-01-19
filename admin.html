@@ -12221,11 +12221,17 @@ async function cloudStatusFixed(){
     const buyerComm = _getAny(row, ['buyer_commission','buyerCommission','buyer_commission_orig','buyer_commission_cny']);
     const reviewReq = _getAny(row, ['review_req','review_requirement','review_type','reviewReq']);
 
-    const unitPrice2 = unitPrice!=null ? unitPrice : _getAny(noteObj, ['unit_price','unitPrice','price','amount']);
-    const fxRate2 = fxRate!=null ? fxRate : _getAny(noteObj, ['fx_rate','fx','rate']);
-    const discount2 = discountVal!=null ? discountVal : _getAny(noteObj, ['discount','discount_price','seller_discount']);
-    const buyerComm2 = buyerComm!=null ? buyerComm : _getAny(noteObj, ['buyer_commission','buyerCommission','buyer_commission_orig']);
-    const reviewReq2 = reviewReq!=null ? reviewReq : _getAny(noteObj, ['review_req','review_requirement','review_type','reviewReq','留评需求']);
+    // NOTE(jsonb) 兼容：你云端的关键数值字段常在 note 内以中文键存在
+    // 例如：{"卖家折扣":"0.0","下单佣金":"0" ,"实际金额":"5.94","本金金额":"56.43"}
+    // 规则确认：
+    // - 折扣价 = note.卖家折扣
+    // - 买手佣金 = note.下单佣金（而不是 note.买手佣金）
+    // - 金额（单价）优先 unit_price，其次 note.实际金额
+    const unitPrice2 = unitPrice!=null ? unitPrice : _getAny(noteObj, ['unit_price','unitPrice','price','amount','实际金额']);
+    const fxRate2 = fxRate!=null ? fxRate : _getAny(noteObj, ['fx_rate','fx','rate','汇率']);
+    const discount2 = discountVal!=null ? discountVal : _getAny(noteObj, ['discount','discount_price','seller_discount','卖家折扣','折扣价','折扣']);
+    const buyerComm2 = buyerComm!=null ? buyerComm : _getAny(noteObj, ['buyer_commission','buyerCommission','buyer_commission_orig','下单佣金','买手佣金']);
+    const reviewReq2 = reviewReq!=null ? reviewReq : _getAny(noteObj, ['review_req','review_requirement','review_type','reviewReq','留评需求','留评要求','留评类型']);
 
     if(unitPrice2!=null && unitPrice2!=='' ) o.amount = (typeof U.num==='function') ? U.num(unitPrice2) : (parseFloat(unitPrice2)||0);
     if(discount2!=null && discount2!=='') o.discount = (typeof U.num==='function') ? U.num(discount2) : (parseFloat(discount2)||0);
