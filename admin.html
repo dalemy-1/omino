@@ -13558,5 +13558,128 @@ if(!_autoEnabled){
   log("[PATCH5] loaded");
 })();
 </script>
-</body>
-</html>
+
+<!-- PATCH7: force supabase client init + intercept 云端状态 -->
+<script>
+(function(){
+  function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
+  function getLS(keys){
+    for(var i=0;i<keys.length;i++){
+      var k=keys[i];
+      var v='';
+      try{ v=(localStorage.getItem(k)||'').trim(); }catch(e){}
+      if(v) return v;
+    }
+    return '';
+  }
+  function getAppKey(){
+    var ak = getLS(['OPS_CLOUD_APPKEY','OPS_APPKEY','OPS_SYNC_APPKEY','OPS_SYNC_APP_KEY','APP_KEY','app_key']);
+    return (ak||'dalemy').trim() || 'dalemy';
+  }
+  function getUrl(){
+    return getLS(['OPS_CLOUD_URL','SUPABASE_URL','SUPABASE_PROJECT_URL','NEXT_PUBLIC_SUPABASE_URL','OPS_SYNC_SUPABASE_URL']);
+  }
+  function getAnon(){
+    return getLS(['OPS_CLOUD_ANON_KEY','SUPABASE_ANON_KEY','SUPABASE_ANON','SUPABASE_KEY','NEXT_PUBLIC_SUPABASE_ANON_KEY','OPS_SYNC_SUPABASE_ANON']);
+  }
+  function ensureSupabaseUMD(cb){
+    if(window.supabase && window.supabase.createClient){ return cb(); }
+    // try existing UMD global names
+    if(window.SUPABASE && window.SUPABASE.createClient){ window.supabase = window.SUPABASE; return cb(); }
+    var s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js';
+    s.onload=function(){ window.supabase = window.supabase || window.SUPABASE || window.supabase; cb(); };
+    s.onerror=function(){ log('[PATCH7] supabase umd load failed'); cb(new Error('supabase_umd_load_failed')); };
+    document.head.appendChild(s);
+  }
+  function ensureClient(){
+    var url=getUrl(), anon=getAnon();
+    if(!url || !anon){
+      log('[PATCH7] missing supabase config', {url:!!url, anon:!!anon});
+      return null;
+    }
+    try{
+      if(window.supabaseClient && window.supabaseClient.from) return window.supabaseClient;
+      if(window._sb && window._sb.from) return window._sb;
+      if(window.SUPABASE && window.SUPABASE.client && window.SUPABASE.client.from) return window.SUPABASE.client;
+    }catch(e){}
+    try{
+      var sb = window.supabase.createClient(url, anon, { auth: { persistSession: false } });
+      window.supabaseClient = sb;
+      window._sb = sb;
+      if(window.SUPABASE) window.SUPABASE.client = sb;
+      log('[PATCH7] supabase client ready');
+      return sb;
+    }catch(e){
+      log('[PATCH7] createClient failed', e);
+      return null;
+    }
+  }
+
+  async function countOrders(){
+    var appKey=getAppKey();
+    var sb=ensureClient();
+    if(!sb || !sb.from) throw new Error('supabase_client_missing');
+    var r = await sb.from('ops_orders_v1').select('id', { count: 'exact', head: true }).eq('app_key', appKey);
+    if(r.error) throw r.error;
+    return {appKey: appKey, count: r.count||0};
+  }
+
+  function showModal(lines){
+    try{ alert(lines.join('\n')); }catch(e){ try{ console.log(lines.join('\n')); }catch(_e){} }
+  }
+
+
+  async function showOrdersCloudStatus(){
+    try{
+      var res = await countOrders();
+      showModal([
+        '云端订单归档状态（ops_orders_v1）',
+        'PATCH7=ON',
+        'app_key='+res.appKey,
+        '云端订单='+res.count
+      ]);
+    }catch(e){
+      showModal(['云端订单状态失败：'+(e && e.message ? e.message : e)]);
+      console.error(e);
+    }
+  }
+
+  // CAPTURE click to override any existing inline/closure handlers
+  function installInterceptor(){
+    document.addEventListener('click', function(ev){
+      var el = ev.target;
+      if(!el) return;
+      // allow clicking on inner spans
+      var node = el;
+      for(var i=0;i<6 && node; i++){
+        var t = (node.innerText||node.textContent||'').trim();
+        if(t && (t==='云端状态' || t.indexOf('云端状态')>=0)){
+          ev.preventDefault();
+          ev.stopPropagation();
+          ev.stopImmediatePropagation && ev.stopImmediatePropagation();
+          showOrdersCloudStatus();
+          return;
+        }
+        node = node.parentElement;
+      }
+    }, true);
+    log('[PATCH7] interceptor installed');
+  }
+
+  function boot(){
+    ensureSupabaseUMD(function(){
+      ensureClient();
+      installInterceptor();
+      // expose for manual test
+      window.ordersCloudStatus = showOrdersCloudStatus;
+      window.cloudStatusOrders = showOrdersCloudStatus;
+    });
+  }
+
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>
+
+</body></html>
