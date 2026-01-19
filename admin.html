@@ -952,7 +952,6 @@ async function cloudStatus(){
 
   if(!cfg || !cfg.url || !cfg.anon || !cfg.appKey){
     toast("请先设置云端（Supabase URL / anon key / app_key）","warn");
-    window.__pullLock = false;
     return;
   }
   const { client } = sb;
@@ -4101,7 +4100,6 @@ function applyProductToOrder(){
     setVal('orderBuyerCommission','');
     // 回评类型默认文字评
     setVal('orderReviewType','文字评');
-    window.__pullLock = false;
     return;
   }
   const p = U.productById(pid);
@@ -4300,7 +4298,6 @@ function batchHandle(commit){
 
   if(!rows.length){
     showNotice("提示", "未解析到可用行。\n失败 " + badLines.length + " 行。");
-    window.__pullLock = false;
     return;
   }
 
@@ -4308,7 +4305,6 @@ function batchHandle(commit){
   const missingSellerCnt = rows.filter(r=>!String(r.sellerId||"").trim()).length;
   if(commit && missingSellerCnt>0 && !String(sellerIdInput||"").trim()){
     showNotice("提示", `已完成解析，但有 ${missingSellerCnt} 行未能从产品库匹配到默认卖家。\n请先在右侧选择卖家（或先选择“套用产品”），再点击「解析并提交」。\n你也可以先点「仅预览」查看解析结果。`);
-    window.__pullLock = false;
     return;
   }
 
@@ -4590,7 +4586,6 @@ function openSettle(mode){
       return `- ${name}：${arr.length} 单（${sample}）`;
     });
     alert(`不同卖家的订单不能一起结算。\n\n当前勾选共 ${ids.length} 单，涉及 ${sellerIds.length} 个卖家：\n${lines.join('\n')}\n\n请只保留同一个卖家的订单再结算。`);
-    window.__pullLock = false;
     return;
   }
 
@@ -4868,7 +4863,6 @@ async function confirmSettle(){
   // guard: if all zeros, do not create batch
   if((batch.lines||[]).every(l=>U.num(l.principalSettle)===0 && U.num(l.commissionSettle)===0)){
     alert("本批次没有可结算金额（可能已结算/未回评）。");
-    window.__pullLock = false;
     return;
   }
 
@@ -5065,7 +5059,6 @@ async function importOrdersCsvFile(file){
   const rows = __parseCSV(txt);
   if(!rows || !rows.length){
     showNotice("导入失败","CSV 为空或无法解析。");
-    window.__pullLock = false;
     return;
   }
 
@@ -5168,7 +5161,6 @@ async function importOrdersCsvFile(file){
 
   if(add===0){
     showNotice("导入完成", `无新增订单（跳过重复 ${skip}）。`);
-    window.__pullLock = false;
     return;
   }
 
@@ -6038,7 +6030,6 @@ function flushRender(){
     // 全量刷新：重置所有 dirty，并执行原 renderAll()
     __R.dirty = {full:false,selects:false,sellerGrids:false,kpi:false,sellers:false,products:false,orders:false,batches:false,payout:false,productPreview:false};
     renderAll();
-    window.__pullLock = false;
     return;
   }
   // 仅渲染必要模块（注意顺序：selects -> grids -> lists -> derived views）
@@ -6803,7 +6794,6 @@ function payoutParseAndSelect(){
   const orderNos = U.extractOrderIds(raw); // 订单号形如 111-2222222-3333333
   if(!orderNos.length){
     if($("payoutPasteHint")) $("payoutPasteHint").textContent = "未识别到订单号";
-    window.__pullLock = false;
     return;
   }
 
@@ -6861,7 +6851,6 @@ function payoutParseMarkDone(){
   const ids = U.extractOrderIds(raw);
   if(!ids.length){
     alert("未识别到订单号（请粘贴包含 111-2222222-3333333 的文本，每行一个或混合文本）。");
-    window.__pullLock = false;
     return;
   }
   let changed = 0;
@@ -6885,7 +6874,6 @@ function payoutParseMarkDone(){
   });
   if(changed===0){
     alert(`识别 ${ids.length} 个订单号，但未命中任何订单。`);
-    window.__pullLock = false;
     return;
   }
   // 持久化（复用系统已有保存）
@@ -7581,7 +7569,6 @@ function payoutModalUpdatePagerUI(){
     if(pagerInfo) pagerInfo.textContent = '';
     if(prev) prev.disabled = true;
     if(next) next.disabled = true;
-    window.__pullLock = false;
     return;
   }
   var total = pm.orders.length;
@@ -9224,14 +9211,8 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
   const sellerByName=new Map();
   const productByKey=new Map();
 
-  function ensureSeller(name){
-    const nm=(name||'').toString().trim()||'未命名卖家';
-    if(sellerByName.has(nm)) return sellerByName.get(nm);
-    const id = hid('s', cfg.appKey+'|'+nm);
-    const s={ id, name:nm, note:'', fx:{usd:0,eur:0,gbp:0,cad:0,jpy:0}
-
-  // Deterministic id generator to avoid non-repeatable seller/product/order ids across pulls
-  function hash32(str){
+  // Deterministic id generator: stable across pulls
+  function __hash32(str){
     str=String(str||'');
     let h=2166136261>>>0;
     for(let i=0;i<str.length;i++){
@@ -9240,11 +9221,17 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     }
     return h>>>0;
   }
-  function hid(prefix, key){
-    const h = hash32(key);
-    return prefix + '_' + h.toString(36);
+  function __hid(prefix, key){
+    const h=__hash32(key);
+    return prefix+'_'+h.toString(36);
   }
-, comm:{text:0,image:0,video:0,waived:0,waivedFb:0,star:0} };
+
+
+  function ensureSeller(name){
+    const nm=(name||'').toString().trim()||'未命名卖家';
+    if(sellerByName.has(nm)) return sellerByName.get(nm);
+    const id=__hid('s', cfg.appKey+'|'+nm);
+    const s={ id, name:nm, note:'', fx:{usd:0,eur:0,gbp:0,cad:0,jpy:0}, comm:{text:0,image:0,video:0,waived:0,waivedFb:0,star:0} };
     sellers.push(s);
     sellerByName.set(nm,id);
     return id;
@@ -9257,7 +9244,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     // STRICT key: seller + market + asin(if any) else seller + market + product_name
     const key = sellerId+'|'+mk+'|'+(an?('A:'+an):('N:'+pn));
     if(productByKey.has(key)) return productByKey.get(key);
-    const id = hid('p', cfg.appKey+'|'+key);
+    const id=__hid('p', cfg.appKey+'|'+key);
 
     const discount = toNum(noteObj['卖家折扣'] ?? noteObj['折扣'] ?? noteObj['discount'] ?? 0);
     const buyerComm = toNum(noteObj['下单佣金'] ?? noteObj['买手佣金'] ?? noteObj['buyer_commission'] ?? 0);
@@ -9310,7 +9297,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
         const buyerComm = toNum(noteObj['下单佣金'] ?? 0);
 
         const o={
-          id: hid('o', cfg.appKey+'|'+String(r.seller_name||'')+'|'+String(r.order_no||'')+'|'+String(r.market||'')+'|'+String(asin||'')+'|'+String(r.product_name||'')),
+          id: __hid('o', cfg.appKey+'|'+String(r.seller_name||'')+'|'+String(r.order_no||'')+'|'+String(r.market||'')+'|'+String(asin||'')+'|'+String(r.product_name||'')),
           orderId: String(r.order_no||'').trim().slice(0,64),
           date: (r.updated_at||r.created_at||new Date().toISOString()).slice(0,10),
           sellerId,
@@ -9354,13 +9341,14 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
 
     // Apply FULL REBUILD into global S, preserving non-order modules where possible
     const S0 = window.S || {};
-    // IMPORTANT: mutate in-place to keep legacy closures referencing the same object
-    S0.sellers = sellers;
-    S0.products = products;
-    S0.orders = orders;
-    S0.selected = new Set();
-    window.S = S0;
-    window.state = S0;
+    const next = {
+      ...S0,
+      sellers,
+      products,
+      orders,
+      selected: new Set(),
+    };
+    window.S = next;
 
     // Normalize keys inside system
     try{ if(window.U && window.U.normalizeOrders) window.U.normalizeOrders(window.S); }catch(_e){}
@@ -9373,14 +9361,11 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     const c = counts(window.S||{});
     toast(`云端拉取完成（全量重建）：订单${c.orders}（云端读取${total}）`);
     try{ __setCloudMeta({ lastPullAt: new Date().toISOString(), lastPullResult:{ ok:true, total: total, counts:c } }); }catch(_e){}
-    window.__pullLock = false;
-    window.__pullLock = false;
     return { ok:true, total, counts:c };
   }catch(e){
     const msg = (e && e.message) ? e.message : String(e);
     try{ __setCloudMeta({ lastPullAt: new Date().toISOString(), lastPullResult:{ ok:false, error: msg }, lastError: msg }); }catch(_e){}
     try{ toast('云端拉取失败：'+msg,'err'); }catch(_e){ alert('云端拉取失败：\n'+msg); }
-    window.__pullLock = false;
     return { ok:false, error: msg };
   }
 }
@@ -12521,10 +12506,6 @@ async function cloudStatusFixed(){
   }
 
   async function ordersCloudPull(opts){
-  if(window.__pullLock){ try{ toast('云端拉取中，请稍候…'); }catch(_e){} return; }
-  window.__pullLock = true;
-  try{
-
     opts = opts||{};
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
