@@ -3607,7 +3607,7 @@ function renderOrders(){
       const o = pageItems[idx];
       const sellerName = sellerMap.get(o.sellerId)?.name || "";
       const pObj = productMap.get(o.productId);
-      const pName = (pObj && pObj.name) ? pObj.name : (o.title||"");
+      const pName = (pObj && pObj.name) ? pObj.name : (o.title||o.product_name||o.productName||"");
       const pCny = (o.principal && (o.principal.amountCny||0)) || 0;
       const cm = (o.commission && (o.commission.amountCny||0)) || 0;
       const pSett = (o.principal && o.principal.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
@@ -12209,10 +12209,16 @@ async function cloudStatusFixed(){
     }
 
     // --- 基本字段 ---
+    // 重要：云端是权威，必须以云端 seller_name / product_name / price 等覆盖本地，避免被产品库默认值污染
+
     o.market = market || o.market;
     o.asin = asin || o.asin;
     if(sellerId) o.sellerId = sellerId;
-    if(productId) o.productId = productId;
+    // 产品关联：仅在同卖家+同Market 且 (ASIN匹配 或 产品名精确匹配) 时才绑定 productId，否则清空避免串行
+    const strictPid = _productIdByAsinOrName(localState, o.asin, productName, o.market, o.sellerId);
+    o.productId = strictPid || '';
+    // 用云端产品名作为订单标题兜底（列表/弹窗展示优先走这里）
+    if(productName) { o.title = productName; o.product_name = productName; }
 
     // --- 金额/折扣/买手佣金（优先云端列，其次 note JSON）---
     const unitPrice = _getAny(row, ['unit_price','unitPrice','price','amount']);
@@ -12230,13 +12236,16 @@ async function cloudStatusFixed(){
     const unitPrice2 = unitPrice!=null ? unitPrice : _getAny(noteObj, ['unit_price','unitPrice','price','amount','实际金额']);
     const fxRate2 = fxRate!=null ? fxRate : _getAny(noteObj, ['fx_rate','fx','rate','汇率']);
     const discount2 = discountVal!=null ? discountVal : _getAny(noteObj, ['discount','discount_price','seller_discount','卖家折扣','折扣价','折扣']);
-    const buyerComm2 = buyerComm!=null ? buyerComm : _getAny(noteObj, ['buyer_commission','buyerCommission','buyer_commission_orig','下单佣金','买手佣金']);
+    const buyerComm2 = buyerComm!=null ? buyerComm : _getAny(noteObj, ['buyer_commission','buyerCommission','buyer_commission_orig','下单佣金']);
     const reviewReq2 = reviewReq!=null ? reviewReq : _getAny(noteObj, ['review_req','review_requirement','review_type','reviewReq','留评需求','留评要求','留评类型']);
 
     if(unitPrice2!=null && unitPrice2!=='' ) o.amount = (typeof U.num==='function') ? U.num(unitPrice2) : (parseFloat(unitPrice2)||0);
     if(discount2!=null && discount2!=='') o.discount = (typeof U.num==='function') ? U.num(discount2) : (parseFloat(discount2)||0);
     if(buyerComm2!=null && buyerComm2!=='') o.buyerCommission = (typeof U.num==='function') ? U.num(buyerComm2) : (parseFloat(buyerComm2)||0);
-    if(reviewReq2!=null && reviewReq2!=='') o.reviewReq = String(reviewReq2);
+    if(reviewReq2!=null && reviewReq2!=='') {
+      const mapped = (typeof window.__mapReviewReq==='function') ? window.__mapReviewReq(reviewReq2) : String(reviewReq2);
+      o.reviewReq = mapped || String(reviewReq2);
+    }
 
     // 汇率（本系统通常在结算/计算用到；缺失时不强写）
     if(fxRate2!=null && fxRate2!=='') o.fxRate = (typeof U.num==='function') ? U.num(fxRate2) : (parseFloat(fxRate2)||0);
