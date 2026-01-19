@@ -14092,27 +14092,135 @@ if(!_autoEnabled){
 
   async function applyCloudOrdersToLocal(rows){
     try{
-      var S = window.S || (window.S = {sellers:[],products:[],orders:[],batches:[]});
-      if(!S.sellers) S.sellers=[]; if(!S.products) S.products=[]; if(!S.orders) S.orders=[]; if(!S.batches) S.batches=[];
-      // 直接采用云端行作为 orders（snake_case 兼容页面渲染）
-      S.orders = rows || [];
-      // 轻量补齐卖家列表（只做展示/筛选用，避免破坏原结构）
+      var S0 = window.S || (window.S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}});
+      if(!S0.sellers) S0.sellers=[]; if(!S0.products) S0.products=[]; if(!S0.orders) S0.orders=[]; if(!S0.batches) S0.batches=[];
+      if(!S0.seq) S0.seq = {seller:1,product:1,order:1,batch:1};
+
+      var list = Array.isArray(rows) ? rows : [];
+
+      // 1) sellers: use seller_name as id to keep UI lookup stable
+      var sellerSet = new Set();
+      list.forEach(function(r){ var n = (r && r.seller_name) ? String(r.seller_name) : ''; if(n) sellerSet.add(n); });
+      var sellers = Array.from(sellerSet).map(function(name){ return { id: name, name: name }; });
+
+      // 2) products: minimal derived list (optional)
+      var prodMap = new Map();
+      function prodKey(r){
+        var name = (r && r.product_name) ? String(r.product_name) : '';
+        var asin = (r && r.asin) ? String(r.asin) : '';
+        var market = (r && r.market) ? String(r.market) : '';
+        var seller = (r && r.seller_name) ? String(r.seller_name) : '';
+        if(!name && !asin) return '';
+        return [name, asin, market, seller].join('|');
+      }
+      list.forEach(function(r){
+        var k = prodKey(r);
+        if(!k || prodMap.has(k)) return;
+        prodMap.set(k, {
+          id: 'P|' + k,
+          name: (r && r.product_name) ? String(r.product_name) : '',
+          asin: (r && r.asin) ? String(r.asin) : '',
+          market: (r && r.market) ? String(r.market) : '',
+          sellerId: (r && r.seller_name) ? String(r.seller_name) : '',
+          reviewType: (r && (r.review_req || r.review_type)) ? String(r.review_req || r.review_type) : 'TEXT',
+          discount: (r && r.discount!=null) ? Number(r.discount)||0 : 0,
+          remark: ''
+        });
+      });
+      var products = Array.from(prodMap.values());
+
+      // 3) orders: map ops_orders_v1 row -> local order object (v6.4.2 schema)
+      function pickDate(r){
+        var d = r && (r.updated_at || r.created_at);
+        if(!d) return '';
+        try{ return String(d).slice(0,10); }catch(_){ return ''; }
+      }
+      function mapReviewStatus(v){
+        var s = (v==null?'':String(v)).toUpperCase().trim();
+        if(!s) return 'PENDING';
+        if(['DONE','PENDING','WAIVED'].includes(s)) return s;
+        if(['COMPLETED','FINISHED','OK'].includes(s)) return 'DONE';
+        if(['SKIP','SKIPPED','NO'].includes(s)) return 'WAIVED';
+        return s; // passthrough
+      }
+
+      var orders = list.map(function(r){
+        var sellerId = (r && r.seller_name) ? String(r.seller_name) : '';
+        var orderId = (r && (r.order_no || r.orderId || r.order_id)) ? String(r.order_no || r.orderId || r.order_id) : '';
+        var market = (r && r.market) ? String(r.market) : '';
+        var asin = (r && r.asin) ? String(r.asin) : '';
+        var pkey = prodKey(r);
+        var productId = pkey ? ('P|' + pkey) : '';
+
+        return {
+          id: (r && r.id) ? String(r.id) : (orderId ? ('O|' + sellerId + '|' + orderId + '|' + (r && r.product_name ? String(r.product_name) : '') + '|' + asin) : ('O|' + (S0.seq.order++))),
+          orderId: orderId,
+          date: pickDate(r) || '',
+          sellerId: sellerId,
+          productId: productId,
+          market: market,
+          currency: (r && r.currency) ? String(r.currency) : '',
+          amount: Number((r && r.amount)!=null ? r.amount : 0) || 0,
+          discount: Number((r && r.discount)!=null ? r.discount : 0) || 0,
+          buyerCommission: Number((r && (r.buyer_commission_orig || r.buyerCommission))!=null ? (r.buyer_commission_orig || r.buyerCommission) : 0) || 0,
+          asin: asin,
+          note: (r && r.note) ? String(r.note) : '',
+          reviewReq: (r && (r.review_req || r.review_type)) ? String(r.review_req || r.review_type) : 'TEXT',
+          review: {
+            status: mapReviewStatus(r && r.review_status),
+            date: (r && (r.review_done_at || r.review_date)) ? String(r.review_done_at || r.review_date).slice(0,10) : '',
+            link: (r && r.review_link) ? String(r.review_link) : '',
+            note: (r && r.review_note) ? String(r.review_note) : '',
+            doneType: (r && (r.review_doneType || r.review_done_type || r.done_type)) ? String(r.review_doneType || r.review_done_type || r.done_type) : ''
+          },
+          principal: {
+            settled: !!(r && (r.principal_settled || r.pay_status==='paid' || r.pay_status==='PAID')),
+            batchId: (r && (r.principal_batch || r.pay_batch_id)) ? String(r.principal_batch || r.pay_batch_id) : '',
+            fx: Number((r && (r.fx_used || r.fx))!=null ? (r.fx_used || r.fx) : 0) || 0,
+            amountCny: Number((r && (r.principal_cny || r.pay_cny))!=null ? (r.principal_cny || r.pay_cny) : 0) || 0
+          },
+          commission: {
+            settled: !!(r && (r.commission_settled)),
+            batchId: (r && (r.commission_batch)) ? String(r.commission_batch) : '',
+            amountCny: Number((r && (r.commission_cny))!=null ? (r.commission_cny) : 0) || 0
+          },
+          _cloud: r // keep original for debugging
+        };
+      }).filter(function(o){ return !!o.orderId; });
+
+      // Write back to global state
+      S0.sellers = sellers;
+      S0.products = products;
+      S0.orders = orders;
+
+      // Write into IndexedDB primary
       try{
-        var setSeller=new Set();
-        (rows||[]).forEach(function(r){ if(r && r.seller_name) setSeller.add(r.seller_name); });
-        // 若本地卖家为空，则从订单生成一个最小卖家列表
-        if((S.sellers||[]).length===0 && setSeller.size){
-          S.sellers = Array.from(setSeller).map(function(name){ return {name:name}; });
+        if(typeof window._idbSetAnyKv==='function'){
+          await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1', S0);
+        }else if(typeof window.idbSet==='function'){
+          await window.idbSet('main_state_v1', S0);
+        }
+      }catch(e){
+        log('[PATCH_PULLFIX_V1] write idb failed', e);
+      }
+
+      // Reset filters so it won't look like 0 due to filtering
+      try{
+        if(window.UI){
+          if(UI.selected && UI.selected.clear) UI.selected.clear();
+          if(UI.payoutSelected && UI.payoutSelected.clear) UI.payoutSelected.clear();
+          if(document.getElementById('filterSeller')) document.getElementById('filterSeller').value='ALL';
+          if(document.getElementById('orderSearch')) document.getElementById('orderSearch').value='';
+          if(document.getElementById('filterPrincipal')) document.getElementById('filterPrincipal').value='ALL';
+          if(document.getElementById('filterCommission')) document.getElementById('filterCommission').value='ALL';
+          UI.page = 1;
         }
       }catch(_){ }
 
-      // 写入 IndexedDB
-      if(typeof window.idbSet==='function'){
-        await window.idbSet('main_state_v1', S);
-      }
-      // 触发刷新渲染
-      if(typeof window.render==='function') window.render();
-      if(typeof window.updateKPIs==='function') window.updateKPIs();
+      try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(_){ }
+      try{ if(typeof window.render==='function') window.render(); }catch(_){ }
+      try{ if(typeof window.updateKPIs==='function') window.updateKPIs(); }catch(_){ }
+
       return true;
     }catch(e){
       log('[PATCH_PULLFIX_V1] applyCloudOrdersToLocal failed', e);
