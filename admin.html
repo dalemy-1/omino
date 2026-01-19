@@ -13653,8 +13653,11 @@ if(!_autoEnabled){
       // allow clicking on inner spans
       var node = el;
       for(var i=0;i<6 && node; i++){
+        // IMPORTANT: only bind the real button itself.
+        // Do NOT match container nodes (their innerText may include "云端状态" and would hijack all clicks).
+        var isBtn = (node.tagName && node.tagName.toUpperCase()==='BUTTON') || (node.getAttribute && node.getAttribute('role')==='button');
         var t = (node.innerText||node.textContent||'').trim();
-        if(t && (t==='云端状态' || t.indexOf('云端状态')>=0)){
+        if(isBtn && t && (t==='云端状态' || t.indexOf('云端状态')>=0)){
           ev.preventDefault();
           ev.stopPropagation();
           ev.stopImmediatePropagation && ev.stopImmediatePropagation();
