@@ -8,12 +8,7 @@
 <style>
 
 :root{
-  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text
-function shortReviewType(val){
-  const s = String(val||"");
-  // 仅用于展示：前 4 个中文（或4个字符）
-  return s.length>4 ? s.slice(0,4) : s;
-}:#111827;
+  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text:#111827;
   --border:#e5e7eb; --primary:#2563eb; --primary2:#1d4ed8;
   --good:#16a34a; --danger:#ef4444; --warn:#f59e0b; --soft:#f9fafb;
 }
@@ -13229,12 +13224,31 @@ if(!_autoEnabled){
   }
 
   async function _writeLocal(state){
-    if(typeof window._writePrimaryState==='function') return window._writePrimaryState(state);
-    if(typeof window.setLocalSnapshot==='function') return window.setLocalSnapshot(state);
-    if(typeof window._idbSetAnyKv==='function'){
-      await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',state);
-      return;
-    }
+    // Write to primary local store used by this build.
+    try{
+      if(typeof window._writePrimaryState==='function') { await window._writePrimaryState(state); return; }
+    }catch(e){}
+    try{
+      if(typeof window.setLocalSnapshot==='function') { await window.setLocalSnapshot(state); return; }
+    }catch(e){}
+
+    // Preferred: IndexedDB kv main_state_v1 via idbSet.
+    try{
+      if(typeof idbSet === 'function' && typeof MAIN_STATE_KEY !== 'undefined'){
+        await idbSet(MAIN_STATE_KEY, state);
+        return;
+      }
+    }catch(e){}
+
+    // Legacy fallback: _idbSetAnyKv signature (db, store, key, val)
+    try{
+      if(typeof window._idbSetAnyKv==='function'){
+        await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1',state);
+        return;
+      }
+    }catch(e){}
+
+    // Last resort: localStorage
     try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state||{})); }catch(e){}
   }
 
@@ -13265,44 +13279,93 @@ if(!_autoEnabled){
     opts = opts||{};
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
-	    const { client: sb, cfg } = cloud;
-	    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
+    const { client: sb, cfg } = cloud;
+    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
     const local = await _readLocal();
     const st = local.state || {};
+    // Ensure shape
+    if(!st.sellers || !Array.isArray(st.sellers)) st.sellers = [];
+    if(!st.products || !Array.isArray(st.products)) st.products = [];
+    if(!st.orders || !Array.isArray(st.orders)) st.orders = [];
+    if(!st.batches || !Array.isArray(st.batches)) st.batches = [];
+    if(!st.seq) st.seq = {seller:1, product:1, order:1, batch:1, payoutBatch:1};
+
+
+    // Ensure shape
+    st.sellers = Array.isArray(st.sellers) ? st.sellers : [];
+    st.products = Array.isArray(st.products) ? st.products : [];
+    st.orders = Array.isArray(st.orders) ? st.orders : [];
+    st.batches = Array.isArray(st.batches) ? st.batches : [];
+    st.seq = st.seq && typeof st.seq==='object' ? st.seq : {seller:1, product:1, order:1, batch:1, payoutBatch:1};
+
     let pulled = 0;
     try{
-      // paginate (Supabase default limit 1000)
       const pageSize = 1000;
       let from = 0;
       while(true){
+        // Stable ordering to avoid pagination drift when many rows share the same updated_at
         const { data, error } = await sb.from(ORDER_TABLE)
           .select('*')
-	          .eq('app_key', appKey)
+          .eq('app_key', appKey)
           .order('updated_at', { ascending:false })
+          .order('id', { ascending:false })
           .range(from, from + pageSize - 1);
         if(error) throw error;
         const rows = data || [];
         if(!rows.length) break;
-        for(const r of rows){
-          if(_upsertLocalOrder(st, r)) pulled++;
+        for(const row of rows){
+          if(_upsertLocalOrder(st, row)) pulled++;
         }
         if(rows.length < pageSize) break;
         from += pageSize;
       }
 
-      // normalize + KPI recompute if available
-      try{ if(typeof window.normalizeOrders==='function') window.normalizeOrders(); }catch(e){}
-      try{ if(typeof window.recalcKPI==='function') window.recalcKPI(); }catch(e){}
-      try{ if(typeof window.render==='function') window.render(); }catch(e){}
-
+      // Persist first (IndexedDB is source of truth for this build)
       await _writeLocal(st);
-      toast2('云端拉取完成：已合并订单 '+pulled+' 条（不会删除本地/云端）。');
-      setTimeout(()=>location.reload(), 300);
+
+      // Apply to in-memory state used by UI (S is a lexical variable in this build)
+      try{
+        if(typeof S !== 'undefined' && S){
+          S.sellers = st.sellers;
+          S.products = st.products;
+          S.orders = st.orders;
+          S.batches = st.batches;
+          S.seq = st.seq;
+          window.state = S;
+        }else{
+          // fallback if build uses window.S
+          window.S = st;
+          window.state = st;
+        }
+      }catch(_e){}
+
+      // recompute + render
+      try{ if(typeof computeSeq==='function') computeSeq(); }catch(_e){}
+      try{ if(typeof recalcKPI==='function') recalcKPI(); }catch(_e){}
+      try{ if(typeof renderAll==='function') renderAll(); }catch(_e){}
+      try{ if(typeof render==='function') render(); }catch(_e){}
+
+      try{ toast2('云端拉取完成：已合并订单 '+pulled+' 条；本地orders='+((st.orders&&st.orders.length)||0)+'。'); }catch(_e){ alert('云端拉取完成：'+pulled); }
     }catch(e){
       console.error(e);
       alert('云端拉取失败：' + (e && (e.message||e.toString())));
     }
   }
+
+  // After window load, overwrite any earlier snapshot-based bindings
+  window.addEventListener('load', ()=>{
+    try{
+      const byId = (id)=>document.getElementById(id);
+      const bPull = byId('btnCloudPull');
+      const bStatus = byId('btnCloudStatus');
+      const bPush = byId('btnCloudPush');
+      const bPushForce = byId('btnCloudPushForce');
+      if(bPull) bPull.onclick = ()=>ordersCloudPull({force:false});
+      if(bStatus) bStatus.onclick = ()=>ordersCloudStatus();
+      if(bPush) bPush.onclick = ()=>ordersCloudPush({force:false});
+      if(bPushForce) bPushForce.onclick = ()=>ordersCloudPush({force:true});
+    }catch(e){}
+  });
 
   async function ordersCloudPush(opts){
     opts = opts||{};
@@ -13469,6 +13532,21 @@ if(!_autoEnabled){
     bindByText('云端推送', ()=>ordersCloudPush({force:false}));
     bindByText('强制推送', ()=>ordersCloudPush({force:true}));
 
+    // Final lock: ensure legacy window.onload bindings cannot override our pull
+    window.addEventListener('load', ()=>{
+      try{
+        const bPull = document.getElementById('btnCloudPull');
+        if(bPull){
+          bPull.onclick = (ev)=>{ try{ ev && ev.preventDefault && ev.preventDefault(); ev && ev.stopPropagation && ev.stopPropagation(); }catch(e){}; return ordersCloudPull({force:false}); };
+        }
+        const bPullForce = document.getElementById('btnCloudPullForce');
+        if(bPullForce){
+          bPullForce.onclick = (ev)=>{ try{ ev && ev.preventDefault && ev.preventDefault(); ev && ev.stopPropagation && ev.stopPropagation(); }catch(e){}; return ordersCloudPull({force:true}); };
+        }
+      }catch(e){}
+    }, true);
+
+
 
     // Also bind top-bar buttons that are rendered without IDs (match by visible text)
     const bindTopbarByText = ()=>{
@@ -13487,6 +13565,19 @@ if(!_autoEnabled){
     };
     // run twice to beat late render/bind from legacy scripts
     bindTopbarByText();
+
+    // FINAL OVERRIDE: some older scripts re-bind buttons on window 'load' and route to snapshot cloudPull.
+    // Re-bind again at capture phase on load to guarantee orders-table pull is used.
+    window.addEventListener('load', function(){
+      try{
+        var bp = document.getElementById('btnCloudPull');
+        if(bp) bp.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudPull({force:false}); };
+        var bs = document.getElementById('btnCloudStatus');
+        if(bs) bs.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudStatus(); };
+        var bps = document.getElementById('btnCloudPush');
+        if(bps) bps.onclick = function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(_e){}; return ordersCloudPush({force:false}); };
+      }catch(e){}
+    }, true);
     setTimeout(bindTopbarByText, 300);
     setTimeout(bindTopbarByText, 1200);
 }, { once:true });
@@ -14551,6 +14642,46 @@ if(!_autoEnabled){
   }
 
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
+})();
+</script>
+
+
+<script>
+// PATCH_PULLFIX_V1_LOCK_V3: force bind cloud buttons to orders-table implementation AFTER all other handlers.
+(function(){
+  function bind(){
+    try{
+      var bPull = document.getElementById('btnCloudPull');
+      var bStatus = document.getElementById('btnCloudStatus');
+      var bPush = document.getElementById('btnCloudPush');
+      var bPushForce = document.getElementById('btnCloudPushForce');
+      if(bPull){
+        bPull.addEventListener('click', function(ev){
+          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
+          return (window.ordersCloudPull||window.cloudPull||function(){})();
+        }, true);
+      }
+      if(bStatus){
+        bStatus.addEventListener('click', function(ev){
+          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
+          return (window.ordersCloudStatus||window.cloudStatus||function(){})();
+        }, true);
+      }
+      if(bPush){
+        bPush.addEventListener('click', function(ev){
+          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
+          return (window.ordersCloudPush||window.cloudPush||function(){})({force:false});
+        }, true);
+      }
+      if(bPushForce){
+        bPushForce.addEventListener('click', function(ev){
+          try{ ev.preventDefault(); ev.stopImmediatePropagation(); }catch(e){}
+          return (window.ordersCloudPush||window.cloudPush||function(){})({force:true});
+        }, true);
+      }
+    }catch(e){}
+  }
+  window.addEventListener('load', bind, true);
 })();
 </script>
 
