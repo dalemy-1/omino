@@ -13997,10 +13997,7 @@ if(!_autoEnabled){
               ev && ev.stopPropagation && ev.stopPropagation();
               try{
                 var r = await cloudCount();
-                alert('云端订单主库状态 (ops_orders_v1)
-PATCH8=ON
-app_key='+r.appKey+'
-云端订单='+r.count);
+                alert('云端订单主库状态 (ops_orders_v1)\nPATCH9=ON\napp_key='+r.appKey+'\n云端订单='+r.count);
               }catch(e){
                 alert('云端状态失败：'+(e && e.message ? e.message : e));
               }
