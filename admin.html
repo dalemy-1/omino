@@ -12778,7 +12778,7 @@ async function cloudStatusFixed(){
       var product_name = norm(prod.name||o.productName||'');
 
       // statuses
-      var pay_status = (o.principalStatus==='DONE' || o.payStatus==='DONE' || o.principalPaid===True) ? 'DONE' : (o.principalStatus||o.payStatus||'PENDING');
+      var pay_status = (o.principalStatus==='DONE' || o.payStatus==='DONE' || o.principalPaid===true) ? 'DONE' : (o.principalStatus||o.payStatus||'PENDING');
       if(!pay_status) pay_status='PENDING';
       var review_status = (o.reviewStatus||o.review_state||'PENDING');
       var payout_status = (o.payoutStatus||o.payout_status||'PENDING');
