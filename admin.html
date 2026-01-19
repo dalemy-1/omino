@@ -13496,7 +13496,6 @@ if(!_autoEnabled){
 <script>
 // PATCH5 FORCE_ORDERS_MASTER - hard override cloud ops to ops_orders_v1
 (function(){
-  try{ window.True = true; window.False = false; }catch(_e){}
   function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
   // cache-bust marker
   window.__PATCH5_FORCE_ORDERS_MASTER__ = true;
@@ -14290,212 +14289,269 @@ if(!_autoEnabled){
   }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
 })();
-</script>
 
 
+/* ===================== PATCH_PULLFIX_V1_LOCK v3 (final): force cloud pull -> fill S (lexical) + IDB persist + render ===================== */
+;(function(){
+  try{
+    // Fix legacy python-style booleans that can break older code paths
+    if(typeof window.True==='undefined') window.True=true;
+    if(typeof window.False==='undefined') window.False=false;
+  }catch(e){}
 
-<script>
-// PATCH_PULLFIX_V1_LOCK (v2): hard lock cloud pull/persist to ops_orders_v1 -> IndexedDB(main_state_v1)
-(function(){
-  function log(){ try{ console.log.apply(console, arguments); }catch(_){} }
-  function toast(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg); }catch(_){ try{ alert(msg); }catch(__){} } }
-  function toNum(v){ var n=parseFloat(v); return Number.isFinite(n)? n : 0; }
-  function normStr(v){ return (v==null)? '' : String(v).trim(); }
+  function log(){ try{ console.log.apply(console, ['[PULLFIX_V3]'].concat([].slice.call(arguments))); }catch(e){} }
 
-  function getCfg(){
-    try{ if(typeof window.getCloudCfgOrNull==='function'){ return window.getCloudCfgOrNull(); } }catch(_){}
-    // best-effort from localStorage
-    function pick(keys){
-      for(var i=0;i<keys.length;i++){
-        var k=keys[i];
-        var v='';
-        try{ v=(localStorage.getItem(k)||'').trim(); }catch(_e){}
-        if(v) return v;
-      }
-      return '';
-    }
-    return {
-      url: pick(['OPS_CLOUD_URL','SUPABASE_URL','NEXT_PUBLIC_SUPABASE_URL','SUPABASE_PROJECT_URL']),
-      anon: pick(['OPS_CLOUD_ANON_KEY','SUPABASE_ANON_KEY','NEXT_PUBLIC_SUPABASE_ANON_KEY','SUPABASE_KEY','SUPABASE_ANON']),
-      app_key: pick(['OPS_CLOUD_APPKEY','OPS_CLOUD_APP_KEY','OPS_APP_KEY','APP_KEY','OPS_SYNC_APPKEY','OPS_SYNC_APP_KEY']) || 'dalemy'
-    };
+  function esc(s){
+    s = (s==null)?'':String(s);
+    return s.replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",""":"&quot;","'":"&#39;"}[c]));
   }
 
-  function getClient(){
-    try{ if(typeof window.getCloudClientOrNull==='function'){ var c=window.getCloudClientOrNull(); if(c && typeof c.from==='function') return c; } }catch(_){}
+  function normReviewReq(v){
+    var s = (v==null)?'':String(v).trim();
+    if(!s) return 'TEXT';
+    // Accept canonical keys
+    var up = s.toUpperCase();
+    if(up==='TEXT'||up==='IMG'||up==='IMAGE'||up==='PIC'||up==='PICTURE'||up==='VIDEO'||up==='WAIVED'){}
+    // Chinese mapping
+    if(/免评/.test(s)) return 'WAIVED';
+    if(/视频/.test(s)) return 'VIDEO';
+    if(/图|图片|照片/.test(s)) return 'IMG';
+    if(up==='VIDEO') return 'VIDEO';
+    if(up==='IMG'||up==='IMAGE') return 'IMG';
+    if(up==='WAIVED') return 'WAIVED';
+    return 'TEXT';
+  }
+
+  function sellerIdOf(name){ return 'S|' + String(name||'').trim(); }
+  function productIdOf(market, name, asin){ return 'P|' + String(market||'').trim() + '|' + String(name||'').trim() + '|' + String(asin||'').trim(); }
+
+  function ensureState(){
+    // The app uses lexical global S (not window.S). We must keep them aligned.
     try{
-      if(window.supabase && typeof window.supabase.createClient==='function'){
-        var cfg=getCfg();
-        if(cfg.url && cfg.anon) return window.supabase.createClient(cfg.url, cfg.anon);
-      }
-    }catch(e){ log('[PATCH_PULLFIX_V1_LOCK] createClient failed', e); }
+      if(typeof S==='undefined' || !S || typeof S!=='object') S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+      if(!Array.isArray(S.sellers)) S.sellers=[];
+      if(!Array.isArray(S.products)) S.products=[];
+      if(!Array.isArray(S.orders)) S.orders=[];
+      if(!Array.isArray(S.batches)) S.batches=[];
+      if(!S.seq) S.seq={seller:1,product:1,order:1,batch:1};
+      window.S = S;
+      window.state = S;
+    }catch(e){
+      window.S = window.S||{sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+      window.state = window.S;
+    }
+    return (typeof S!=='undefined' && S) ? S : window.S;
+  }
+
+  function findBtnExact(label){
+    var L=String(label||'').trim();
+    var btns=[].slice.call(document.querySelectorAll('button, a.btn, input[type=button], input[type=submit]'));
+    for(var i=0;i<btns.length;i++){
+      var el=btns[i];
+      var t=(el.innerText||el.value||'').trim();
+      if(t===L) return el;
+    }
     return null;
   }
 
-  async function robustCloudPull(){
-    var cfg=getCfg();
-    var client=getClient();
-    if(!client){ toast('云端未配置：请先点【云端设置】'); return {ok:false, err:'no_client'}; }
-    var appKey=(cfg.app_key||cfg.app||'dalemy').trim();
+  async function getCloud(){
+    try{ if(typeof window.getCloudClientOrNull==='function') return window.getCloudClientOrNull(); }catch(e){}
+    return null;
+  }
 
-    // Build local state container
-    var S = window.S || window.state || { sellers:[], products:[], orders:[], batches:[], seq:{seller:1,product:1,order:1,batch:1} };
-    S.sellers = []; S.products = []; S.orders = []; S.batches = S.batches || [];
-    S.seq = S.seq || {seller:1,product:1,order:1,batch:1};
+  async function writeIDB(state){
+    // Prefer native idbSet(MAIN_STATE_KEY, S) of this build
+    try{
+      if(typeof idbSet==='function' && typeof MAIN_STATE_KEY!=='undefined'){
+        await idbSet(MAIN_STATE_KEY, state);
+        return true;
+      }
+    }catch(e){ log('idbSet failed', e); }
+    // Fallback to kv helpers
+    try{
+      if(typeof window._idbSetAnyKv==='function'){
+        await window._idbSetAnyKv('ops_v642_main','kv','main_state_v1', state);
+        return true;
+      }
+    }catch(e){}
+    try{
+      if(typeof _idbSetAnyKv==='function'){
+        await _idbSetAnyKv('ops_v642_main','kv','main_state_v1', state);
+        return true;
+      }
+    }catch(e){}
+    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state||{})); }catch(e){}
+    return false;
+  }
 
-    var pageSize = 1000;
-    var lastId = '';
-    var all = [];
-
-    while(true){
-      var q = client.from('ops_orders_v1').select('*').eq('app_key', appKey).order('id', {ascending:true}).limit(pageSize);
-      if(lastId) q = q.gt('id', lastId);
-      var res = await q;
-      if(res.error) throw res.error;
-      var rows = res.data || [];
-      if(!rows.length) break;
-      all = all.concat(rows);
-      lastId = rows[rows.length-1].id;
-      if(rows.length < pageSize) break;
-      // safety: avoid infinite loops
-      if(all.length > 200000) break;
+  function upsertSeller(S0, sellerName){
+    sellerName = String(sellerName||'').trim();
+    var sid = sellerIdOf(sellerName);
+    var sm = S0._sellerMap || (S0._sellerMap = new Map((S0.sellers||[]).map(s=>[String(s.id), s])));
+    var s = sm.get(sid);
+    if(!s){
+      s = { id: sid, name: sellerName, marketFx:{}, commission:{}, note:'' };
+      S0.sellers.push(s);
+      sm.set(sid, s);
     }
+    return sid;
+  }
 
-    // sellers
-    var sellerSet = new Set();
-    for(var i=0;i<all.length;i++){
-      var sn = normStr(all[i].seller_name);
-      if(sn) sellerSet.add(sn);
+  function upsertProduct(S0, market, productName, asin, reviewReq){
+    var pid = productIdOf(market, productName, asin);
+    var pm = S0._productMap || (S0._productMap = new Map((S0.products||[]).map(p=>[String(p.id), p])));
+    var p = pm.get(pid);
+    if(!p){
+      p = { id: pid, name: String(productName||'').trim(), asin: String(asin||'').trim(), market: String(market||'').trim(), reviewType: normReviewReq(reviewReq), discount:0, buyerCommission:0, note:'' };
+      S0.products.push(p);
+      pm.set(pid, p);
+    }else{
+      if(productName && !p.name) p.name=String(productName).trim();
+      if(asin && !p.asin) p.asin=String(asin).trim();
+      if(market && !p.market) p.market=String(market).trim();
+      if(reviewReq) p.reviewType = normReviewReq(reviewReq);
     }
-    S.sellers = Array.from(sellerSet).map(function(name){ return {id:name, name:name}; });
+    return pid;
+  }
 
-    // products (minimal)
-    var prodMap = new Map();
-    function prodKey(r){
-      var name = normStr(r.product_name);
-      var asin = normStr(r.asin);
-      var market = normStr(r.market);
-      var seller = normStr(r.seller_name);
-      if(!name && !asin) return '';
-      return [name, asin, market, seller].join('|');
-    }
-    for(var j=0;j<all.length;j++){
-      var r=all[j];
-      var k=prodKey(r);
-      if(!k || prodMap.has(k)) continue;
-      prodMap.set(k, {
-        id: 'P|' + k,
-        name: normStr(r.product_name),
-        asin: normStr(r.asin),
-        market: normStr(r.market),
-        sellerId: normStr(r.seller_name),
-        reviewType: normStr(r.review_req || r.review_type) || 'TEXT',
-        discount: toNum(r.seller_discount),
-        buyerCommission: toNum(r.buyer_commission),
-        remark: ''
-      });
-    }
-    S.products = Array.from(prodMap.values());
+  function upsertOrder(S0, row){
+    var orderNo = String(row.order_no||row.orderNo||row.order_id||row.orderId||'').trim();
+    if(!orderNo) return false;
 
-    // orders
-    function pickProd(r){
-      var k=prodKey(r);
-      return k ? prodMap.get(k) : null;
-    }
+    var sellerName = String(row.seller_name||row.sellerName||'').trim();
+    var market = String(row.market||'').trim();
+    var productName = String(row.product_name||row.productName||'').trim();
+    var asin = String(row.asin||'').trim();
+    var reviewReq = row.review_req ?? row.reviewReq ?? row.review_requirement;
 
-    S.orders = all.map(function(r){
-      var seller = normStr(r.seller_name);
-      var prod = pickProd(r);
-      var oid = 'O|' + normStr(r.id);
-      var createdAt = r.created_at ? Date.parse(r.created_at) : Date.now();
-      var updatedAt = r.updated_at ? Date.parse(r.updated_at) : createdAt;
-      var o = {
-        id: oid,
-        orderId: normStr(r.order_no),
-        sellerId: seller,
-        productId: prod ? prod.id : '',
-        market: normStr(r.market),
-        asin: normStr(r.asin),
-        amount: toNum(r.unit_price),
-        discount: toNum(r.seller_discount),
-        buyerCommission: toNum(r.buyer_commission),
-        reviewType: normStr(r.review_req) || (prod? prod.reviewType : 'TEXT') || 'TEXT',
-        reviewStatus: normStr(r.review_status) || 'PENDING',
-        payoutStatus: normStr(r.payout_status) || 'PENDING',
-        payStatus: normStr(r.pay_status) || 'PENDING',
-        reviewLink: normStr(r.review_link),
-        note: normStr(r.note),
-        createdAt: createdAt,
-        updatedAt: updatedAt,
-        // keep extra financial fields for later UI expansion
-        ext: {
-          tax: toNum(r.tax),
-          actualAmount: toNum(r.actual_amount),
-          fxRate: toNum(r.fx_rate),
-          principalAmount: toNum(r.principal_amount),
-          orderCommission: toNum(r.order_commission),
-          reviewCommission: toNum(r.review_commission),
-          expectedReceive: toNum(r.expected_receive),
-          payoutAmount: toNum(r.payout_amount)
-        }
+    var sid = upsertSeller(S0, sellerName);
+    var pid = upsertProduct(S0, market, productName, asin, reviewReq);
+
+    // stable local order key: seller + orderNo + product + asin
+    var key = sid + '|' + orderNo + '|' + pid;
+    var om = S0._orderMap || (S0._orderMap = new Map((S0.orders||[]).map(o=>[String(o._bizKey||o.id||o.orderId), o])));
+    var o = om.get(key);
+    if(!o){
+      o = {
+        id: String(row.id||'') || ('O|' + key),
+        _bizKey: key,
+        orderId: orderNo,
+        date: (row.created_at||row.updated_at||new Date().toISOString()).slice(0,10),
+        sellerId: sid,
+        productId: pid,
+        market: market,
+        asin: asin,
+        reviewReq: normReviewReq(reviewReq),
+        amount: Number(row.unit_price ?? row.amount ?? 0) || 0,
+        discount: Number(row.seller_discount ?? row.discount ?? row.sellerDiscount ?? 0) || 0,
+        buyerCommission: Number(row.buyer_commission ?? row.buyerCommission ?? row.order_commission ?? 0) || 0,
+        tax: Number(row.tax ?? 0) || 0,
+        fxOverride: (row.fx_rate!=null && row.fx_rate!=='') ? row.fx_rate : (row.fx!=null ? row.fx : ''),
+        principal: { settled:false, batchId:'', fx:'', amountCny:'' },
+        commission: { settled:false, batchId:'', amountCny:'' },
+        review: { status: String(row.review_status||'PENDING'), date:'', link:String(row.review_link||''), note:'', doneType:'' },
+        payout: { status: String(row.payout_status||'not_ready'), batch_id:'', paid_at:'', screenshot:String(row.payout_screenshot_url||'') },
+        note: String(row.note||'')
       };
-      // align with existing calc paths
-      o.principal = { settled:false, batchId:'', amountCny: o.ext.principalAmount, fx: o.ext.fxRate };
-      o.commission = { settled:false, batchId:'', amountCny: (o.ext.orderCommission + o.ext.reviewCommission) };
-      return o;
-    });
-
-    // expose aliases
-    window.S = S;
-    window.state = S;
-
-    // persist
-    try{ if(typeof idbSet==='function' && typeof MAIN_STATE_KEY!=='undefined'){ await idbSet(MAIN_STATE_KEY, S); } }catch(e){ log('[PATCH_PULLFIX_V1_LOCK] idbSet failed', e); }
-    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(S)); }catch(_e){}
-
-    // render
-    try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(_e){}
-    try{ if(typeof window.render==='function') window.render(); }catch(_e){}
-
-    toast('云端拉取完成：'+S.orders.length+' 条订单（ops_orders_v1）');
-    return {ok:true, count:S.orders.length};
-  }
-
-  // hard override entry points
-  window.robustCloudPull = robustCloudPull;
-  window.cloudPull = function(){ return robustCloudPull(); };
-
-  // disable legacy snapshot pull/push (prevents reload & empty normalization)
-  try{ if(window.__cloudV30__){ window.__cloudV30__.cloudPullV30=function(){ toast('已切换为订单主表模式：请使用【云端拉取】'); }; window.__cloudV30__.cloudPushV30=function(){ toast('已切换为订单主表模式：请使用【云端推送】'); }; } }catch(_e){}
-
-  // disable auto-push scheduler if any
-  try{ window.scheduleAutoPushOrders = function(){}; }catch(_e){}
-
-  function bindHard(){
-    function bindEl(el){
-      if(!el) return;
-      try{ el.onclick = null; }catch(_e){}
-      el.addEventListener('click', function(ev){
-        ev.preventDefault();
-        ev.stopPropagation();
-        ev.stopImmediatePropagation();
-        robustCloudPull();
-      }, true);
+      S0.orders.unshift(o);
+      om.set(key, o);
     }
-    bindEl(document.getElementById('btnCloudPull'));
-    bindEl(document.getElementById('btnCloudPull2'));
 
-    // bind by text fallback
-    var nodes=[].slice.call(document.querySelectorAll('button,a'));
-    nodes.forEach(function(el){
-      var t=(el.innerText||el.textContent||'').replace(/\s+/g,'').trim();
-      if(t==='云端拉取') bindEl(el);
-    });
+    // Update mutable fields
+    o.market = market || o.market;
+    o.asin = asin || o.asin;
+    o.productId = pid || o.productId;
+    o.sellerId = sid || o.sellerId;
+    o.reviewReq = normReviewReq(reviewReq) || o.reviewReq;
 
-    log('[PATCH_PULLFIX_V1_LOCK] bound pull buttons');
+    // amounts
+    if(row.unit_price!=null && row.unit_price!=='') o.amount = Number(row.unit_price)||0;
+    if(row.seller_discount!=null && row.seller_discount!=='') o.discount = Number(row.seller_discount)||0;
+    if(row.buyer_commission!=null && row.buyer_commission!=='') o.buyerCommission = Number(row.buyer_commission)||0;
+    if(row.fx_rate!=null && row.fx_rate!=='') o.fxOverride = row.fx_rate;
+
+    // statuses
+    if(row.pay_status){
+      var ps = String(row.pay_status).toLowerCase();
+      if(ps==='paid' || ps==='yes' || ps==='1') o.principal.settled = true;
+    }
+    if(row.review_status) o.review.status = String(row.review_status||'');
+    if(row.review_link) o.review.link = String(row.review_link||'');
+    if(row.payout_status) o.payout.status = String(row.payout_status||'');
+
+    return true;
   }
 
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bindHard); else bindHard();
+  async function cloudPullMaster(){
+    var cloud = await getCloud();
+    if(!cloud){ alert('未设置云端（请先点“云端设置”）。'); return; }
+    var sb = cloud.client;
+    var cfg = cloud.cfg||{};
+    var appKey = String(cfg.appKey||cfg.app_key||'').trim();
+    if(!appKey){ alert('云端配置缺少 app_key'); return; }
+
+    // Ensure local state is loaded
+    try{ if(typeof load==='function') await load(); }catch(e){}
+    var S0 = ensureState();
+
+    var pulled = 0;
+    var pageSize = 1000;
+    var from = 0;
+
+    try{
+      while(true){
+        var q = sb.from('ops_orders_v1').select('*').eq('app_key', appKey)
+          .order('updated_at', {ascending:false}).order('id', {ascending:false})
+          .range(from, from + pageSize - 1);
+        var res = await q;
+        if(res.error) throw res.error;
+        var rows = res.data || [];
+        if(!rows.length) break;
+        for(var i=0;i<rows.length;i++){
+          if(upsertOrder(S0, rows[i])) pulled++;
+        }
+        if(rows.length < pageSize) break;
+        from += pageSize;
+      }
+
+      // drop temp maps
+      try{ delete S0._sellerMap; delete S0._productMap; delete S0._orderMap; }catch(e){}
+
+      // Persist then render
+      await writeIDB(S0);
+      try{ if(typeof computeSeq==='function') computeSeq(); }catch(e){}
+      try{ if(typeof window.render==='function') window.render(); }catch(e){}
+
+      try{
+        // update KPI counters that some builds rely on
+        if(document.getElementById('kpiOrders')) document.getElementById('kpiOrders').textContent = (S0.orders||[]).length;
+      }catch(e){}
+
+      try{ if(typeof toast2==='function') toast2('云端拉取完成：已写入本地并刷新列表（合并 '+pulled+' 条）'); }catch(e){ alert('云端拉取完成：合并 '+pulled+' 条'); }
+      log('pull done', {pulled: pulled, local: (S0.orders||[]).length});
+    }catch(e){
+      console.error(e);
+      alert('云端拉取失败：' + (e && (e.message||e.toString())));
+    }
+  }
+
+  function bind(){
+    try{
+      var bPull = findBtnExact('云端拉取');
+      if(bPull){
+        bPull.addEventListener('click', function(ev){
+          ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
+          cloudPullMaster();
+        }, true);
+      }
+      // Expose for debugging
+      window.cloudPullMaster = cloudPullMaster;
+      log('bound cloud pull (capture)');
+    }catch(e){ log('bind failed', e); }
+  }
+
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
 })();
 </script>
+
 </body></html>
