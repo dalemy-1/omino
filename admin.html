@@ -12272,15 +12272,16 @@ async function cloudStatusFixed(){
     const st = local.state || {};
     let pulled = 0;
     try{
-      // paginate (Supabase default limit 1000)
+      // paginate (stable keyset by id; avoids offset分页在同时间戳批量写入时漏行)
       const pageSize = 1000;
-      let from = 0;
+      let lastId = null;
       while(true){
-        const { data, error } = await sb.from(ORDER_TABLE)
+        let q = sb.from(ORDER_TABLE)
           .select('*')
-	          .eq('app_key', appKey)
-          .order('updated_at', { ascending:false })
-          .range(from, from + pageSize - 1);
+          .eq('app_key', appKey)
+          .order('id', { ascending:true });
+        if(lastId) q = q.gt('id', lastId);
+        const { data, error } = await q.range(0, pageSize - 1);
         if(error) throw error;
         const rows = data || [];
         if(!rows.length) break;
@@ -12288,7 +12289,7 @@ async function cloudStatusFixed(){
           if(_upsertLocalOrder(st, r)) pulled++;
         }
         if(rows.length < pageSize) break;
-        from += pageSize;
+        lastId = rows[rows.length - 1].id;
       }
 
       // normalize + KPI recompute if available
@@ -13041,6 +13042,7 @@ async function cloudStatusFixed(){
 
     var pushTimer=null;
     function scheduleAutoPushOrders(){
+      try{ if(window.__AUTO_PUSH_DISABLED) return; }catch(_){}
       try{
         if(window.UI && UI.autoPush===false) return;
       }catch(_){}
@@ -13285,7 +13287,7 @@ async function cloudStatusFixed(){
   function bind(){
     try{
       // Disable any legacy auto-push loops if present
-      try{ window.__AUTO_PUSH_DISABLED__ = true; }catch(e){}
+      try{ window.__AUTO_PUSH_DISABLED = true; }catch(e){}
       // Cloud buttons -> orders master API
       var bStatus=document.getElementById('btnCloudStatus');
       var bPull=document.getElementById('btnCloudPull');
