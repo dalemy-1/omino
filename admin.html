@@ -14083,4 +14083,104 @@ if(!_autoEnabled){
 })();
 </script>
 
+
+<script>
+(function(){
+  // PATCH_PULLFIX_V1: make 云端拉取/推送 使用订单主表 ops_orders_v1，并把云端订单写回本地 IndexedDB(main_state_v1)
+  function log(){ try{ console.log.apply(console, arguments);}catch(_){}}
+  function ui(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg);}catch(_){ try{ alert(msg);}catch(__){} } }
+
+  async function applyCloudOrdersToLocal(rows){
+    try{
+      var S = window.S || (window.S = {sellers:[],products:[],orders:[],batches:[]});
+      if(!S.sellers) S.sellers=[]; if(!S.products) S.products=[]; if(!S.orders) S.orders=[]; if(!S.batches) S.batches=[];
+      // 直接采用云端行作为 orders（snake_case 兼容页面渲染）
+      S.orders = rows || [];
+      // 轻量补齐卖家列表（只做展示/筛选用，避免破坏原结构）
+      try{
+        var setSeller=new Set();
+        (rows||[]).forEach(function(r){ if(r && r.seller_name) setSeller.add(r.seller_name); });
+        // 若本地卖家为空，则从订单生成一个最小卖家列表
+        if((S.sellers||[]).length===0 && setSeller.size){
+          S.sellers = Array.from(setSeller).map(function(name){ return {name:name}; });
+        }
+      }catch(_){ }
+
+      // 写入 IndexedDB
+      if(typeof window.idbSet==='function'){
+        await window.idbSet('main_state_v1', S);
+      }
+      // 触发刷新渲染
+      if(typeof window.render==='function') window.render();
+      if(typeof window.updateKPIs==='function') window.updateKPIs();
+      return true;
+    }catch(e){
+      log('[PATCH_PULLFIX_V1] applyCloudOrdersToLocal failed', e);
+      throw e;
+    }
+  }
+
+  async function cloudPullMaster(){
+    try{
+      if(typeof window.cloudPullOrdersMaster!=='function') throw new Error('cloudPullOrdersMaster_missing');
+      ui('云端拉取：开始（订单主表 ops_orders_v1）');
+      var res = await window.cloudPullOrdersMaster();
+      var rows = (res && res.orders) ? res.orders : [];
+      await applyCloudOrdersToLocal(rows);
+      ui('云端拉取：完成，写入本地 '+rows.length+' 条订单');
+      return {ok:true, count: rows.length};
+    }catch(e){
+      ui('云端拉取失败：'+(e&&e.message?e.message:String(e)));
+      throw e;
+    }
+  }
+
+  async function cloudPushMaster(opts){
+    try{
+      if(typeof window.cloudPushOrdersDelta!=='function') throw new Error('cloudPushOrdersDelta_missing');
+      var r = await window.cloudPushOrdersDelta(opts||{});
+      return r;
+    }catch(e){
+      ui('云端推送失败：'+(e&&e.message?e.message:String(e)));
+      throw e;
+    }
+  }
+
+  // 覆盖旧入口，避免继续走快照表逻辑
+  window.cloudPull = cloudPullMaster;
+  window.cloudPush = cloudPushMaster;
+  window.applyCloudOrdersToLocal = applyCloudOrdersToLocal;
+
+  // 禁用旧 PlanA 的 safeMergeAndPush（它会把空本地写回/误判）
+  if(typeof window.safeMergeAndPush==='function'){
+    window.safeMergeAndPush = async function(){ log('[PATCH_PULLFIX_V1] safeMergeAndPush disabled (orders master mode)'); return {ok:true, disabled:true}; };
+  }
+
+  // 重新绑定按钮（用捕获阶段拦截，确保不会被旧逻辑覆盖）
+  function norm(t){ return (t||'').replace(/\s+/g,'').trim(); }
+  function findBtnExact(label){
+    var L=norm(label);
+    var nodes=[].slice.call(document.querySelectorAll('button,a'));
+    for(var i=0;i<nodes.length;i++){
+      var el=nodes[i];
+      var t=norm(el.innerText||el.textContent||'');
+      if(t===L) return el;
+    }
+    return null;
+  }
+  function bind(){
+    try{
+      var bPull=findBtnExact('云端拉取');
+      if(bPull) bPull.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); cloudPullMaster(); }, true);
+      var bPush=findBtnExact('云端推送');
+      if(bPush) bPush.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); cloudPushMaster({force:false}); }, true);
+      var bForce=findBtnExact('强制推送');
+      if(bForce) bForce.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); cloudPushMaster({force:true}); }, true);
+      log('[PATCH_PULLFIX_V1] bound cloud buttons (capture)');
+    }catch(e){ log('[PATCH_PULLFIX_V1] bind failed', e); }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bind); else bind();
+})();
+</script>
+
 </body></html>
