@@ -13450,7 +13450,45 @@ if(!_autoEnabled){
     if(bPushForce) bPushForce.onclick = ()=>ordersCloudPush({force:true});
     if(bStatus) bStatus.onclick = ()=>ordersCloudStatus();
     if(bPull) bPull.onclick = ()=>ordersCloudPull({force:false});
-  }, { once:true });
+  
+
+    // Bind by visible text (some builds do not use button ids)
+    const bindByText = (label, fn)=>{
+      const els = Array.from(document.querySelectorAll('button, a, [role=button]'));
+      for(const el of els){
+        const t = (el.innerText||el.textContent||'').replace(/\s+/g,'').trim();
+        if(!t) continue;
+        if(t==label.replace(/\s+/g,'').trim() || t.includes(label.replace(/\s+/g,'').trim())){
+          el.onclick = (ev)=>{ try{ ev&&ev.preventDefault&&ev.preventDefault(); }catch(e){}; return fn(); };
+        }
+      }
+    };
+    bindByText('云端状态', ()=>ordersCloudStatus());
+    bindByText('云端拉取', ()=>ordersCloudPull({force:false}));
+    bindByText('云端推送', ()=>ordersCloudPush({force:false}));
+    bindByText('强制推送', ()=>ordersCloudPush({force:true}));
+
+
+    // Also bind top-bar buttons that are rendered without IDs (match by visible text)
+    const bindTopbarByText = ()=>{
+      const pick = (label)=>{
+        const nodes = Array.from(document.querySelectorAll('button, a'));
+        return nodes.find(n=> (n.textContent||'').replace(/\s+/g,'').includes(label));
+      };
+      const bStatus2 = pick('云端状态');
+      const bPull2 = pick('云端拉取');
+      const bPush2 = pick('云端推送');
+      const bForce2 = pick('强制推送');
+      if(bStatus2) bStatus2.onclick = ()=>ordersCloudStatus();
+      if(bPull2) bPull2.onclick = ()=>ordersCloudPull({force:false});
+      if(bPush2) bPush2.onclick = ()=>ordersCloudPush({force:false});
+      if(bForce2) bForce2.onclick = ()=>ordersCloudPush({force:true});
+    };
+    // run twice to beat late render/bind from legacy scripts
+    bindTopbarByText();
+    setTimeout(bindTopbarByText, 300);
+    setTimeout(bindTopbarByText, 1200);
+}, { once:true });
 })();
 </script>
 </body>
