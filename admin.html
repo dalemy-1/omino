@@ -14049,3 +14049,87 @@ if(!_autoEnabled){
 })();
 </script>
 </body></html>
+<!-- PATCH9: CloudStatus 安全修复（避免其它按钮误触发弹窗） -->
+<script>
+(function(){
+  function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
+  function getSb(){
+    try{
+      return window.supabaseClient || window._sb || (window.SUPABASE && window.SUPABASE.client) || null;
+    }catch(e){ return null; }
+  }
+
+  async function countOrders(){
+    var sb = getSb();
+    if(!sb || !sb.from){
+      throw new Error('supabase_client_missing');
+    }
+    var appKey = (window.getAppKey && window.getAppKey()) || (localStorage.getItem('OPS_CLOUD_APPKEY')||localStorage.getItem('OPS_CLOUD_APP_KEY')||localStorage.getItem('OPS_APPKEY')||localStorage.getItem('APP_KEY')||'dalemy');
+    var q = sb.from('ops_orders_v1').select('id', { count: 'exact', head: true }).eq('app_key', appKey);
+    var r = await q;
+    if(r.error) throw r.error;
+    return { appKey: appKey, count: (r.count||0) };
+  }
+
+  // 统一入口：默认“静默”，只有显式 show=true 才弹窗。
+  async function cloudStatus(opts){
+    opts = opts || {};
+    var show = !!opts.show;
+    try{
+      var res = await countOrders();
+      if(show){
+        var lines=[];
+        lines.push('云端订单归档状态（ops_orders_v1）');
+        lines.push('PATCH9=ON');
+        lines.push('app_key='+res.appKey);
+        lines.push('云端订单='+res.count);
+        alert(lines.join('\n'));
+      }
+      log('[PATCH9] cloudStatus', res);
+      return res;
+    }catch(e){
+      if(show){
+        alert('云端订单状态失败：'+(e && e.message ? e.message : e));
+      }
+      log('[PATCH9] cloudStatus error', e);
+      return { error: (e && e.message) ? e.message : String(e) };
+    }
+  }
+
+  // 只修复“云端状态”按钮：不再全站 rebind。
+  function bindCloudStatusButton(){
+    try{
+      var btns = Array.prototype.slice.call(document.querySelectorAll('button, a'));
+      btns.forEach(function(el){
+        var t = (el.innerText || el.textContent || '').trim();
+        if(!t) return;
+        if(t === '云端状态'){
+          el.onclick = function(ev){
+            try{ ev && ev.preventDefault && ev.preventDefault(); }catch(e){}
+            try{ ev && ev.stopPropagation && ev.stopPropagation(); }catch(e){}
+            cloudStatus({show:true});
+          };
+        }
+      });
+    }catch(e){
+      log('[PATCH9] bindCloudStatusButton error', e);
+    }
+  }
+
+  // 关键：不要覆盖 window.cloudStatus（很多按钮可能会调用它做前置检查）
+  // 我们只提供一个“不会弹窗”的默认实现，保持兼容。
+  try{
+    window.cloudStatus = cloudStatus;            // 默认静默
+    window.cloudStatusOrders = cloudStatus;
+    window.viewCloud = function(){ cloudStatus({show:true}); };
+  }catch(e){}
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', bindCloudStatusButton);
+  }else{
+    bindCloudStatusButton();
+  }
+
+  log('[PATCH9] loaded');
+})();
+</script>
