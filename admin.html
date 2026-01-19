@@ -12121,17 +12121,22 @@ async function cloudStatusFixed(){
     return hit ? String(hit.id||'').trim() : '';
   }
 
-  function _productIdByAsinOrName(localState, asin, name, market){
+  function _productIdByAsinOrName(localState, asin, name, market, sellerId){
     const a = _safeStr(asin).toUpperCase();
     const nm = _safeStr(name).toLowerCase();
     const mk = _safeStr(market).toUpperCase();
+    const sid = _safeStr(sellerId);
     const arr = (localState && Array.isArray(localState.products)) ? localState.products : [];
+    function matchSeller(p){
+      if(!sid) return true;
+      return String(p?.sellerId||'').trim()===sid;
+    }
     if(a){
-      const hit = arr.find(p=>String(p?.asin||'').trim().toUpperCase()===a && (!mk || String(p?.market||'').trim().toUpperCase()===mk));
+      const hit = arr.find(p=>matchSeller(p) && String(p?.asin||'').trim().toUpperCase()===a && (!mk || String(p?.market||'').trim().toUpperCase()===mk));
       if(hit) return String(hit.id||'').trim();
     }
     if(nm){
-      const hit = arr.find(p=>String(p?.name||'').trim().toLowerCase()===nm && (!mk || String(p?.market||'').trim().toUpperCase()===mk));
+      const hit = arr.find(p=>matchSeller(p) && String(p?.name||'').trim().toLowerCase()===nm && (!mk || String(p?.market||'').trim().toUpperCase()===mk));
       if(hit) return String(hit.id||'').trim();
     }
     return '';
@@ -12156,57 +12161,108 @@ async function cloudStatusFixed(){
     }
   }
 
+  function _noteToObj(note){
+    try{
+      if(note==null) return null;
+      if(typeof note==='object') return note;
+      const s = String(note||'').trim();
+      if(!s) return null;
+      if(s[0]==='{' || s[0]==='[') return JSON.parse(s);
+      return null;
+    }catch(e){ return null; }
+  }
+
+  function _getAny(obj, keys){
+    if(!obj) return undefined;
+    for(const k of keys){
+      if(obj[k]!==undefined && obj[k]!==null && obj[k]!=='' ) return obj[k];
+    }
+    return undefined;
+  }
+
   function _upsertLocalOrder(localState, row){
-    // Map ops_orders_v1 row -> v6.4.2 order object
+    // Map ops_orders_v1 row -> v6.4.2 order object (金额/折扣/买手佣金/留评需求 必须从云端列映射，否则会显示错乱)
     const U = window.U || {};
-    const orderNo = _safeStr(row.order_no);
+    const noteObj = _noteToObj(row.note);
+
+    const orderNo = _safeStr(row.order_no || _getAny(noteObj, ['order_no','orderNo','order_id']));
     if(!orderNo) return false;
-    const sellerName = _safeStr(row.seller_name);
-    const market = _safeStr(row.market);
-    const asin = _safeStr(row.asin);
-    const productName = _safeStr(row.product_name);
-    const sellerId = _ensureSeller(localState, sellerName) || _safeStr(row.seller_id);
-    const productId = _productIdByAsinOrName(localState, asin, productName, market);
+
+    const sellerName = _safeStr(row.seller_name || _getAny(noteObj, ['seller_name','sellerName','seller']));
+    const market = _safeStr(row.market || _getAny(noteObj, ['market','country']));
+    const asin = _safeStr(row.asin || _getAny(noteObj, ['asin','ASIN']));
+    const productName = _safeStr(row.product_name || _getAny(noteObj, ['product_name','productName','title']));
+
+    const sellerId = _ensureSeller(localState, sellerName) || _safeStr(row.seller_id || _getAny(noteObj, ['seller_id','sellerId']));
+    const productId = _productIdByAsinOrName(localState, asin, productName, market, sellerId) || _safeStr(row.product_id || _getAny(noteObj, ['product_id','productId']));
 
     if(!localState.orders) localState.orders = [];
-    if(!localState.seq) localState.seq = { seller:1, product:1, order:1, batch:1 };
+    if(!localState.seq) localState.seq = { seller:1, product:1, order:1, batch:1, payoutBatch:1 };
     if(!localState.seq.order) localState.seq.order = 1;
 
     const key = (typeof U.orderKey==='function') ? U.orderKey(sellerId, orderNo, asin) : (sellerId+'::'+orderNo+'::'+asin);
     let o = localState.orders.find(x=>String(x?.key||'')===key);
     if(!o){
       const id = (typeof U.id==='function') ? U.id('O', localState.seq.order++) : ('O'+Date.now()+Math.random());
-      o = { id, key, orderId: orderNo, date: (row.created_at||'').slice(0,10) || (new Date().toISOString().slice(0,10)), sellerId, productId, market, currency:'', amount:0, discount:'', asin, note:'' };
+      o = { id, key, orderId: orderNo, date: (row.created_at||'').slice(0,10) || (new Date().toISOString().slice(0,10)), sellerId, productId, market, currency:'', amount:0, discount:0, buyerCommission:0, asin, reviewReq:'', note:'' };
       localState.orders.unshift(o);
     }
-    // Always update mutable fields
+
+    // --- 基本字段 ---
     o.market = market || o.market;
     o.asin = asin || o.asin;
+    if(sellerId) o.sellerId = sellerId;
     if(productId) o.productId = productId;
-    if(productName && (!o.note || o.note.indexOf(productName)<0)){
-      // put product name into note if missing
-      o.note = (o.note ? (o.note+' | ') : '') + productName;
-    }
-    if(row.note){
+
+    // --- 金额/折扣/买手佣金（优先云端列，其次 note JSON）---
+    const unitPrice = _getAny(row, ['unit_price','unitPrice','price','amount']);
+    const fxRate = _getAny(row, ['fx_rate','fx','rate','exchange_rate']);
+    const discountVal = _getAny(row, ['discount','discount_price','discount_value','seller_discount']);
+    const buyerComm = _getAny(row, ['buyer_commission','buyerCommission','buyer_commission_orig','buyer_commission_cny']);
+    const reviewReq = _getAny(row, ['review_req','review_requirement','review_type','reviewReq']);
+
+    const unitPrice2 = unitPrice!=null ? unitPrice : _getAny(noteObj, ['unit_price','unitPrice','price','amount']);
+    const fxRate2 = fxRate!=null ? fxRate : _getAny(noteObj, ['fx_rate','fx','rate']);
+    const discount2 = discountVal!=null ? discountVal : _getAny(noteObj, ['discount','discount_price','seller_discount']);
+    const buyerComm2 = buyerComm!=null ? buyerComm : _getAny(noteObj, ['buyer_commission','buyerCommission','buyer_commission_orig']);
+    const reviewReq2 = reviewReq!=null ? reviewReq : _getAny(noteObj, ['review_req','review_requirement','review_type','reviewReq','留评需求']);
+
+    if(unitPrice2!=null && unitPrice2!=='' ) o.amount = (typeof U.num==='function') ? U.num(unitPrice2) : (parseFloat(unitPrice2)||0);
+    if(discount2!=null && discount2!=='') o.discount = (typeof U.num==='function') ? U.num(discount2) : (parseFloat(discount2)||0);
+    if(buyerComm2!=null && buyerComm2!=='') o.buyerCommission = (typeof U.num==='function') ? U.num(buyerComm2) : (parseFloat(buyerComm2)||0);
+    if(reviewReq2!=null && reviewReq2!=='') o.reviewReq = String(reviewReq2);
+
+    // 汇率（本系统通常在结算/计算用到；缺失时不强写）
+    if(fxRate2!=null && fxRate2!=='') o.fxRate = (typeof U.num==='function') ? U.num(fxRate2) : (parseFloat(fxRate2)||0);
+
+    // note：保留结构化 JSON（避免 [object Object]）
+    if(noteObj){
+      const s = JSON.stringify(noteObj);
+      if(s && (!o.note || o.note.indexOf(s)<0)) o.note = (o.note ? (o.note+'\n') : '') + s;
+    }else if(row.note){
       const n = _safeStr(row.note);
-      if(n && (!o.note || o.note.indexOf(n)<0)) o.note = (o.note ? (o.note+' | ') : '') + n;
+      if(n && (!o.note || o.note.indexOf(n)<0)) o.note = (o.note ? (o.note+'\n') : '') + n;
     }
-    // pay_status -> principal settled (soft)
-    const ps = _normPayStatus(row.pay_status);
+    if(productName && (!o.note || o.note.indexOf(productName)<0)) o.note = (o.note ? (o.note+' | ') : '') + productName;
+
+    // --- 收款状态 ---
+    const ps = _normPayStatus(row.pay_status || _getAny(noteObj,['pay_status','payStatus']));
     if(!o.principal) o.principal = { settled:false, batchId:'', fx:'', amountCny:'' };
     if(ps==='paid') o.principal.settled = true;
-    // review
+
+    // --- 留评 ---
     if(!o.review) o.review = { status:'PENDING', date:'', link:'', note:'', doneType:'' };
     if(row.review_status) o.review.status = String(row.review_status||'');
     if(row.review_link) o.review.link = _safeStr(row.review_link);
-    if(row.review_screenshot_url){
-      const u = _safeStr(row.review_screenshot_url);
-      if(u && (!o.review.note || o.review.note.indexOf(u)<0)) o.review.note = (o.review.note? (o.review.note+'\n'):'') + 'review_screenshot: '+u;
-    }
-    // payout
+    const rshot = _safeStr(row.review_screenshot_url || row.review_screenshot || _getAny(noteObj,['review_screenshot_url','review_screenshot']));
+    if(rshot && (!o.review.note || o.review.note.indexOf(rshot)<0)) o.review.note = (o.review.note? (o.review.note+'\n'):'') + 'review_screenshot: '+rshot;
+
+    // --- 返款 ---
     if(!o.payout) o.payout = { status:'not_ready', batch_id:'', paid_at:'', screenshot:'' };
     if(row.payout_status) o.payout.status = _normPayoutStatus(row.payout_status) || String(row.payout_status||'');
-    if(row.payout_screenshot_url) o.payout.screenshot = _safeStr(row.payout_screenshot_url);
+    const pshot = _safeStr(row.payout_screenshot_url || row.payout_screenshot || _getAny(noteObj,['payout_screenshot_url','payout_screenshot']));
+    if(pshot) o.payout.screenshot = pshot;
+
     return true;
   }
 
