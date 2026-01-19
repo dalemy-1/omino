@@ -13240,18 +13240,19 @@ if(!_autoEnabled){
   async function ordersCloudStatus(){
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
-    const { client: sb, cfg } = cloud;
+	    const { client: sb, cfg } = cloud;
+	    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
     const local = await _readLocal();
     const localOrders = _countLocalOrders(local.state);
     try{
       const { count, error } = await sb.from(ORDER_TABLE)
         .select('id', { count:'exact', head:true })
-        .eq('app_key', cfg.app_key);
+	        .eq('app_key', appKey);
       if(error) throw error;
       alert('云端订单归档状态（ops_orders_v1）\n\n' +
         '本地订单：' + localOrders + '\n' +
         '云端订单：' + (count||0) + '\n' +
-        'app_key：' + cfg.app_key + '\n\n' +
+	        'app_key：' + appKey + '\n\n' +
         '说明：此模式仅增量写入/更新，不会从页面删除云端数据。');
     }catch(e){
       console.error(e);
@@ -13263,7 +13264,8 @@ if(!_autoEnabled){
     opts = opts||{};
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
-    const { client: sb, cfg } = cloud;
+	    const { client: sb, cfg } = cloud;
+	    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
     const local = await _readLocal();
     const st = local.state || {};
     let pulled = 0;
@@ -13274,7 +13276,7 @@ if(!_autoEnabled){
       while(true){
         const { data, error } = await sb.from(ORDER_TABLE)
           .select('*')
-          .eq('app_key', cfg.app_key)
+	          .eq('app_key', appKey)
           .order('updated_at', { ascending:false })
           .range(from, from + pageSize - 1);
         if(error) throw error;
@@ -13309,6 +13311,7 @@ if(!_autoEnabled){
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
     const { client: sb, cfg } = cloud;
+    const appKey = (cfg && (cfg.appKey || cfg.app_key)) ? String(cfg.appKey || cfg.app_key).trim() : '';
     const local = await _readLocal();
     const st = local.state || {};
     const orders = (st.orders && Array.isArray(st.orders)) ? st.orders : [];
@@ -13351,7 +13354,7 @@ if(!_autoEnabled){
         pay_screenshot_url, review_screenshot_url, payout_screenshot_url,
         review_link, note,
         updated_at: nowIso,
-        app_key: cfg.app_key
+        app_key: appKey
       });
     }
 
@@ -13364,13 +13367,14 @@ if(!_autoEnabled){
     // 1) Prefer bulk upsert on (app_key,seller_name,order_no) if you have a unique constraint.
     // 2) If server says no unique constraint, fall back to batch update+insert (slower but safe, still no delete).
     async function bulkUpsert(batch){
-      return sb.from(ORDER_TABLE).upsert(batch, { onConflict:'app_key,seller_name,order_no', returning:'minimal' });
+      // must match your DB unique index/constraint
+      return sb.from(ORDER_TABLE).upsert(batch, { onConflict:'app_key,seller_name,order_no,product_name,asin', returning:'minimal' });
     }
 
     async function slowUpdateInsert(batch){
       // very safe fallback: for each row -> try update match; if update returns 0 rows then insert
       for(const r of batch){
-        const match = { app_key: r.app_key, seller_name: r.seller_name, order_no: r.order_no };
+        const match = { app_key: r.app_key, seller_name: r.seller_name, order_no: r.order_no, product_name: r.product_name, asin: r.asin };
         const upd = { ...r };
         delete upd.app_key; delete upd.seller_name; delete upd.order_no;
         let updated = 0;
@@ -13429,6 +13433,12 @@ if(!_autoEnabled){
   window.cloudStatus = ordersCloudStatus;
   window.cloudPull = ordersCloudPull;
   window.cloudPush = ordersCloudPush;
+
+  // Compatibility: some builds bind buttons to robustCloud* wrappers.
+  // Force them to route to the orders-table implementation.
+  window.robustCloudStatus = ordersCloudStatus;
+  window.robustCloudPull = ordersCloudPull;
+  window.robustCloudPush = ordersCloudPush;
 
   document.addEventListener('DOMContentLoaded', ()=>{
     const byId = (id)=>document.getElementById(id);
