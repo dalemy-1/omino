@@ -4,6 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>简易登记系统 v6.4.2-next5</title>
+  <!-- PATCH5_MARK: FORCE_ORDERS_MASTER -->
 <style>
 
 :root{
@@ -13489,6 +13490,72 @@ if(!_autoEnabled){
     setTimeout(bindTopbarByText, 300);
     setTimeout(bindTopbarByText, 1200);
 }, { once:true });
+})();
+</script>
+
+<script>
+// PATCH5 FORCE_ORDERS_MASTER - hard override cloud ops to ops_orders_v1
+(function(){
+  function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
+  // cache-bust marker
+  window.__PATCH5_FORCE_ORDERS_MASTER__ = true;
+  // Try to find cfg
+  function getCfg(){
+    try{ return (window.__CLOUD_CFG__ || window.cloudCfg || window.CLOUD_CFG || window.syncCfg || {}); }catch(e){ return {}; }
+  }
+  function getAppKey(){
+    var cfg=getCfg();
+    return cfg.appKey || cfg.app_key || cfg.app || cfg.app_name || cfg.key || cfg.APP_KEY || "dalemy";
+  }
+  // Find Supabase client
+  function getSb(){
+    return window.sb || window.supabaseClient || (window.SUPABASE && window.SUPABASE.client) || window._sb || null;
+  }
+  async function countOrders(){
+    var sb=getSb();
+    if(!sb || !sb.from) throw new Error("supabase_client_missing");
+    var appKey=getAppKey();
+    var q=sb.from("ops_orders_v1").select("id", { count: "exact", head: true }).eq("app_key", appKey);
+    var r=await q;
+    if(r.error) throw r.error;
+    return {appKey:appKey, count:r.count||0};
+  }
+  function show(msg){
+    try{
+      if(window.alert){ alert(msg); return; }
+    }catch(e){}
+  }
+  async function ordersCloudStatus(){
+    try{
+      var res=await countOrders();
+      var lines=[];
+      lines.push("云端订单归档状态（ops_orders_v1）");
+      lines.push("PATCH5=ON");
+      lines.push("app_key="+res.appKey);
+      lines.push("云端订单="+res.count);
+      show(lines.join("\n"));
+      log("[PATCH5] ordersCloudStatus", res);
+      return res;
+    }catch(e){
+      show("云端订单状态失败："+ (e && e.message ? e.message : e));
+      throw e;
+    }
+  }
+  // Hard override global handlers
+  window.cloudStatus = ordersCloudStatus;
+  window.viewCloud = ordersCloudStatus;
+  window.cloudStatusOrders = ordersCloudStatus;
+  // Rebind any buttons with text match
+  function rebind(){
+    var btns=[].slice.call(document.querySelectorAll("button,a"));
+    btns.forEach(function(el){
+      var t=(el.innerText||el.textContent||"").trim();
+      if(!t) return;
+      if(t.includes("云端状态")){ el.onclick=function(ev){ ev&&ev.preventDefault&&ev.preventDefault(); ordersCloudStatus(); }; }
+    });
+  }
+  if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded", rebind); } else { rebind(); }
+  log("[PATCH5] loaded");
 })();
 </script>
 </body>
