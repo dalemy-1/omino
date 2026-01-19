@@ -13682,4 +13682,373 @@ if(!_autoEnabled){
 })();
 </script>
 
+
+<script>
+// ===================== PATCH8: Cloud Orders Master Bidirectional Sync (方案1) =====================
+(function(){
+  try{
+    function log(){ try{ console.log.apply(console, ['[PATCH8]'].concat([].slice.call(arguments))); }catch(_){} }
+    function warn(){ try{ console.warn.apply(console, ['[PATCH8]'].concat([].slice.call(arguments))); }catch(_){} }
+
+    function getSb(){
+      return window.supabaseClient || window._sb || (window.SUPABASE && window.SUPABASE.client) || null;
+    }
+
+    function getAppKey(){
+      try{ return (window.getAppKey && window.getAppKey()) || (localStorage.getItem('OPS_CLOUD_APPKEY')||'dalemy').trim() || 'dalemy'; }catch(_){ return 'dalemy'; }
+    }
+
+    function norm(s){
+      if(s==null) return '';
+      try{ return String(s).trim(); }catch(_){ return ''; }
+    }
+
+    function orderKeyParts(row){
+      // seller_name + order_no + product_name + asin (cloud unique rule)
+      return [norm(row.seller_name), norm(row.order_no), norm(row.product_name), norm(row.asin)].join('||');
+    }
+
+    function ensureOrderTs(){
+      try{
+        if(!window.S || !Array.isArray(S.orders)) return;
+        S.orders.forEach(function(o){
+          if(!o) return;
+          if(!o.createdAt) o.createdAt = Date.now();
+          if(!o.updatedAt) o.updatedAt = o.createdAt || Date.now();
+        });
+      }catch(e){ warn('ensureOrderTs failed', e); }
+    }
+
+    function ensureSellerByName(name){
+      name = norm(name);
+      if(!name) return null;
+      var exist = (S.sellers||[]).find(function(x){ return norm(x.name)===name; });
+      if(exist) return exist;
+      // auto create seller id
+      if(!S.seq) S.seq={seller:1, product:1, order:1, batch:1};
+      if(typeof S.seq.seller!=='number') S.seq.seller=1;
+      var sid = (window.U && U.id) ? U.id('S', S.seq.seller++) : ('S'+Date.now());
+      var s = {id:sid, name:name, markets:[], fx:{}, comm:{}};
+      (S.sellers|| (S.sellers=[])).push(s);
+      return s;
+    }
+
+    function ensureProductByNameAsinMarket(pname, asin, market, sellerId){
+      pname = norm(pname);
+      asin = norm(asin);
+      market = norm(market)||'';
+      var list = (S.products||[]);
+      var exist = list.find(function(p){
+        return norm(p.name)===pname && norm(p.asin)===asin && norm(p.market)===market && (!sellerId || p.sellerId===sellerId);
+      });
+      if(exist) return exist;
+      if(!pname && !asin) return null;
+      if(!S.seq) S.seq={seller:1, product:1, order:1, batch:1};
+      if(typeof S.seq.product!=='number') S.seq.product=1;
+      var pid = (window.U && U.id) ? U.id('P', S.seq.product++) : ('P'+Date.now());
+      var pr = {id:pid, name:(pname||''), asin:(asin||''), market:(market||''), discount:0, reviewType:'TEXT', sellerId:(sellerId||''), buyerCommission:0, remark:''};
+      list.push(pr);
+      S.products=list;
+      return pr;
+    }
+
+    function cloudRowFromLocal(o){
+      // map local order -> ops_orders_v1 row
+      var seller = (S.sellers||[]).find(function(s){ return s.id===o.sellerId; }) || {name:''};
+      var prod = (S.products||[]).find(function(p){ return p.id===o.productId; }) || {name:o.productName||'', asin:o.asin||'', market:o.market||''};
+      var seller_name = norm(seller.name);
+      var order_no = norm(o.orderId||o.orderNo||'');
+      var market = norm(o.market||prod.market||'');
+      var asin = norm(o.asin||prod.asin||'');
+      var product_name = norm(prod.name||o.productName||'');
+
+      // statuses
+      var pay_status = (o.principalStatus==='DONE' || o.payStatus==='DONE' || o.principalPaid===True) ? 'DONE' : (o.principalStatus||o.payStatus||'PENDING');
+      if(!pay_status) pay_status='PENDING';
+      var review_status = (o.reviewStatus||o.review_state||'PENDING');
+      var payout_status = (o.payoutStatus||o.payout_status||'PENDING');
+
+      // best-effort normalize to allowed values
+      var okSet = {PENDING:1,DONE:1,WAIVED:1,PAID:1};
+      if(!okSet[review_status]){
+        if(String(review_status).toUpperCase().includes('DONE')) review_status='DONE';
+        else if(String(review_status).toUpperCase().includes('WAIV')) review_status='WAIVED';
+        else review_status='PENDING';
+      }
+      if(!okSet[payout_status]) payout_status='PENDING';
+      if(!okSet[pay_status]) pay_status='PENDING';
+
+      var note = norm(o.note||'');
+      if(o.amount!=null){
+        note = note || ('amount='+o.amount);
+      }
+
+      return {
+        app_key: getAppKey(),
+        seller_name: seller_name,
+        order_no: order_no,
+        market: market,
+        asin: asin || null,
+        product_name: product_name || null,
+        pay_status: pay_status,
+        review_status: review_status,
+        payout_status: payout_status,
+        review_link: norm(o.reviewLink||o.review_link||'') || null,
+        note: note || null,
+        updated_at: new Date(o.updatedAt||Date.now()).toISOString()
+      };
+    }
+
+    async function cloudCount(){
+      var sb=getSb();
+      if(!sb || !sb.from) throw new Error('supabase_client_missing');
+      var appKey=getAppKey();
+      var q=sb.from('ops_orders_v1').select('id', {count:'exact', head:true}).eq('app_key', appKey);
+      var r=await q;
+      if(r.error) throw r.error;
+      return {appKey:appKey, count:r.count||0};
+    }
+
+    async function cloudPullOrdersMaster(opts){
+      opts = opts||{};
+      var sb=getSb();
+      if(!sb || !sb.from) throw new Error('supabase_client_missing');
+      var appKey=getAppKey();
+      var limit = opts.limit || 1000;
+      var page = 0;
+      var all = [];
+      var total = null;
+      while(true){
+        var from = page*limit;
+        var to = from+limit-1;
+        var q = sb.from('ops_orders_v1')
+          .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,created_at,updated_at')
+          .eq('app_key', appKey)
+          .order('created_at', {ascending:true})
+          .range(from, to);
+        var r = await q;
+        if(r.error) throw r.error;
+        var rows = r.data || [];
+        all = all.concat(rows);
+        if(rows.length < limit) break;
+        page++;
+        if(page>200) break; // safety
+      }
+
+      // build existing maps
+      ensureOrderTs();
+      var localMap = new Map();
+      (S.orders||[]).forEach(function(o){
+        var seller = (S.sellers||[]).find(function(s){ return s.id===o.sellerId; }) || {name:''};
+        var prod = (S.products||[]).find(function(p){ return p.id===o.productId; }) || {name:o.productName||'', asin:o.asin||''};
+        var k = [norm(seller.name), norm(o.orderId||''), norm(prod.name||''), norm(o.asin||prod.asin||'')].join('||');
+        if(k!=='||||') localMap.set(k, o);
+      });
+
+      var added=0, updated=0;
+      all.forEach(function(row){
+        var k = orderKeyParts(row);
+        var existing = localMap.get(k);
+        var seller = ensureSellerByName(row.seller_name);
+        var prod = ensureProductByNameAsinMarket(row.product_name, row.asin, row.market, seller? seller.id : '');
+        if(!existing){
+          // create a local order
+          if(!S.seq) S.seq={seller:1, product:1, order:1, batch:1};
+          if(typeof S.seq.order!=='number') S.seq.order=1;
+          var oid = (window.U && U.id) ? U.id('O', S.seq.order++) : ('O'+Date.now()+Math.random());
+          var createdAt = row.created_at ? Date.parse(row.created_at) : Date.now();
+          var updatedAt = row.updated_at ? Date.parse(row.updated_at) : createdAt;
+          var o = {
+            id: oid,
+            orderId: norm(row.order_no),
+            date: (row.note && String(row.note).includes('date=')) ? '' : '',
+            sellerId: seller? seller.id : '',
+            productId: prod? prod.id : '',
+            market: norm(row.market),
+            asin: norm(row.asin),
+            amount: null,
+            discount: null,
+            note: norm(row.note),
+            reviewStatus: norm(row.review_status||'PENDING'),
+            payoutStatus: norm(row.payout_status||'PENDING'),
+            payStatus: norm(row.pay_status||'PENDING'),
+            reviewLink: norm(row.review_link||''),
+            createdAt: createdAt,
+            updatedAt: updatedAt
+          };
+          (S.orders|| (S.orders=[])).push(o);
+          localMap.set(k, o);
+          added++;
+        }else{
+          // update local status fields if cloud newer
+          var cloudUpdated = row.updated_at ? Date.parse(row.updated_at) : 0;
+          if(cloudUpdated && (!existing.updatedAt || cloudUpdated > existing.updatedAt+1000)){
+            existing.payStatus = norm(row.pay_status||existing.payStatus||'PENDING');
+            existing.reviewStatus = norm(row.review_status||existing.reviewStatus||'PENDING');
+            existing.payoutStatus = norm(row.payout_status||existing.payoutStatus||'PENDING');
+            if(row.review_link) existing.reviewLink = norm(row.review_link);
+            if(row.note) existing.note = norm(row.note);
+            existing.updatedAt = cloudUpdated;
+            updated++;
+          }
+        }
+      });
+
+      // persist & render
+      try{ if(window.saveNow) saveNow(); }catch(_){}
+      try{ if(window.render) render(); }catch(_){}
+
+      return {appKey:appKey, cloudCount:all.length, added:added, updated:updated};
+    }
+
+    async function cloudPushOrdersDelta(opts){
+      opts=opts||{};
+      var sb=getSb();
+      if(!sb || !sb.from) throw new Error('supabase_client_missing');
+      ensureOrderTs();
+      var appKey=getAppKey();
+      var since = opts.force ? 0 : Number(localStorage.getItem('OPS_ORDERS_LAST_PUSH_TS')||'0');
+      var list = (S.orders||[]).filter(function(o){ return (o.updatedAt||0) > since; });
+      // map and filter required fields
+      var rows=[];
+      list.forEach(function(o){
+        var row = cloudRowFromLocal(o);
+        if(!row.seller_name || !row.order_no) return;
+        rows.push(row);
+      });
+
+      var total = rows.length;
+      if(total===0) return {appKey:appKey, pushed:0, since:since, note:'no_changes'};
+
+      var chunk=500;
+      var pushed=0;
+      for(var i=0;i<rows.length;i+=chunk){
+        var part = rows.slice(i, i+chunk);
+        // onConflict needs match your unique index / constraint
+        var r = await sb.from('ops_orders_v1').upsert(part, {
+          onConflict: 'app_key,seller_name,order_no,product_name_norm,asin_norm',
+          ignoreDuplicates: false
+        });
+        if(r.error){
+          // fallback: try older constraint
+          warn('upsert failed, fallback onConflict app_key,seller_name,order_no', r.error);
+          var r2 = await sb.from('ops_orders_v1').upsert(part, {
+            onConflict: 'app_key,seller_name,order_no',
+            ignoreDuplicates: false
+          });
+          if(r2.error) throw r2.error;
+        }
+        pushed += part.length;
+      }
+
+      var now = Date.now();
+      localStorage.setItem('OPS_ORDERS_LAST_PUSH_TS', String(now));
+      return {appKey:appKey, pushed:pushed, since:since};
+    }
+
+    // expose
+    window.cloudPullOrdersMaster = cloudPullOrdersMaster;
+    window.cloudPushOrdersDelta = cloudPushOrdersDelta;
+
+    // integrate with existing UI buttons (text-match)
+    function rebind(){
+      try{
+        var btns = Array.prototype.slice.call(document.querySelectorAll('button,a'));
+        btns.forEach(function(el){
+          var t = (el.innerText||el.textContent||'').trim();
+          if(!t) return;
+          if(t.includes('云端拉取')){
+            el.onclick = async function(ev){
+              ev && ev.preventDefault && ev.preventDefault();
+              ev && ev.stopPropagation && ev.stopPropagation();
+              try{
+                toast && toast('云端拉取：开始（订单主库 ops_orders_v1）');
+              }catch(_){}
+              try{
+                var res = await cloudPullOrdersMaster({});
+                try{ toast && toast('云端拉取完成：cloud='+res.cloudCount+' 新增='+res.added+' 更新='+res.updated); }catch(_){}
+                log('cloudPull done', res);
+              }catch(e){
+                warn('cloudPull failed', e);
+                try{ toast && toast('云端拉取失败：'+(e && e.message ? e.message : e)); }catch(_){}
+              }
+            };
+          }
+          if(t.includes('云端推送')){
+            el.onclick = async function(ev){
+              ev && ev.preventDefault && ev.preventDefault();
+              ev && ev.stopPropagation && ev.stopPropagation();
+              try{
+                toast && toast('云端推送：仅推送本地变更（订单主库）');
+              }catch(_){}
+              try{
+                var res = await cloudPushOrdersDelta({force:false});
+                try{ toast && toast('云端推送完成：'+res.pushed+' 条'); }catch(_){}
+                log('cloudPush delta done', res);
+              }catch(e){
+                warn('cloudPush failed', e);
+                try{ toast && toast('云端推送失败：'+(e && e.message ? e.message : e)); }catch(_){}
+              }
+            };
+          }
+          if(t.includes('云端状态')){
+            el.onclick = async function(ev){
+              ev && ev.preventDefault && ev.preventDefault();
+              ev && ev.stopPropagation && ev.stopPropagation();
+              try{
+                var r = await cloudCount();
+                alert('云端订单主库状态 (ops_orders_v1)
+PATCH8=ON
+app_key='+r.appKey+'
+云端订单='+r.count);
+              }catch(e){
+                alert('云端状态失败：'+(e && e.message ? e.message : e));
+              }
+            };
+          }
+        });
+      }catch(e){ warn('rebind failed', e); }
+    }
+
+    if(document.readyState==='loading'){
+      document.addEventListener('DOMContentLoaded', function(){ setTimeout(rebind, 50); });
+    }else{
+      setTimeout(rebind, 50);
+    }
+
+    // auto push: hook into saveNow if available
+    var _saveNow = window.saveNow;
+    if(typeof _saveNow==='function'){
+      window.saveNow = function(){
+        var r = _saveNow.apply(this, arguments);
+        try{ ensureOrderTs(); }catch(_){}
+        try{ scheduleAutoPushOrders(); }catch(_){}
+        return r;
+      };
+    }
+
+    var pushTimer=null;
+    function scheduleAutoPushOrders(){
+      try{
+        if(window.UI && UI.autoPush===false) return;
+      }catch(_){}
+      if(pushTimer) return;
+      pushTimer = setTimeout(async function(){
+        pushTimer=null;
+        try{
+          var res = await cloudPushOrdersDelta({force:false});
+          log('auto push ok', res);
+        }catch(e){
+          warn('auto push failed', e);
+        }
+      }, 1200);
+    }
+    window.scheduleAutoPushOrders = scheduleAutoPushOrders;
+
+    log('loaded');
+  }catch(e){
+    try{ console.warn('[PATCH8] init failed', e); }catch(_){}
+  }
+})();
+</script>
 </body></html>
