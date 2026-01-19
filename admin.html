@@ -12314,7 +12314,24 @@ async function cloudStatusFixed(){
     return '';
   }
 
-  function _ensureSeller(localState, sellerName){
+  
+  // --- PATCH: deterministic ids (avoid random/Date.now causing different results each pull) ---
+  function _hash32(str){
+    str = String(str||'');
+    let h = 2166136261;
+    for(let i=0;i<str.length;i++){
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    // >>> 0 to force uint32
+    return (h >>> 0);
+  }
+  function _stableId(prefix, parts){
+    const s = String(parts==null?'':parts);
+    const n = _hash32(prefix+'|'+s).toString(16).padStart(8,'0');
+    return String(prefix||'') + n;
+  }
+function _ensureSeller(localState, sellerName){
     const name = _safeStr(sellerName);
     if(!name) return '';
     let id = _sellerIdByName(localState, name);
@@ -12325,7 +12342,9 @@ async function cloudStatusFixed(){
       if(!localState.sellers) localState.sellers = [];
       if(!localState.seq) localState.seq = { seller:1, product:1, order:1, batch:1 };
       if(!localState.seq.seller) localState.seq.seller = 1;
-      const newId = (typeof U.id==='function') ? U.id('S', localState.seq.seller++) : ('S'+Date.now());
+      const newId = _stableId('S', name.toLowerCase());
+      // keep seq for UI counters but do not use it for id stability
+      try{ localState.seq.seller++; }catch(_e){}
       localState.sellers.push({ id:newId, name, markets:'', fx:1, commissions:{}, remark:'(from cloud orders)' });
       return newId;
     }catch(e){
@@ -12375,7 +12394,8 @@ async function cloudStatusFixed(){
     const key = (typeof U.orderKey==='function') ? U.orderKey(sellerId, orderNo, asin) : (sellerId+'::'+orderNo+'::'+asin);
     let o = localState.orders.find(x=>String(x?.key||'')===key);
     if(!o){
-      const id = (typeof U.id==='function') ? U.id('O', localState.seq.order++) : ('O'+Date.now()+Math.random());
+      const id = _stableId('O', (sellerName||'')+'|'+orderNo+'|'+(asin||'')+'|'+(market||'')+'|'+(productName||''));
+      try{ localState.seq.order++; }catch(_e){}
       o = { id, key, orderId: orderNo, date: (row.created_at||'').slice(0,10) || (new Date().toISOString().slice(0,10)), sellerId, productId, market, currency:'', amount:0, discount:0, buyerCommission:0, asin, reviewReq:'', note:'' };
       localState.orders.unshift(o);
     }
@@ -12386,6 +12406,7 @@ async function cloudStatusFixed(){
     o.market = market || o.market;
     o.asin = asin || o.asin;
     if(sellerId) o.sellerId = sellerId;
+    if(sellerName) o.seller_name = sellerName;
     // 产品关联：仅在同卖家+同Market 且 (ASIN匹配 或 产品名精确匹配) 时才绑定 productId，否则清空避免串行
     const strictPid = _productIdByAsinOrName(localState, o.asin, productName, o.market, o.sellerId);
     o.productId = strictPid || '';
@@ -12506,6 +12527,7 @@ async function cloudStatusFixed(){
   }
 
   async function ordersCloudPull(opts){
+    window.__CLOUD_PULL_IN_PROGRESS = true;
     opts = opts||{};
     const cloud = await _getCloudClient();
     if(!cloud) return alert('未设置云端（请先点“云端设置”）。');
@@ -12546,16 +12568,13 @@ async function cloudStatusFixed(){
       }catch(e){}
 
       // persist first, then render
-      await _writeLocal(st);
-
-      try{ if(typeof window.normalizeOrders==='function') window.normalizeOrders(); }catch(e){}
-      try{ if(typeof window.recalcKPI==='function') window.recalcKPI(); }catch(e){}
-      try{ if(typeof window.saveNow==='function') await window.saveNow(); }catch(e){}
+      await _writeLocal(st);      // PATCH: do NOT call normalizeOrders/saveNow here; they can mutate/auto-push and cause apparent inconsistencies.
       try{ if(typeof window.render==='function') window.render(); }catch(e){}
-
+      window.__CLOUD_PULL_IN_PROGRESS = false;
       toast2('云端拉取完成：已合并订单 '+pulled+' 条（已写入本地并刷新列表）。');
     }catch(e){
       console.error(e);
+      window.__CLOUD_PULL_IN_PROGRESS = false;
       alert('云端拉取失败：' + (e && (e.message||e.toString())));
     }
   }
