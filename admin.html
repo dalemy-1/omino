@@ -9202,7 +9202,12 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
   window.cloudPromptAndSave = cloudPromptAndSave;
   window.cloudStatus = cloudStatus;
   window.cloudPush = cloudPush;
+  // Expose/override legacy entrypoints so the UI button always uses the
+  // implementation that writes into window.S + IndexedDB and triggers render.
   window.cloudPull = cloudPull;
+  try{ window.cloudPullOrdersMaster = cloudPull; }catch(e){}
+  try{ window.ordersCloudPull = cloudPull; }catch(e){}
+  try{ window.ordersCloudPullMaster = cloudPull; }catch(e){}
 
 
   // ===== Cloud meta (why pushed/skipped, last action timestamps) =====
@@ -13272,7 +13277,8 @@ async function cloudStatusFixed(){
       var bForce=document.getElementById('btnCloudPushForce');
       var bCfg=document.getElementById('btnCloudCfg');
       if(bStatus) bStatus.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; (window.ordersCloudStatus||window.cloudStatus||window.cloudStatusOrders||window.showOrdersCloudStatus||window.showOrdersCloudStatus||window.cloudStatus).call(window); };
-      if(bPull) bPull.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; return window.cloudPullOrdersMaster ? window.cloudPullOrdersMaster({force:false}) : (window.cloudPull?window.cloudPull({force:false}):null); };
+      // Prefer the "master" implementation we expose as window.cloudPull (writes into window.S + triggers render)
+      if(bPull) bPull.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; return window.cloudPull ? window.cloudPull({force:false}) : (window.cloudPullOrdersMaster ? window.cloudPullOrdersMaster({force:false}) : null); };
       if(bPush) bPush.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; return window.cloudPushOrdersDelta ? window.cloudPushOrdersDelta({force:false}) : (window.cloudPush?window.cloudPush({force:false}):null); };
       if(bForce) bForce.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; return window.cloudPushOrdersDelta ? window.cloudPushOrdersDelta({force:true}) : (window.cloudPush?window.cloudPush({force:true}):null); };
       if(bCfg && !bCfg.onclick && window.cloudCfg) bCfg.onclick=function(ev){ try{ev&&ev.preventDefault&&ev.preventDefault();}catch(e){}; return window.cloudCfg(); };
