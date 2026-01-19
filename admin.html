@@ -13349,7 +13349,7 @@ if(!_autoEnabled){
 
       rows.push({
         // id: let DB default/gen handle; if you already have uuid in local you can map it here
-        order_no, seller_name, market, asin, product_name,
+        order_no, seller_name, market, asin, asin_norm:(asin||''), product_name, product_name_norm:(product_name||''),
         pay_status, review_status, payout_status,
         pay_screenshot_url, review_screenshot_url, payout_screenshot_url,
         review_link, note,
@@ -13368,7 +13368,7 @@ if(!_autoEnabled){
     // 2) If server says no unique constraint, fall back to batch update+insert (slower but safe, still no delete).
     async function bulkUpsert(batch){
       // must match your DB unique index/constraint
-      return sb.from(ORDER_TABLE).upsert(batch, { onConflict:'app_key,seller_name,order_no,product_name,asin', returning:'minimal' });
+      return sb.from(ORDER_TABLE).upsert(batch, { onConflict:'app_key,seller_name,order_no,product_name_norm,asin_norm', returning:'minimal' });
     }
 
     async function slowUpdateInsert(batch){
