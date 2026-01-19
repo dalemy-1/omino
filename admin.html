@@ -13496,6 +13496,7 @@ if(!_autoEnabled){
 <script>
 // PATCH5 FORCE_ORDERS_MASTER - hard override cloud ops to ops_orders_v1
 (function(){
+  try{ window.True = true; window.False = false; }catch(_e){}
   function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
   // cache-bust marker
   window.__PATCH5_FORCE_ORDERS_MASTER__ = true;
@@ -14292,305 +14293,209 @@ if(!_autoEnabled){
 </script>
 
 
+
 <script>
+// PATCH_PULLFIX_V1_LOCK (v2): hard lock cloud pull/persist to ops_orders_v1 -> IndexedDB(main_state_v1)
 (function(){
-  // PATCH_PULLFIX_V1_FINAL: 以 orders 主表为准收口：稳定分页拉取 + 正确写入 IndexedDB + 正确字段映射 + 修复 True/自动推送
-  function log(){ try{ console.log.apply(console, arguments);}catch(_){} }
-  function toast(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg);}catch(_){ try{ alert(msg);}catch(__){} } }
-  function n(v){ return (v==null?'':String(v)).trim(); }
-  function num(v){ var x=Number(v); return isFinite(x)?x:null; }
-  function djb2(str){
-    str=String(str||'');
-    var h=5381;
-    for(var i=0;i<str.length;i++){ h=((h<<5)+h)+str.charCodeAt(i); h|=0; }
-    return (h>>>0).toString(36);
-  }
-  function parseNoteJson(note){
-    if(!note) return null;
-    var s=String(note).trim();
-    if(!s) return null;
-    // 有些历史数据是 CSV 导入时的 JSON 字符串
-    if(s[0]!=='{' && s[0]!=='[') return null;
-    try{ return JSON.parse(s); }catch(_){
-      // 兼容 {"a":1,  "b":2} 中夹杂 tab/空格的情况
-      try{ return JSON.parse(s.replace(/\t/g,' ').replace(/\r/g,'').replace(/\n/g,' ')); }catch(__){ }
+  function log(){ try{ console.log.apply(console, arguments); }catch(_){} }
+  function toast(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg); }catch(_){ try{ alert(msg); }catch(__){} } }
+  function toNum(v){ var n=parseFloat(v); return Number.isFinite(n)? n : 0; }
+  function normStr(v){ return (v==null)? '' : String(v).trim(); }
+
+  function getCfg(){
+    try{ if(typeof window.getCloudCfgOrNull==='function'){ return window.getCloudCfgOrNull(); } }catch(_){}
+    // best-effort from localStorage
+    function pick(keys){
+      for(var i=0;i<keys.length;i++){
+        var k=keys[i];
+        var v='';
+        try{ v=(localStorage.getItem(k)||'').trim(); }catch(_e){}
+        if(v) return v;
+      }
+      return '';
     }
-    return null;
-  }
-
-  // 统一拿到 Supabase client
-  function getSb(){
-    try{
-      if(window.getCloudClientOrNull) return window.getCloudClientOrNull();
-      if(window._getCloudClient) return window._getCloudClient();
-    }catch(e){}
-    try{
-      if(window.supabase && window.supabase.createClient && window.CLOUD && window.CLOUD.url && window.CLOUD.anon){
-        return window.supabase.createClient(window.CLOUD.url, window.CLOUD.anon);
-      }
-    }catch(e){}
-    return null;
-  }
-  function getAppKey(){
-    try{ return (window.CLOUD && window.CLOUD.app_key) ? String(window.CLOUD.app_key) : (localStorage.getItem('APP_KEY')||'dalemy'); }catch(_){ return 'dalemy'; }
-  }
-
-  // 覆盖 cloudPullOrdersMaster：仅负责拉取 rows，返回 {orders:[...]}，不在内部 merge/改本地（避免“拉取成功但列表=0/对不上”）
-  window.cloudPullOrdersMaster = async function(opts){
-    opts=opts||{};
-    var sb=getSb();
-    if(!sb || !sb.from) throw new Error('supabase_client_missing');
-    var appKey=getAppKey();
-    var limit = opts.limit || 1000;
-    var all=[];
-    var lastU=null;
-    var lastId=null;
-    var guard=0;
-    while(true){
-      var q = sb.from('ops_orders_v1')
-        .select('*')
-        .eq('app_key', appKey)
-        .order('updated_at', {ascending:true})
-        .order('id', {ascending:true})
-        .limit(limit);
-      if(lastU && lastId){
-        // updated_at > lastU OR (updated_at = lastU AND id > lastId)
-        q = q.or('updated_at.gt.'+lastU+',and(updated_at.eq.'+lastU+',id.gt.'+lastId+')');
-      }
-      var r = await q;
-      if(r.error) throw r.error;
-      var rows = r.data || [];
-      all = all.concat(rows);
-      if(rows.length < limit) break;
-      var tail = rows[rows.length-1];
-      lastU = (tail.updated_at||tail.created_at||'');
-      lastId = (tail.id||'');
-      guard++;
-      if(guard>500) break;
-    }
-    return {ok:true, appKey:appKey, orders:all, count:all.length};
-  };
-
-  // 覆盖 applyCloudOrdersToLocal：把云端 rows 正确映射为 v6.4.2 本地结构（S.sellers/products/orders），并写入 IndexedDB 主库
-  window.applyCloudOrdersToLocal = async function(rows){
-    try{
-      var list = Array.isArray(rows)? rows : [];
-      // 使用应用的全局状态 S（v6.4.2 的单一状态源）
-      var S = window.S || (window.S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}});
-      if(!S.seq) S.seq={seller:1,product:1,order:1,batch:1};
-
-      // 现有映射（用于稳定 id，避免“卖家/产品对不上”）
-      var sellerByName = new Map();
-      (S.sellers||[]).forEach(function(s){ if(s && s.name) sellerByName.set(String(s.name), s); });
-
-      var prodByKey = new Map();
-      (S.products||[]).forEach(function(p){
-        if(!p) return;
-        var k=[p.name||'', p.asin||'', p.market||'', p.sellerId||''].join('||');
-        prodByKey.set(k, p);
-      });
-
-      // 订单 key -> order
-      var orderByKey = new Map();
-      (S.orders||[]).forEach(function(o){
-        if(!o) return;
-        var ok=[o.sellerId||'', o.orderId||'', o.asin||''].join('::');
-        if(ok!=='::') orderByKey.set(ok, o);
-      });
-
-      function ensureSeller(name){
-        name=String(name||'').trim();
-        if(!name) return null;
-        var s=sellerByName.get(name);
-        if(s) return s;
-        var id='S|'+djb2(name);
-        s={id:id, name:name};
-        (S.sellers||(S.sellers=[])).push(s);
-        sellerByName.set(name, s);
-        return s;
-      }
-      function ensureProduct(pname, asin, market, sellerId, reviewType, discount){
-        pname=String(pname||'').trim();
-        asin=String(asin||'').trim();
-        market=String(market||'').trim();
-        sellerId=String(sellerId||'').trim();
-        var k=[pname, asin, market, sellerId].join('||');
-        var p=prodByKey.get(k);
-        if(p) return p;
-        var id='P|'+djb2(k);
-        p={id:id, name:pname, asin:asin, market:market, sellerId:sellerId, reviewType:reviewType||'TEXT', discount:discount!=null?discount:0, remark:''};
-        (S.products||(S.products=[])).push(p);
-        prodByKey.set(k,p);
-        return p;
-      }
-
-      var added=0, updated=0;
-
-      list.forEach(function(r){
-        if(!r) return;
-        var sellerName=r.seller_name;
-        var orderNo=r.order_no;
-        if(!sellerName || !orderNo) return;
-
-        var noteJ = parseNoteJson(r.note)||{};
-        // 统一取字段：优先新列，其次 note JSON
-        var reviewReq = r.review_req!=null ? r.review_req : (noteJ.review_req!=null?noteJ.review_req: (r.review_type||r.reviewReq||''));
-        var unitPrice = r.unit_price!=null ? r.unit_price : (noteJ.unit_price!=null?noteJ.unit_price:null);
-        var fxRate = r.fx_rate!=null ? r.fx_rate : (noteJ.fx_rate!=null?noteJ.fx_rate:null);
-        var tax = r.tax!=null ? r.tax : (noteJ['税']!=null?noteJ['税']:null);
-        var sellerDiscount = r.seller_discount!=null ? r.seller_discount : (noteJ['卖家折扣']!=null?noteJ['卖家折扣']:null);
-        var buyerCommission = r.buyer_commission!=null ? r.buyer_commission : (noteJ['买手佣金']!=null?noteJ['买手佣金']:null);
-        var actualAmount = r.actual_amount!=null ? r.actual_amount : (noteJ['实际金额']!=null?noteJ['实际金额']:null);
-        var principalAmount = r.principal_amount!=null ? r.principal_amount : (noteJ['本金金额']!=null?noteJ['本金金额']:null);
-        var orderCommission = r.order_commission!=null ? r.order_commission : (noteJ['下单佣金']!=null?noteJ['下单佣金']:null);
-        var reviewCommission = r.review_commission!=null ? r.review_commission : (noteJ['上评佣金']!=null?noteJ['上评佣金']:null);
-
-        var s = ensureSeller(sellerName);
-        var sellerId = s ? s.id : '';
-        var p = ensureProduct(r.product_name||'', r.asin||'', r.market||'', sellerId, reviewReq||'TEXT', num(sellerDiscount)||0);
-
-        var ok=[sellerId, String(orderNo).trim(), String(r.asin||'').trim()].join('::');
-        var o = orderByKey.get(ok);
-
-        var createdAt = r.created_at ? Date.parse(r.created_at) : Date.now();
-        var updatedAt = r.updated_at ? Date.parse(r.updated_at) : createdAt;
-
-        if(!o){
-          var oid='O|'+djb2(ok+'||'+(r.product_name||'')+'||'+(r.asin||''));
-          o={
-            id: oid,
-            orderId: String(orderNo).trim(),
-            date: '',
-            sellerId: sellerId,
-            productId: p ? p.id : '',
-            market: String(r.market||'').trim(),
-            currency: '',
-            amount: num(unitPrice)!=null?num(unitPrice):(num(actualAmount)!=null?num(actualAmount):null),
-            discount: num(sellerDiscount),
-            asin: String(r.asin||'').trim(),
-            note: '',
-            reviewReq: String(reviewReq||'TEXT'),
-            review: {status:String(r.review_status||'PENDING'), date:'', link:String(r.review_link||''), note:'', doneType:''},
-            principal: {settled:(String(r.pay_status||'PENDING')==='DONE'), batchId:'', fx:num(fxRate), amountCny:num(principalAmount)},
-            commission: {settled:(String(r.payout_status||'PENDING')==='DONE'), batchId:'', amountCny:num(reviewCommission)},
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            // 扩展字段（不影响旧 UI，但后续用于结算/统计）
-            ext: {
-              unit_price: num(unitPrice),
-              fx_rate: num(fxRate),
-              tax: num(tax),
-              seller_discount: num(sellerDiscount),
-              buyer_commission: num(buyerCommission),
-              actual_amount: num(actualAmount),
-              principal_amount: num(principalAmount),
-              order_commission: num(orderCommission),
-              review_commission: num(reviewCommission),
-            }
-          };
-          (S.orders||(S.orders=[])).push(o);
-          orderByKey.set(ok,o);
-          added++;
-        }else{
-          // 只在云端更新更“新”时覆盖关键字段，避免本地刚编辑被回滚
-          if(updatedAt && (!o.updatedAt || updatedAt > o.updatedAt+1000)){
-            o.sellerId = sellerId;
-            o.productId = p ? p.id : o.productId;
-            o.market = String(r.market||'').trim();
-            o.asin = String(r.asin||'').trim();
-            o.reviewReq = String(reviewReq||o.reviewReq||'TEXT');
-            o.review = o.review||{status:'PENDING',date:'',link:'',note:'',doneType:''};
-            o.review.status = String(r.review_status||o.review.status||'PENDING');
-            if(r.review_link) o.review.link = String(r.review_link);
-            o.principal = o.principal||{settled:false,batchId:'',fx:null,amountCny:null};
-            o.principal.settled = (String(r.pay_status||'PENDING')==='DONE');
-            if(num(fxRate)!=null) o.principal.fx = num(fxRate);
-            if(num(principalAmount)!=null) o.principal.amountCny = num(principalAmount);
-            o.commission = o.commission||{settled:false,batchId:'',amountCny:null};
-            o.commission.settled = (String(r.payout_status||'PENDING')==='DONE');
-            if(num(reviewCommission)!=null) o.commission.amountCny = num(reviewCommission);
-            if(num(unitPrice)!=null) o.amount = num(unitPrice);
-            if(num(sellerDiscount)!=null) o.discount = num(sellerDiscount);
-            o.updatedAt = updatedAt;
-            updated++;
-          }
-        }
-      });
-
-      // 写入 IndexedDB 主库（kv: MAIN_STATE_KEY -> S）
-      try{
-        if(window.idbSet && window.MAIN_STATE_KEY){
-          await window.idbSet(window.MAIN_STATE_KEY, S);
-        }else if(window._idbSetAnyKv && window.MAIN_DB && window.MAIN_STORE && window.MAIN_STATE_KEY){
-          await window._idbSetAnyKv(window.MAIN_DB, window.MAIN_STORE, window.MAIN_STATE_KEY, S);
-        }
-      }catch(e){ log('[PATCH_PULLFIX_V1_FINAL] idb write failed', e); }
-
-      // 强制刷新 UI（确保“提示拉取成功但列表=0”不会发生）
-      try{ if(window.render) window.render(); }catch(_){}
-      try{ if(window.updateDashboard) window.updateDashboard(); }catch(_){}
-
-      return {ok:true, cloudCount:list.length, added:added, updated:updated};
-    }catch(e){
-      log('[PATCH_PULLFIX_V1_FINAL] apply failed', e);
-      throw e;
-    }
-  };
-
-  // 修复 True / 补齐推送字段：避免自动推送报错，同时把扩展字段也推上云端
-  if(typeof window.cloudRowFromLocal==='function'){
-    // 若已有同名函数，下面会覆盖它
-  }
-  window.cloudRowFromLocal = function(o){
-    var S = window.S || {sellers:[],products:[],orders:[]};
-    function sellerById(id){ return (S.sellers||[]).find(function(s){return s.id===id;})||{name:''}; }
-    function productById(id){ return (S.products||[]).find(function(p){return p.id===id;})||{name:o.productName||'',asin:o.asin||'',market:o.market||''}; }
-    var seller = sellerById(o.sellerId);
-    var prod = productById(o.productId);
-    var seller_name = n(seller.name);
-    var order_no = n(o.orderId||o.orderNo||'');
-    var market = n(o.market||prod.market||'');
-    var asin = n(o.asin||prod.asin||'') || null;
-    var product_name = n(prod.name||o.productName||'') || null;
-
-    var pay_status = (o.principal && o.principal.settled) ? 'DONE' : (o.payStatus||o.principalStatus||'PENDING');
-    var review_status = (o.review && o.review.status) ? o.review.status : (o.reviewStatus||'PENDING');
-    var payout_status = (o.commission && o.commission.settled) ? 'DONE' : (o.payoutStatus||'PENDING');
-
-    var ext = (o.ext||{});
-    var row = {
-      app_key: getAppKey(),
-      seller_name: seller_name,
-      order_no: order_no,
-      market: market,
-      asin: asin,
-      product_name: product_name,
-      pay_status: String(pay_status||'PENDING'),
-      review_status: String(review_status||'PENDING'),
-      payout_status: String(payout_status||'PENDING'),
-      review_link: (o.review && o.review.link) ? n(o.review.link) || null : (n(o.reviewLink)||null),
-      review_req: n(o.reviewReq||ext.review_req||prod.reviewType||'') || null,
-      unit_price: (o.amount!=null?num(o.amount): (ext.unit_price!=null?num(ext.unit_price):null)),
-      fx_rate: (o.principal && o.principal.fx!=null?num(o.principal.fx): (ext.fx_rate!=null?num(ext.fx_rate):null)),
-      seller_discount: (o.discount!=null?num(o.discount): (ext.seller_discount!=null?num(ext.seller_discount):null)),
-      buyer_commission: (ext.buyer_commission!=null?num(ext.buyer_commission):null),
-      tax: (ext.tax!=null?num(ext.tax):null),
-      actual_amount: (ext.actual_amount!=null?num(ext.actual_amount):null),
-      principal_amount: (o.principal && o.principal.amountCny!=null?num(o.principal.amountCny): (ext.principal_amount!=null?num(ext.principal_amount):null)),
-      order_commission: (ext.order_commission!=null?num(ext.order_commission):null),
-      review_commission: (o.commission && o.commission.amountCny!=null?num(o.commission.amountCny): (ext.review_commission!=null?num(ext.review_commission):null)),
-      note: n(o.note||'') || null,
-      updated_at: new Date(o.updatedAt||Date.now()).toISOString()
+    return {
+      url: pick(['OPS_CLOUD_URL','SUPABASE_URL','NEXT_PUBLIC_SUPABASE_URL','SUPABASE_PROJECT_URL']),
+      anon: pick(['OPS_CLOUD_ANON_KEY','SUPABASE_ANON_KEY','NEXT_PUBLIC_SUPABASE_ANON_KEY','SUPABASE_KEY','SUPABASE_ANON']),
+      app_key: pick(['OPS_CLOUD_APPKEY','OPS_CLOUD_APP_KEY','OPS_APP_KEY','APP_KEY','OPS_SYNC_APPKEY','OPS_SYNC_APP_KEY']) || 'dalemy'
     };
-    return row;
-  };
+  }
 
-  // 关闭旧的自动推送定时器（避免多实例/并发造成 undefined 行为）
-  try{
-    window.scheduleAutoPushOrders = function(){ return; };
-  }catch(_){}
+  function getClient(){
+    try{ if(typeof window.getCloudClientOrNull==='function'){ var c=window.getCloudClientOrNull(); if(c && typeof c.from==='function') return c; } }catch(_){}
+    try{
+      if(window.supabase && typeof window.supabase.createClient==='function'){
+        var cfg=getCfg();
+        if(cfg.url && cfg.anon) return window.supabase.createClient(cfg.url, cfg.anon);
+      }
+    }catch(e){ log('[PATCH_PULLFIX_V1_LOCK] createClient failed', e); }
+    return null;
+  }
 
-  log('[PATCH_PULLFIX_V1_FINAL] loaded');
+  async function robustCloudPull(){
+    var cfg=getCfg();
+    var client=getClient();
+    if(!client){ toast('云端未配置：请先点【云端设置】'); return {ok:false, err:'no_client'}; }
+    var appKey=(cfg.app_key||cfg.app||'dalemy').trim();
+
+    // Build local state container
+    var S = window.S || window.state || { sellers:[], products:[], orders:[], batches:[], seq:{seller:1,product:1,order:1,batch:1} };
+    S.sellers = []; S.products = []; S.orders = []; S.batches = S.batches || [];
+    S.seq = S.seq || {seller:1,product:1,order:1,batch:1};
+
+    var pageSize = 1000;
+    var lastId = '';
+    var all = [];
+
+    while(true){
+      var q = client.from('ops_orders_v1').select('*').eq('app_key', appKey).order('id', {ascending:true}).limit(pageSize);
+      if(lastId) q = q.gt('id', lastId);
+      var res = await q;
+      if(res.error) throw res.error;
+      var rows = res.data || [];
+      if(!rows.length) break;
+      all = all.concat(rows);
+      lastId = rows[rows.length-1].id;
+      if(rows.length < pageSize) break;
+      // safety: avoid infinite loops
+      if(all.length > 200000) break;
+    }
+
+    // sellers
+    var sellerSet = new Set();
+    for(var i=0;i<all.length;i++){
+      var sn = normStr(all[i].seller_name);
+      if(sn) sellerSet.add(sn);
+    }
+    S.sellers = Array.from(sellerSet).map(function(name){ return {id:name, name:name}; });
+
+    // products (minimal)
+    var prodMap = new Map();
+    function prodKey(r){
+      var name = normStr(r.product_name);
+      var asin = normStr(r.asin);
+      var market = normStr(r.market);
+      var seller = normStr(r.seller_name);
+      if(!name && !asin) return '';
+      return [name, asin, market, seller].join('|');
+    }
+    for(var j=0;j<all.length;j++){
+      var r=all[j];
+      var k=prodKey(r);
+      if(!k || prodMap.has(k)) continue;
+      prodMap.set(k, {
+        id: 'P|' + k,
+        name: normStr(r.product_name),
+        asin: normStr(r.asin),
+        market: normStr(r.market),
+        sellerId: normStr(r.seller_name),
+        reviewType: normStr(r.review_req || r.review_type) || 'TEXT',
+        discount: toNum(r.seller_discount),
+        buyerCommission: toNum(r.buyer_commission),
+        remark: ''
+      });
+    }
+    S.products = Array.from(prodMap.values());
+
+    // orders
+    function pickProd(r){
+      var k=prodKey(r);
+      return k ? prodMap.get(k) : null;
+    }
+
+    S.orders = all.map(function(r){
+      var seller = normStr(r.seller_name);
+      var prod = pickProd(r);
+      var oid = 'O|' + normStr(r.id);
+      var createdAt = r.created_at ? Date.parse(r.created_at) : Date.now();
+      var updatedAt = r.updated_at ? Date.parse(r.updated_at) : createdAt;
+      var o = {
+        id: oid,
+        orderId: normStr(r.order_no),
+        sellerId: seller,
+        productId: prod ? prod.id : '',
+        market: normStr(r.market),
+        asin: normStr(r.asin),
+        amount: toNum(r.unit_price),
+        discount: toNum(r.seller_discount),
+        buyerCommission: toNum(r.buyer_commission),
+        reviewType: normStr(r.review_req) || (prod? prod.reviewType : 'TEXT') || 'TEXT',
+        reviewStatus: normStr(r.review_status) || 'PENDING',
+        payoutStatus: normStr(r.payout_status) || 'PENDING',
+        payStatus: normStr(r.pay_status) || 'PENDING',
+        reviewLink: normStr(r.review_link),
+        note: normStr(r.note),
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        // keep extra financial fields for later UI expansion
+        ext: {
+          tax: toNum(r.tax),
+          actualAmount: toNum(r.actual_amount),
+          fxRate: toNum(r.fx_rate),
+          principalAmount: toNum(r.principal_amount),
+          orderCommission: toNum(r.order_commission),
+          reviewCommission: toNum(r.review_commission),
+          expectedReceive: toNum(r.expected_receive),
+          payoutAmount: toNum(r.payout_amount)
+        }
+      };
+      // align with existing calc paths
+      o.principal = { settled:false, batchId:'', amountCny: o.ext.principalAmount, fx: o.ext.fxRate };
+      o.commission = { settled:false, batchId:'', amountCny: (o.ext.orderCommission + o.ext.reviewCommission) };
+      return o;
+    });
+
+    // expose aliases
+    window.S = S;
+    window.state = S;
+
+    // persist
+    try{ if(typeof idbSet==='function' && typeof MAIN_STATE_KEY!=='undefined'){ await idbSet(MAIN_STATE_KEY, S); } }catch(e){ log('[PATCH_PULLFIX_V1_LOCK] idbSet failed', e); }
+    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(S)); }catch(_e){}
+
+    // render
+    try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(_e){}
+    try{ if(typeof window.render==='function') window.render(); }catch(_e){}
+
+    toast('云端拉取完成：'+S.orders.length+' 条订单（ops_orders_v1）');
+    return {ok:true, count:S.orders.length};
+  }
+
+  // hard override entry points
+  window.robustCloudPull = robustCloudPull;
+  window.cloudPull = function(){ return robustCloudPull(); };
+
+  // disable legacy snapshot pull/push (prevents reload & empty normalization)
+  try{ if(window.__cloudV30__){ window.__cloudV30__.cloudPullV30=function(){ toast('已切换为订单主表模式：请使用【云端拉取】'); }; window.__cloudV30__.cloudPushV30=function(){ toast('已切换为订单主表模式：请使用【云端推送】'); }; } }catch(_e){}
+
+  // disable auto-push scheduler if any
+  try{ window.scheduleAutoPushOrders = function(){}; }catch(_e){}
+
+  function bindHard(){
+    function bindEl(el){
+      if(!el) return;
+      try{ el.onclick = null; }catch(_e){}
+      el.addEventListener('click', function(ev){
+        ev.preventDefault();
+        ev.stopPropagation();
+        ev.stopImmediatePropagation();
+        robustCloudPull();
+      }, true);
+    }
+    bindEl(document.getElementById('btnCloudPull'));
+    bindEl(document.getElementById('btnCloudPull2'));
+
+    // bind by text fallback
+    var nodes=[].slice.call(document.querySelectorAll('button,a'));
+    nodes.forEach(function(el){
+      var t=(el.innerText||el.textContent||'').replace(/\s+/g,'').trim();
+      if(t==='云端拉取') bindEl(el);
+    });
+
+    log('[PATCH_PULLFIX_V1_LOCK] bound pull buttons');
+  }
+
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bindHard); else bindHard();
 })();
 </script>
 </body></html>
