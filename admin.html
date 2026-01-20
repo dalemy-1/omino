@@ -12071,13 +12071,13 @@ async function cloudStatusFixed(){
 </script>
 
 <script>
-// ===== Cloud Orders v1 (Plan B): ops_orders_v1 as immutable archive (no delete from UI) =====
+// ===== Cloud Orders v1 (Plan B): ops_orders_v2 as immutable archive (no delete from UI) =====
 // 目标：
 // 1) 云端永不因页面操作被“清空”（仅 INSERT / UPDATE，不做 DELETE）。
 // 2) 本地同步时会主动拉取云端订单，云端新增也能拉回本地。
 // 3) 默认安全：本地订单=0 时禁止推送（除非“强制推送”）。
 (function(){
-  const ORDER_TABLE = 'ops_orders_v1';
+  const ORDER_TABLE = 'ops_orders_v2';
   const AUTOPUSH_KEY = 'OPS_CLOUD_AUTOPUSH';
 
   function toast2(msg){
@@ -12153,7 +12153,7 @@ async function cloudStatusFixed(){
   }
 
   function _upsertLocalOrder(localState, row){
-    // Map ops_orders_v1 row -> v6.4.2 order object
+    // Map ops_orders_v2 row -> v6.4.2 order object
     const U = window.U || {};
     const orderNo = _safeStr(row.order_no);
     if(!orderNo) return false;
@@ -12247,7 +12247,7 @@ async function cloudStatusFixed(){
         .select('id', { count:'exact', head:true })
 	        .eq('app_key', appKey);
       if(error) throw error;
-      alert('云端订单归档状态（ops_orders_v1）\n\n' +
+      alert('云端订单归档状态（ops_orders_v2）\n\n' +
         '本地订单：' + localOrders + '\n' +
         '云端订单：' + (count||0) + '\n' +
 	        'app_key：' + appKey + '\n\n' +
@@ -12503,7 +12503,7 @@ async function cloudStatusFixed(){
 </script>
 
 <script>
-// PATCH5 FORCE_ORDERS_MASTER - hard override cloud ops to ops_orders_v1
+// PATCH5 FORCE_ORDERS_MASTER - hard override cloud ops to ops_orders_v2
 (function(){
   function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
   // cache-bust marker
@@ -12524,7 +12524,7 @@ async function cloudStatusFixed(){
     var sb=getSb();
     if(!sb || !sb.from) throw new Error("supabase_client_missing");
     var appKey=getAppKey();
-    var q=sb.from("ops_orders_v1").select("id", { count: "exact", head: true }).eq("app_key", appKey);
+    var q=sb.from("ops_orders_v2").select("id", { count: "exact", head: true }).eq("app_key", appKey);
     var r=await q;
     if(r.error) throw r.error;
     return {appKey:appKey, count:r.count||0};
@@ -12538,7 +12538,7 @@ async function cloudStatusFixed(){
     try{
       var res=await countOrders();
       var lines=[];
-      lines.push("云端订单归档状态（ops_orders_v1）");
+      lines.push("云端订单归档状态（ops_orders_v2）");
       lines.push("PATCH5=ON");
       lines.push("app_key="+res.appKey);
       lines.push("云端订单="+res.count);
@@ -12629,7 +12629,7 @@ async function cloudStatusFixed(){
     var appKey=getAppKey();
     var sb=ensureClient();
     if(!sb || !sb.from) throw new Error('supabase_client_missing');
-    var r = await sb.from('ops_orders_v1').select('id', { count: 'exact', head: true }).eq('app_key', appKey);
+    var r = await sb.from('ops_orders_v2').select('id', { count: 'exact', head: true }).eq('app_key', appKey);
     if(r.error) throw r.error;
     return {appKey: appKey, count: r.count||0};
   }
@@ -12643,7 +12643,7 @@ async function cloudStatusFixed(){
     try{
       var res = await countOrders();
       showModal([
-        '云端订单归档状态（ops_orders_v1）',
+        '云端订单归档状态（ops_orders_v2）',
         'PATCH7=ON',
         'app_key='+res.appKey,
         '云端订单='+res.count
@@ -12765,7 +12765,7 @@ async function cloudStatusFixed(){
     }
 
     function cloudRowFromLocal(o){
-      // map local order -> ops_orders_v1 row
+      // map local order -> ops_orders_v2 row
       var seller = (S.sellers||[]).find(function(s){ return s.id===o.sellerId; }) || {name:''};
       var prod = (S.products||[]).find(function(p){ return p.id===o.productId; }) || {name:o.productName||'', asin:o.asin||'', market:o.market||''};
       var seller_name = norm(seller.name);
@@ -12815,7 +12815,7 @@ async function cloudStatusFixed(){
       var sb=getSb();
       if(!sb || !sb.from) throw new Error('supabase_client_missing');
       var appKey=getAppKey();
-      var q=sb.from('ops_orders_v1').select('id', {count:'exact', head:true}).eq('app_key', appKey);
+      var q=sb.from('ops_orders_v2').select('id', {count:'exact', head:true}).eq('app_key', appKey);
       var r=await q;
       if(r.error) throw r.error;
       return {appKey:appKey, count:r.count||0};
@@ -12833,7 +12833,7 @@ async function cloudStatusFixed(){
       while(true){
         var from = page*limit;
         var to = from+limit-1;
-        var q = sb.from('ops_orders_v1')
+        var q = sb.from('ops_orders_v2')
           .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,created_at,updated_at')
           .eq('app_key', appKey)
           .order('created_at', {ascending:true})
@@ -12937,14 +12937,14 @@ async function cloudStatusFixed(){
       for(var i=0;i<rows.length;i+=chunk){
         var part = rows.slice(i, i+chunk);
         // onConflict needs match your unique index / constraint
-        var r = await sb.from('ops_orders_v1').upsert(part, {
+        var r = await sb.from('ops_orders_v2').upsert(part, {
           onConflict: 'app_key,seller_name,order_no,product_name_norm,asin_norm',
           ignoreDuplicates: false
         });
         if(r.error){
           // fallback: try older constraint
           warn('upsert failed, fallback onConflict app_key,seller_name,order_no', r.error);
-          var r2 = await sb.from('ops_orders_v1').upsert(part, {
+          var r2 = await sb.from('ops_orders_v2').upsert(part, {
             onConflict: 'app_key,seller_name,order_no',
             ignoreDuplicates: false
           });
@@ -12974,7 +12974,7 @@ async function cloudStatusFixed(){
               ev && ev.preventDefault && ev.preventDefault();
               ev && ev.stopPropagation && ev.stopPropagation();
               try{
-                toast && toast('云端拉取：开始（订单主库 ops_orders_v1）');
+                toast && toast('云端拉取：开始（订单主库 ops_orders_v2）');
               }catch(_){}
               try{
                 var res = await cloudPullOrdersMaster({});
@@ -13009,7 +13009,7 @@ async function cloudStatusFixed(){
               ev && ev.stopPropagation && ev.stopPropagation();
               try{
                 var r = await cloudCount();
-                alert('云端订单主库状态 (ops_orders_v1)\nPATCH9=ON\napp_key='+r.appKey+'\n云端订单='+r.count);
+                alert('云端订单主库状态 (ops_orders_v2)\nPATCH9=ON\napp_key='+r.appKey+'\n云端订单='+r.count);
               }catch(e){
                 alert('云端状态失败：'+(e && e.message ? e.message : e));
               }
@@ -13098,9 +13098,9 @@ async function cloudStatusFixed(){
 
 
 <script>
-/* ===================== ORDERS MASTER SYNC V2 (ops_orders_v1) =====================
+/* ===================== ORDERS MASTER SYNC V2 (ops_orders_v2) =====================
    - Removes legacy snapshot sync interceptors to avoid 'click no response'
-   - Cloud buttons drive ops_orders_v1 pull/push
+   - Cloud buttons drive ops_orders_v2 pull/push
    - Writes to IndexedDB ops_v642_main/kv/main_state_v1 via saveNow()
 ================================================================================== */
 (function(){
@@ -13124,7 +13124,7 @@ async function cloudStatusFixed(){
     return '';
   }
 
-  // Pull all orders (paged) from ops_orders_v1 and merge into local S
+  // Pull all orders (paged) from ops_orders_v2 and merge into local S
   async function pullOrdersMaster(){
     const sb = getSb();
     if(!sb || !sb.from) throw new Error('supabase_client_missing');
@@ -13136,7 +13136,7 @@ async function cloudStatusFixed(){
     let all = [];
     for(;;){
       const to = from + pageSize - 1;
-      const q = sb.from('ops_orders_v1')
+      const q = sb.from('ops_orders_v2')
         .select('id,app_key,seller_name,order_no,market,product_name,asin,pay_status,review_status,payout_status,review_req,unit_price,fx_rate,note,review_link,created_at,updated_at')
         .eq('app_key', appKey)
         .order('updated_at', { ascending: false })
@@ -13246,7 +13246,7 @@ async function cloudStatusFixed(){
   }
 
   async function cloudPull(){
-    ui('云端拉取：开始（订单主表 ops_orders_v1）');
+    ui('云端拉取：开始（订单主表 ops_orders_v2）');
     const res = await pullOrdersMaster();
     const stats = applyRows(res.orders);
     ui('云端拉取：完成，写入本地 '+res.orders.length+' 条订单（新增 '+stats.added+' / 更新 '+stats.updated+'）');
@@ -13331,12 +13331,12 @@ async function cloudStatusFixed(){
 
 <script>
 /* ===== CLOUD PULL OVERRIDE (v5 clean) =====
-   Goal: Cloud (Supabase ops_orders_v1) is the single source of truth.
+   Goal: Cloud (Supabase ops_orders_v2) is the single source of truth.
    Strategy: Pull full dataset then rebuild local state S by overwrite (NO MERGE).
    Also: Deterministic IDs; disable legacy normalize pipeline during rebuild.
 */
 (function(){
-  const ORDER_TABLE = 'ops_orders_v1';
+  const ORDER_TABLE = 'ops_orders_v2';
 
   function ui(msg){
     try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg); }
