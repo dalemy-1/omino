@@ -13803,4 +13803,243 @@ async function cloudStatusFixed(){
 </script>
 
 
+
+<script>
+/* ==== PATCH_V2PUSH_PULL_FINAL (2026-01-21) ====
+   - 强制 cloudPull/cloudPush/forcePush 使用 public.ops_orders_v2
+   - 拉取：覆盖式重建本地 S（NO MERGE），确保稳定不漂移
+   - 推送：从本地 S.orders 生成 v2 rows，显式写入 app_key，使用 upsert(onConflict=唯一键)
+*/
+(function(){
+  try{ console.log('[PATCH_V2_FINAL] loaded'); }catch(e){}
+
+  function cfg(){
+    return (window.__CLOUD_CFG__ || window.cloudCfg || window.CLOUD_CFG || window.syncCfg || {}) || {};
+  }
+  function appKey(){
+    const c = cfg();
+    return (c.appKey || c.app_key || c.app || window.APP_KEY || 'dalemy') + '';
+  }
+  function client(){
+    const c = cfg();
+    const url = c.url || c.supabaseUrl || c.supabase_url || window.SUPABASE_URL || window.CLOUD_URL;
+    const anon = c.anon || c.anonKey || c.supabaseAnon || c.supabase_anon || window.SUPABASE_ANON || window.CLOUD_ANON;
+    if(!url || !anon) throw new Error('missing_supabase_cfg');
+    if(!window.supabase || !window.supabase.createClient) throw new Error('missing_supabase_umd');
+    return window.supabase.createClient(url, anon, { auth: { persistSession: false } });
+  }
+  const TABLE = 'ops_orders_v2';
+
+  function norm(v){ return (v==null?'':(typeof v==='string'?v:String(v))).trim(); }
+  function num(v){
+    if(v==null || v==='') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function ensureState(){
+    if(!window.S || typeof window.S!=='object') window.S={};
+    if(!Array.isArray(S.sellers)) S.sellers=[];
+    if(!Array.isArray(S.products)) S.products=[];
+    if(!Array.isArray(S.orders)) S.orders=[];
+    if(!S.seq || typeof S.seq!=='object') S.seq={seller:1,product:1,order:1,batch:1};
+    if(typeof S.seq.seller!=='number') S.seq.seller=1;
+    if(typeof S.seq.product!=='number') S.seq.product=1;
+    if(typeof S.seq.order!=='number') S.seq.order=1;
+  }
+
+  function getOrCreateSellerByName(name){
+    ensureState();
+    name = norm(name);
+    if(!name) name = 'UNKNOWN';
+    let s = S.sellers.find(x=>norm(x.name)===name);
+    if(s) return s;
+    const id = 'S' + (S.seq.seller++);
+    s = {id, name, markets:[], fx:{}, comm:{}};
+    S.sellers.push(s);
+    return s;
+  }
+
+  function getOrCreateProduct(sellerId, market, asin, pname){
+    ensureState();
+    market = norm(market);
+    asin = norm(asin);
+    pname = norm(pname);
+    if(!pname && !asin) pname = 'UNKNOWN';
+    let p = S.products.find(x =>
+      x.sellerId===sellerId &&
+      norm(x.market)===market &&
+      norm(x.asin)===asin &&
+      norm(x.name)===pname
+    );
+    if(p) return p;
+    const id = 'P' + (S.seq.product++);
+    p = {id, name:pname, asin:asin, market:market, discount:0, reviewType:'TEXT', sellerId:sellerId, buyerCommission:0, remark:''};
+    S.products.push(p);
+    return p;
+  }
+
+  function toLocalOrder(row){
+    ensureState();
+    const seller = getOrCreateSellerByName(row.seller_name);
+    const prod = getOrCreateProduct(seller.id, row.market, row.asin, row.product_name);
+    const oid = 'O' + (S.seq.order++);
+    const unit = num(row.unit_price);
+    const fx = num(row.fx_rate);
+    const reviewReq = norm(row.review_req);
+    const noteObj = (row.note && typeof row.note==='object') ? row.note : {};
+    return {
+      id: oid,
+      cloudId: row.id,
+      sellerId: seller.id,
+      productId: prod.id,
+      orderId: norm(row.order_no),
+      market: norm(row.market),
+      asin: norm(row.asin),
+      // v6.4.2 常用字段：订单金额/汇率/回评类型
+      amount: (unit==null?0:unit),
+      fxRate: (fx==null?0:fx),
+      reviewType: reviewReq || (prod.reviewType||'TEXT'),
+      reviewStatus: norm(row.review_status||'PENDING') || 'PENDING',
+      payoutStatus: norm(row.payout_status||'PENDING') || 'PENDING',
+      note: (noteObj.note_text!=null?String(noteObj.note_text):'') || '',
+      // 便于排查
+      _cloud: { id: row.id, created_at: row.created_at, updated_at: row.updated_at }
+    };
+  }
+
+  function safeRender(){
+    try{
+      if(typeof window.render==='function') window.render();
+      else if(typeof window.R==='function') window.R();
+    }catch(e){}
+  }
+
+  async function v2PullAll(){
+    const sb = client();
+    const ak = appKey();
+    const pageSize = 1000;
+    let from = 0;
+    const all = [];
+    for(;;){
+      const to = from + pageSize - 1;
+      const {data, error} = await sb.from(TABLE)
+        .select('id,app_key,seller_name,order_no,market,asin,product_name,unit_price,fx_rate,review_req,payout_status,review_status,note,created_at,updated_at')
+        .eq('app_key', ak)
+        .order('id', {ascending:true})
+        .range(from, to);
+      if(error) throw error;
+      if(!data || data.length===0) break;
+      all.push(...data);
+      if(data.length < pageSize) break;
+      from += pageSize;
+      if(from > 300000) break;
+    }
+    // 覆盖式重建本地
+    const old = window.S;
+    window.S = { sellers:[], products:[], orders:[], batches: (old&&Array.isArray(old.batches)?old.batches:[]), settleBatches:(old&&Array.isArray(old.settleBatches)?old.settleBatches:[]), seq:{seller:1,product:1,order:1,batch:(old&&old.seq&&old.seq.batch)||1} };
+    ensureState();
+    all.forEach(r => { S.orders.push(toLocalOrder(r)); });
+    safeRender();
+    return {count: all.length};
+  }
+
+  function localOrdersToRows(){
+    ensureState();
+    const ak = appKey();
+    const rows = [];
+    const sellersById = new Map(S.sellers.map(s=>[s.id,s]));
+    const productsById = new Map(S.products.map(p=>[p.id,p]));
+    for(const o of (S.orders||[])){
+      const seller = sellersById.get(o.sellerId) || {name:''};
+      const prod = productsById.get(o.productId) || {name:norm(o.productName), asin:norm(o.asin), market:norm(o.market)};
+      const seller_name = norm(seller.name);
+      const order_no = norm(o.orderId || o.orderNo);
+      const product_name = norm(prod.name || o.productName);
+      if(!order_no) continue;
+      if(!seller_name) continue;
+      if(!product_name) continue;
+
+      const row = {
+        app_key: ak,
+        seller_name,
+        order_no,
+        market: norm(o.market || prod.market) || null,
+        asin: norm(o.asin || prod.asin) || null,
+        product_name,
+        unit_price: num(o.unit_price ?? o.unitPrice ?? o.amount ?? o.orderAmount ?? o.order_amount),
+        fx_rate: num(o.fx_rate ?? o.fxRate ?? o.fx ?? o.rate),
+        review_req: norm(o.review_req ?? o.reviewReq ?? o.reviewType ?? '') || null,
+        payout_status: norm(o.payout_status ?? o.payoutStatus ?? '') || null,
+        review_status: norm(o.review_status ?? o.reviewStatus ?? '') || null,
+        note: (function(){
+          const out = {};
+          // 统一把文本备注放 note_text
+          const t = norm(o.note);
+          if(t) out.note_text = t;
+          // 保留一些金额/计算字段，便于以后校对
+          const extraKeys = ['discount','buyerCommission','actualAmount','sellerDiscount','buyer_fee'];
+          extraKeys.forEach(k=>{
+            if(o[k]!=null && o[k]!=='' && typeof o[k]!=='object') out[k]=o[k];
+          });
+          return out;
+        })()
+      };
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  async function v2UpsertAll(force){
+    const sb = client();
+    const ak = appKey();
+    const rows = localOrdersToRows();
+    if(!rows.length){
+      alert('没有可推送的订单（本地 orders 为空或订单号缺失）。');
+      return;
+    }
+    // 批量 upsert：按唯一键
+    const onConflict = 'app_key,seller_name,order_no,product_name,asin_key';
+    const {error} = await sb.from(TABLE).upsert(rows, { onConflict });
+    if(error) throw error;
+    alert('推送成功：' + rows.length + ' 条（写入/更新）。');
+    // 拉取一次对齐（可选）
+    try{ await v2PullAll(); }catch(e){}
+  }
+
+  // ==== 强制接管按钮 ====
+  window.cloudPull = async function(){ 
+    try{
+      const r = await v2PullAll();
+      alert('云端拉取完成：' + r.count + ' 条（' + TABLE + '）');
+    }catch(e){
+      alert('云端拉取失败：' + (e && e.message ? e.message : e));
+    }
+  };
+  window.cloudPush = async function(){
+    try{ await v2UpsertAll(false); }
+    catch(e){ alert('云端推送失败：' + (e && e.message ? e.message : e)); }
+  };
+  window.cloudForcePush = async function(){
+    try{ await v2UpsertAll(true); }
+    catch(e){ alert('强制推送失败：' + (e && e.message ? e.message : e)); }
+  };
+
+  // 绑定到已有按钮（按文字匹配）
+  function bindButtons(){
+    const btns = Array.from(document.querySelectorAll('button, a')).filter(x=>x && x.textContent);
+    const byText = (t) => btns.find(b => (b.textContent||'').replace(/\s+/g,'').includes(t));
+    const bPull = byText('云端拉取') || byText('拉取');
+    const bPush = byText('云端推送') || byText('推送');
+    const bForce = byText('强制推送') || byText('强推');
+    if(bPull) bPull.onclick = ()=>window.cloudPull();
+    if(bPush) bPush.onclick = ()=>window.cloudPush();
+    if(bForce) bForce.onclick = ()=>window.cloudForcePush();
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', bindButtons);
+  else bindButtons();
+
+})();
+</script>
+
 </body></html>
