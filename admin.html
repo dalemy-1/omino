@@ -8,12 +8,7 @@
 <style>
 
 :root{
-  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text
-function shortReviewType(val){
-  const s = String(val||"");
-  // 仅用于展示：前 4 个中文（或4个字符）
-  return s.length>4 ? s.slice(0,4) : s;
-}:#111827;
+  --bg:#f4f6f9; --card:#fff; --muted:#6b7280; --text:#111827;
   --border:#e5e7eb; --primary:#2563eb; --primary2:#1d4ed8;
   --good:#16a34a; --danger:#ef4444; --warn:#f59e0b; --soft:#f9fafb;
 }
@@ -2683,6 +2678,7 @@ const U = {
   sellerName(id){ return (U.sellerById(id)||{}).name || ""; },
   productName(id){ return (U.productById(id)||{}).name || ""; },
   reviewName(k){ return (REVIEW_TYPES.find(x=>x.k===k)||{}).n || k; },
+  shortReviewType(val){ const s=String(val||''); return s.length>4 ? s.slice(0,4) : s; },
   badgeReview(status){
     if(status==="DONE") return '<span class="badge done">完成</span>';
     if(status==="WAIVED") return '<span class="badge waived">免评</span>';
@@ -13705,7 +13701,11 @@ async function cloudStatusFixed(){
       }
 
       // Persist & render
+      // IMPORTANT: prevent legacy normalizeOrders/save pipeline from mutating ids after cloud rebuild
+      const __origNormalize = window.normalizeOrders;
+      try{ window.normalizeOrders = function(){}; }catch(e){}
       try{ if(typeof saveNow==='function') await saveNow(); }catch(e){}
+      try{ window.normalizeOrders = __origNormalize; }catch(e){}
       try{ if(typeof computeSeq==='function') computeSeq(); }catch(e){}
       try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
       try{ if(typeof renderKPI==='function') renderKPI(); }catch(e){}
@@ -13721,6 +13721,41 @@ async function cloudStatusFixed(){
 
   // Override ONLY pull (keep your existing push/status implementations unless you ask otherwise)
   window.cloudPull = patchedCloudPull;
+  window.robustCloudPull = patchedCloudPull;
+  window.ordersCloudPull = patchedCloudPull;
+
+  // Rebind UI buttons that were previously bound to merge-style ordersCloudPull
+  function rebindByText(txt, fn){
+    try{
+      const btns = Array.from(document.querySelectorAll('button')).filter(b=>String(b.textContent||'').trim()===txt);
+      btns.forEach(b=>{ b.onclick = fn; });
+    }catch(e){}
+  }
+  try{
+    rebindByText('云端拉取', ()=>patchedCloudPull());
+    rebindByText('强制拉取', ()=>patchedCloudPull());
+  }catch(e){}
+
+  // ALSO override robust bindings and re-bind buttons by text to ensure this pull is used
+  window.robustCloudPull = patchedCloudPull;
+  window.ordersCloudPull = patchedCloudPull;
+  window.ordersCloudPullMaster = patchedCloudPull;
+
+  try{
+    const bindByText = (txt, fn)=>{
+      const btns = Array.from(document.querySelectorAll('button, .btn'));
+      for(const b of btns){
+        if(!b) continue;
+        const t = (b.innerText||b.textContent||'').trim();
+        if(t===txt){
+          b.onclick = (e)=>{ e && e.preventDefault && e.preventDefault(); fn(); };
+        }
+      }
+    };
+    bindByText('云端拉取', ()=>patchedCloudPull());
+    bindByText('强制拉取', ()=>patchedCloudPull());
+  }catch(e){}
+
 })();
 </script>
 
