@@ -13328,13 +13328,12 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+
 <script>
-/* ===== PATCH: Cloud Pull from ops_orders_v1 into original v6.4.2 state S (keep all legacy features) =====
-   What this patch changes:
-   - Override window.cloudPull to fetch ALL rows from public.ops_orders_v1 via Supabase REST.
-   - Stable ordering: updated_at ASC, id ASC to prevent offset漏行.
-   - Merge rows into existing S.sellers / S.products / S.orders (same behavior as CSV import).
-   - Persist using saveNow() if present (writes IndexedDB ops_v642_main/kv/main_state_v1), then render.
+/* ===== CLOUD PULL OVERRIDE (v5 clean) =====
+   Goal: Cloud (Supabase ops_orders_v1) is the single source of truth.
+   Strategy: Pull full dataset then rebuild local state S by overwrite (NO MERGE).
+   Also: Deterministic IDs; disable legacy normalize pipeline during rebuild.
 */
 (function(){
   const ORDER_TABLE = 'ops_orders_v1';
@@ -13344,26 +13343,12 @@ async function cloudStatusFixed(){
     catch(e){ try{ alert(msg); }catch(_){} }
   }
 
-  function getCfg(){
-    // Reuse the existing bootstrapCloudCfg() normalization which writes OPS_CLOUD_CFG_V1.
-    const keys=['OPS_CLOUD_CFG_V1','OPS_CLOUD_CFG','OPS_CLOUD_SUPABASE_CFG','OPS_SYNC_SUPABASE_CFG','SUPABASE_CLOUD_CFG_V1'];
-    for(const k of keys){
-      try{
-        const raw=localStorage.getItem(k);
-        if(!raw) continue;
-        const o=JSON.parse(raw);
-        const url=o.url||o.supabase_url||o.project_url;
-        const anon=o.anon||o.anon_key||o.key;
-        const app_key=o.app_key||o.appKey||o.app||o.appkey||'dalemy';
-        if(url && anon) return { url:String(url).replace(/\/$/,'') , anon:String(anon), app_key:String(app_key||'dalemy') };
-      }catch(e){}
-    }
-    // legacy fallbacks
+  function getCloudCfg(){
     try{
-      const url=localStorage.getItem('OPS_CLOUD_URL')||localStorage.getItem('SUPABASE_URL')||'';
-      const anon=localStorage.getItem('OPS_CLOUD_ANON_KEY')||localStorage.getItem('SUPABASE_ANON_KEY')||'';
-      const app_key=localStorage.getItem('OPS_CLOUD_APPKEY')||localStorage.getItem('OPS_APP_KEY')||'dalemy';
-      if(url && anon) return { url:String(url).replace(/\/$/,'') , anon:String(anon), app_key:String(app_key||'dalemy') };
+      const url = localStorage.getItem('OPS_CLOUD_URL') || localStorage.getItem('SUPABASE_URL') || '';
+      const anon = localStorage.getItem('OPS_CLOUD_ANON') || localStorage.getItem('SUPABASE_ANON') || localStorage.getItem('SUPABASE_KEY') || '';
+      const app_key = localStorage.getItem('OPS_CLOUD_APPKEY') || localStorage.getItem('OPS_APP_KEY') || 'dalemy';
+      if(url && anon) return { url:String(url).replace(/\/$/,''), anon:String(anon), app_key:String(app_key||'dalemy') };
     }catch(e){}
     return null;
   }
@@ -13391,372 +13376,171 @@ async function cloudStatusFixed(){
     return Array.isArray(r.json) ? r.json.length : 0;
   }
 
-  function parseNoteJSON(note){
+  function parseNote(note){
     if(!note) return null;
-    if(typeof note === 'object') return note;
-    const s = String(note).trim();
+    if(typeof note==='object') return note;
+    const s=String(note).trim();
     if(!s) return null;
-    // handle quoted json like "{...}"
-    const raw = (s.startsWith('"') && s.endsWith('"')) ? s.slice(1,-1) : s;
-    const t = raw.trim();
+    const raw=(s.startsWith('"') && s.endsWith('"'))?s.slice(1,-1):s;
+    const t=raw.trim();
     if(!(t.startsWith('{') && t.endsWith('}'))) return null;
     try{ return JSON.parse(t); }catch(e){ return null; }
   }
 
-  function normReviewReqToLocal(v){
-    // Local schema expects TEXT/IMAGE/VIDEO/FREE/FREE_FB/STAR or auto
-    try{ if(typeof __mapReviewReq === 'function') return __mapReviewReq(v); }catch(e){}
-    const s=String(v||'').trim();
-    if(!s) return 'auto';
-    if(s.includes('视频')) return 'VIDEO';
-    if(s.includes('图')||s.includes('图片')||s.includes('照片')) return 'IMAGE';
-    if(s.includes('免评FB')) return 'FREE_FB';
-    if(s.includes('点星')||s.toLowerCase().includes('rating')) return 'STAR';
-    if(s.includes('免评')) return 'FREE';
+  function blankState(){
+    return {
+      sellers: [], products: [], orders: [], batches: [],
+      settleDrafts: [],
+      seq: { seller: 1, product: 1, order: 1, batch: 1 },
+      meta: { cloud_master: true, last_cloud_pull_at: new Date().toISOString() }
+    };
+  }
+
+  function ensureSeller(S, name, now){
+    const n=String(name||'').trim();
+    const id='S|' + n;
+    let s=(S.sellers||[]).find(x=>String(x.id||'')===id);
+    if(s) return s;
+    s={ id, name:n||'UNKNOWN', markets:{}, createdAt: now };
+    S.sellers.push(s);
+    return s;
+  }
+
+  function normReviewReq(val){
+    const v=String(val||'').toUpperCase();
+    if(v.includes('VIDEO') || v.includes('视频')) return 'VIDEO';
+    if(v.includes('IMG') || v.includes('IMAGE') || v.includes('图片')) return 'IMAGE';
+    if(v.includes('WAIVE') || v.includes('免评')) return 'WAIVED';
     return 'TEXT';
   }
 
-  function normReviewStatusToLocal(v){
-    try{ if(typeof __mapReviewStatus === 'function') return __mapReviewStatus(v); }catch(e){}
-    const s=String(v||'').trim();
-    if(!s) return 'PENDING';
-    if(['已上评','已留评','DONE','done','已完成'].includes(s)) return 'DONE';
-    if(['免评','WAIVED','waived','已免评'].includes(s)) return 'WAIVED';
-    return 'PENDING';
+  function ensureProduct(S, sellerId, market, asin, title, reviewType, now){
+    const sid=String(sellerId||'').trim();
+    const mk=String(market||'').trim();
+    const a=String(asin||'').trim();
+    const t=String(title||'').trim();
+    const id='P|' + [sid,mk,a,t].join('|');
+    let p=(S.products||[]).find(x=>String(x.id||'')===id);
+    if(p) return p;
+    p={ id, name: t || a || id, asin:a, market:mk, sellerId:sid, reviewType: reviewType||'TEXT', discount:0, buyerCommission:0, remark:'', createdAt: now };
+    S.products.push(p);
+    return p;
   }
 
-  function truthySettled(v){
-    if(v===true) return true;
-    const s=String(v||'').trim();
-    if(!s) return false;
-    return ['已收款','已结算','已收','SETTLED','settled','PAID','paid','已返款','已返佣'].includes(s);
+  function findOrderIdx(S, cloudId){
+    const key='O|' + cloudId;
+    return (S.orders||[]).findIndex(o=>String(o.id||'')===key);
   }
 
-  function ensureSellerByName(name, now){
-    name = String(name||'').trim();
-    if(!name) name = '未命名卖家';
-    // Deterministic seller id: stable across pulls
-    const sid = 'S|' + name;
-    const hit = (S.sellers||[]).find(x=>String(x.id||'').trim()===sid || String(x.name||'').trim()===name);
-    if(hit){
-      // normalize id/name
-      hit.id = sid;
-      hit.name = name;
-      return hit;
-    }
-    const seller = { id: sid, name, market:'', fx:0, createdAt: now, remark:'(from cloud orders)' };
-    S.sellers.push(seller);
-    return seller;
-  }
-  function ensureProductByAsinOrName(asin, title, market, sellerId, reviewType, now){
-    const a = String(asin||'').trim();
-    const n = String(title||'').trim();
-    const mk = String(market||'').trim();
-    const sid = String(sellerId||'').trim();
+  function upsertOrder(S, row, now){
+    const note=parseNote(row.note)||{};
+    const cloudId=row.id;
+    const sellerName=row.seller_name || note.seller_name || note.sellerName || '';
+    const orderNo=row.order_no || note.order_no || note.orderNo || '';
+    const market=row.market || note.market || '';
+    const asin=row.asin || note.asin || '';
+    const title=row.product_name || note.product_name || note.productName || '';
+    const unitPrice=Number(row.unit_price ?? note.unit_price ?? note.price ?? 0) || 0;
+    const fxRate=Number(row.fx_rate ?? note.fx_rate ?? note.fx ?? 0) || 0;
+    const reviewReq=row.review_req ?? note.review_req ?? note.reviewReq;
+    const reviewType=normReviewReq(reviewReq);
 
-    // Deterministic product id (avoid polluted sequential/random ids)
-    const pid = 'P|' + [sid, mk, a, n].join('|');
+    const seller=ensureSeller(S, sellerName, now);
+    const product=ensureProduct(S, seller.id, market, asin, title, reviewType, now);
 
-    // Prefer exact pid match
-    let hit = (S.products||[]).find(p=>String(p.id||'')===pid);
-    if(hit) return hit;
+    const oid='O|' + cloudId;
+    const idx=findOrderIdx(S, cloudId);
 
-    // Backward compat: if some old product shares asin, re-use but normalize id to deterministic pid
-    if(a){
-      const hit2 = (S.products||[]).find(p=>String(p.asin||'').trim()===a && String(p.sellerId||'').trim()===sid && String(p.market||'').trim()===mk);
-      if(hit2){
-        hit2.id = pid;
-        hit2.name = n || hit2.name;
-        hit2.asin = a;
-        hit2.market = mk || hit2.market;
-        hit2.sellerId = sid;
-        hit2.reviewType = reviewType || hit2.reviewType || 'TEXT';
-        return hit2;
-      }
-    }
+    // Extract key business fields from note (support multiple key names)
+    const sellerDiscount = Number(note['卖家折扣'] ?? note['seller_discount'] ?? note['discount'] ?? 0) || 0;
+    const buyerComm = Number(note['下单佣金'] ?? note['buyer_commission'] ?? note['commission'] ?? 0) || 0;
 
-    const product = {
-      id: pid,
-      name: (n || (a || pid)),
-      asin: a,
-      market: mk,
-      sellerId: sid,
-      reviewType: reviewType || 'TEXT',
-      discount: 0,
-      buyerCommission: 0,
-      remark: '',
-      createdAt: now
+    const o={
+      id: oid,
+      cloudId: cloudId,
+      sellerId: seller.id,
+      sellerName: seller.name,
+      productId: product.id,
+      productName: product.name,
+      market: market,
+      orderNo: String(orderNo||'').trim(),
+      asin: asin,
+      unitPrice: unitPrice,
+      fxRate: fxRate,
+      reviewType: reviewType,
+      reviewReq: reviewReq,
+      sellerDiscount: sellerDiscount,
+      buyerCommission: buyerComm,
+      // keep raw note for future mapping
+      note: note,
+      // statuses (keep as-is; your system may render these)
+      pay_status: row.pay_status || '',
+      review_status: row.review_status || '',
+      payout_status: row.payout_status || '',
+      createdAt: row.created_at || now,
+      updatedAt: row.updated_at || now,
     };
-    S.products.push(product);
-    return product;
-  }    // fallback by name+saler
-    const n = String(title||'').trim();
-    if(n){
-      const hit2 = (S.products||[]).find(p=>p.sellerId===sellerId && String(p.name||'').trim()===n);
-      if(hit2) return hit2;
-    }
-    const pid = (window.U && U.id) ? U.id('P', S.seq.product++) : ('P'+String(S.seq.product++).padStart(4,'0'));
-    const product = {
-      id: pid,
-      name: n || (a || pid),
-      asin: a,
-      market: market || '',
-      sellerId,
-      reviewType: reviewType || 'TEXT',
-      discount: 0,
-      buyerCommission: 0,
-      remark: '',
-      createdAt: now
-    };
-    S.products.push(product);
-    return product;
-  }
 
-  function findOrderKey(sellerId, orderNo, asin){
-    try{ if(window.U && typeof U.orderKey === 'function') return U.orderKey(sellerId, orderNo, asin||''); }catch(e){}
-    return [sellerId, String(orderNo||'').trim(), String(asin||'').trim()].join('||');
-  }
-
-  function upsertOrderFromRow(row, now){
-    const note = parseNoteJSON(row.note) || {};
-
-    const sellerName = row.seller_name || note?.seller_name || note?.sellerName || '';
-    const orderNo = row.order_no || note?.order_no || note?.orderNo || '';
-    const asin = row.asin || note?.asin || '';
-    const title = row.product_name || note?.product_name || note?.productName || '';
-    const market = row.market || note?.market || '';
-
-    const seller = ensureSellerByName(sellerName, now);
-    const reviewType = normReviewReqToLocal(row.review_req ?? note?.review_req ?? note?.reviewReq);
-    const product = ensureProductByAsinOrName(asin, title, market || seller.market || '', seller.id, reviewType, now);
-
-    // Stable order id from cloud uuid (preferred)
-    const cloudId = String(row.id || note?.id || '').trim();
-    const localId = cloudId ? ('O|' + cloudId) : null;
-
-    // Stable unique key: seller + order_no + asin + product_name (do not depend on polluted productId)
-    const key = [seller.id, String(orderNo||'').trim(), String(asin||'').trim(), String(title||'').trim()].join('||');
-
-    let o = null;
-    if(localId){
-      o = (S.orders||[]).find(x => String(x.id||'')===localId || String(x.cloud_id||'')===cloudId);
-    }
-    if(!o){
-      o = (S.orders||[]).find(x => String(x.key||'')===key);
-    }
-
-    const isNew = !o;
-    if(isNew){
-      o = {
-        id: localId || ((window.U && U.id) ? U.id('O', S.seq.order++) : ('O'+String(S.seq.order++).padStart(6,'0'))),
-        cloud_id: cloudId || '',
-        key,
-        orderId: String(orderNo||'').trim(),
-        date: '',
-        sellerId: seller.id,
-        productId: product?.id || null,
-        market: market || product?.market || '',
-        currency: (window.U && U.marketToCurrency) ? U.marketToCurrency(market || product?.market || '') : '',
-        amount: 0,
-        discount: 0,
-        asin: String(asin||'').trim(),
-        note: '',
-        reviewReq: reviewType,
-        review: { status: 'PENDING', date: '', link: '', note: '', doneType: '' },
-        principal: { settled: false, batchId: '', fx: 0, amountCny: 0 },
-        commission: { settled: false, batchId: '', amountCny: 0 },
-        createdAt: now,
-        updatedAt: now,
-      };
-      S.orders.push(o);
-    }
-
-    // Deterministic, do not merge via polluted ids
-    o.cloud_id = cloudId || o.cloud_id || '';
-    o.key = key;
-    o.orderId = String(orderNo||o.orderId||'').trim();
-    o.sellerId = seller.id;
-    o.productId = product?.id || o.productId;
-    o.market = market || o.market || '';
-    o.currency = (window.U && U.marketToCurrency) ? U.marketToCurrency(o.market||'') : (o.currency||'');
-    o.asin = String(asin||o.asin||'').trim();
-    o.reviewReq = reviewType || o.reviewReq || 'auto';
-
-    // amounts
-    const unitPrice = row.unit_price ?? note?.unit_price ?? note?.unitPrice;
-    if(unitPrice!=null && unitPrice!=='' && isFinite(Number(unitPrice))) o.amount = Number(unitPrice);
-
-    // fx (store on principal.fx for downstream logic)
-    const fx = row.fx_rate ?? note?.fx_rate ?? note?.fxRate;
-    if(fx!=null && fx!=='' && isFinite(Number(fx))) o.principal.fx = Number(fx);
-
-    // discount / buyer commission from note (your current schema stores these in note)
-    const disc = note?.['卖家折扣'] ?? note?.discount ?? note?.seller_discount ?? note?.sellerDiscount;
-    if(disc!=null && disc!=='' && isFinite(Number(disc))) {
-      o.discount = Number(disc);
-      try{ if(product) product.discount = Number(disc); }catch(e){}
-    }
-    const bc = note?.['下单佣金'] ?? note?.buyer_commission ?? note?.buyerCommission ?? note?.commission;
-    if(bc!=null && bc!=='' && isFinite(Number(bc))) {
-      try{ if(product) product.buyerCommission = Number(bc); }catch(e){}
-    }
-
-    // review status
-    const rs = normReviewStatusToLocal(row.review_status ?? note?.review_status ?? note?.reviewStatus);
-    if(!o.review) o.review = { status:'PENDING', date:'', link:'', note:'', doneType:'' };
-    if(rs) o.review.status = rs;
-
-    // review link (best-effort)
-    const rlink = row.review_link ?? note?.review_link ?? note?.reviewLink;
-    if(rlink!=null && String(rlink).trim()) o.review.link = String(rlink).trim();
-
-    // settle statuses
-    const payStatus = row.pay_status ?? note?.pay_status ?? note?.principal_status;
-    const payoutStatus = row.payout_status ?? note?.payout_status ?? note?.commission_status;
-    if(payStatus!=null) o.principal.settled = truthySettled(payStatus);
-    if(payoutStatus!=null) o.commission.settled = truthySettled(payoutStatus);
-
-    // keep readable note summary (do not overwrite existing local notes if you edited it)
-    if(isNew && row.note!=null){
-      try{ o.note = (typeof row.note==='string') ? String(row.note) : JSON.stringify(row.note); }catch(e){ o.note = String(row.note); }
-    }
-
-    o.updatedAt = now;
-  }
-
-  async function pullAllRows(cfg){
-    const page = 1000;
-    let from = 0;
-    const all = [];
-
-    const select = [
-      'id','app_key','seller_name','order_no','market','product_name','asin',
-      'pay_status','review_status','payout_status',
-      'review_req','unit_price','fx_rate','note','updated_at'
-    ].join(',');
-
-    while(true){
-      const to = from + page - 1;
-      const path = `${ORDER_TABLE}?select=${select}`
-        + `&app_key=eq.${encodeURIComponent(cfg.app_key)}`
-        + `&order=updated_at.asc,id.asc`;
-
-      const r = await sbFetch(cfg, path, from, to, false);
-      if(!r.ok) throw new Error(`云端拉取失败：HTTP ${r.status} ${r.text||''}`);
-      const rows = Array.isArray(r.json) ? r.json : [];
-      all.push.apply(all, rows);
-      ui(`云端拉取中… ${all.length}（Range ${from}-${to}）`);
-      if(rows.length < page) break;
-      from += page;
-      // small yield
-      await new Promise(res=>setTimeout(res, 8));
-    }
-
-    return all;
+    if(idx>=0) S.orders[idx]=o; else S.orders.push(o);
   }
 
   async function patchedCloudPull(){
-    const cfg = getCfg();
-    if(!cfg) return ui('未设置云端（请先点“云端设置”填写 Supabase URL / Anon Key）。');
+    const cfg=getCloudCfg();
+    if(!cfg){ ui('请先设置云端（Supabase URL + anon key + app_key）'); return; }
 
-    // Safety: backup current local state before overwrite
-    try{
-      const bk = { ts: new Date().toISOString(), state: window.S || null };
-      localStorage.setItem('OPS_LOCAL_BACKUP_BEFORE_PULL', JSON.stringify(bk));
-    }catch(e){}
+    // backup local snapshot for safety
+    try{ localStorage.setItem('OPS_LOCAL_BACKUP_BEFORE_PULL', JSON.stringify(window.S||null)); }catch(e){}
 
-    try{
-      ui('开始从 ops_orders_v1 拉取…');
-      const cloudN = await cloudCount(cfg);
-      const rows = await pullAllRows(cfg);
+    ui('云端拉取中…（覆盖式重建本地缓存，不影响云端）');
 
-      // Build local model from scratch (NO MERGE) to avoid polluted ids / nondeterministic mapping
-      const now = Date.now();
-      const newState = (typeof blankState==='function') ? blankState() : {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+    const total=await cloudCount(cfg);
+    const pageSize=1000;
+    let rows=[];
+    for(let off=0; off<total; off+=pageSize){
+      const to=Math.min(total-1, off+pageSize-1);
+      const select='id,seller_name,order_no,market,asin,product_name,unit_price,fx_rate,review_req,pay_status,review_status,payout_status,note,created_at,updated_at,app_key';
+      const path=`${ORDER_TABLE}?select=${encodeURIComponent(select)}&app_key=eq.${encodeURIComponent(cfg.app_key)}&order=updated_at.asc,id.asc`;
+      const r=await sbFetch(cfg, path, off, to, false);
+      if(!r.ok) throw new Error(`rest_pull_failed ${r.status} ${r.text}`);
+      if(Array.isArray(r.json)) rows=rows.concat(r.json);
+    }
 
-      // keep local batches if present (optional)
-      try{ if(window.S && Array.isArray(window.S.batches) && Array.isArray(newState.batches)) newState.batches = window.S.batches; }catch(e){}
+    // build fresh state
+    const now=new Date().toISOString();
+    const newS=blankState();
+    for(const row of rows){ upsertOrder(newS, row, now); }
 
-      window.S = newState;
-      // Ensure arrays
-      if(!Array.isArray(S.sellers)) S.sellers=[];
-      if(!Array.isArray(S.products)) S.products=[];
-      if(!Array.isArray(S.orders)) S.orders=[];
-      if(!S.seq) S.seq={seller:1,product:1,order:1,batch:1};
+    // install new state and persist
+    window.S=newS;
+    const __origNormalize=window.normalizeOrders;
+    try{ window.normalizeOrders=function(){}; }catch(e){}
+    try{ if(typeof saveNow==='function') await saveNow(); }catch(e){}
+    try{ window.normalizeOrders=__origNormalize; }catch(e){}
 
-      // Deterministic ordering to keep sequential fallbacks stable
-      const sorted = (Array.isArray(rows)?rows:[]).slice().sort((a,b)=>{
-        const au = String(a?.updated_at||'');
-        const bu = String(b?.updated_at||'');
-        if(au<bu) return -1;
-        if(au>bu) return 1;
-        const ai = String(a?.id||'');
-        const bi = String(b?.id||'');
-        return ai<bi?-1:ai>bi?1:0;
-      });
+    try{ if(typeof computeSeq==='function') computeSeq(); }catch(e){}
+    try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
+    try{ if(typeof renderOrders==='function') renderOrders(); }catch(e){}
+    try{ if(typeof renderKPI==='function') renderKPI(); }catch(e){}
 
-      for(const row of sorted){
-        if(row && row.app_key && String(row.app_key)!==String(cfg.app_key)) continue;
-        upsertOrderFromRow(row, now);
-      }
+    ui(`云端拉取完成：云端=${total} 拉回=${rows.length} 本地订单=${(newS.orders||[]).length}`);
+  }
 
-      // Persist & render
-      // IMPORTANT: prevent legacy normalizeOrders/save pipeline from mutating ids after cloud rebuild
-      const __origNormalize = window.normalizeOrders;
-      try{ window.normalizeOrders = function(){}; }catch(e){}
-      try{ if(typeof saveNow==='function') await saveNow(); }catch(e){}
-      try{ window.normalizeOrders = __origNormalize; }catch(e){}
-      try{ if(typeof computeSeq==='function') computeSeq(); }catch(e){}
-      try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
-      try{ if(typeof renderKPI==='function') renderKPI(); }catch(e){}
-      try{ if(typeof renderOrders==='function') renderOrders(); }catch(e){}
-      try{ if(typeof renderPayout==='function') renderPayout(); }catch(e){}
+  // Hard override and button rebind
+  window.cloudPull=patchedCloudPull;
+  window.robustCloudPull=patchedCloudPull;
+  window.ordersCloudPull=patchedCloudPull;
 
-      ui(`云端拉取完成：云端=${cloudN} 本次拉回=${sorted.length} 本地订单=${(S.orders||[]).length}`);
-    }catch(e){
-      console.error(e);
-      ui('云端拉取失败：' + (e && (e.message||e.toString()) ));
+  function bindByText(txt, fn){
+    const btns=Array.from(document.querySelectorAll('button, .btn'));
+    for(const b of btns){
+      const t=(b.innerText||b.textContent||'').trim();
+      if(t===txt){ b.onclick=(e)=>{ try{ e && e.preventDefault && e.preventDefault(); }catch(_){} fn(); }; }
     }
   }
-
-  // Override ONLY pull (keep your existing push/status implementations unless you ask otherwise)
-  window.cloudPull = patchedCloudPull;
-  window.robustCloudPull = patchedCloudPull;
-  window.ordersCloudPull = patchedCloudPull;
-
-  // Rebind UI buttons that were previously bound to merge-style ordersCloudPull
-  function rebindByText(txt, fn){
-    try{
-      const btns = Array.from(document.querySelectorAll('button')).filter(b=>String(b.textContent||'').trim()===txt);
-      btns.forEach(b=>{ b.onclick = fn; });
-    }catch(e){}
-  }
-  try{
-    rebindByText('云端拉取', ()=>patchedCloudPull());
-    rebindByText('强制拉取', ()=>patchedCloudPull());
-  }catch(e){}
-
-  // ALSO override robust bindings and re-bind buttons by text to ensure this pull is used
-  window.robustCloudPull = patchedCloudPull;
-  window.ordersCloudPull = patchedCloudPull;
-  window.ordersCloudPullMaster = patchedCloudPull;
-
-  try{
-    const bindByText = (txt, fn)=>{
-      const btns = Array.from(document.querySelectorAll('button, .btn'));
-      for(const b of btns){
-        if(!b) continue;
-        const t = (b.innerText||b.textContent||'').trim();
-        if(t===txt){
-          b.onclick = (e)=>{ e && e.preventDefault && e.preventDefault(); fn(); };
-        }
-      }
-    };
-    bindByText('云端拉取', ()=>patchedCloudPull());
-    bindByText('强制拉取', ()=>patchedCloudPull());
-  }catch(e){}
-
+  try{ bindByText('云端拉取', patchedCloudPull); }catch(e){}
+  try{ bindByText('强制拉取', patchedCloudPull); }catch(e){}
 })();
 </script>
+
 
 </body></html>
