@@ -13545,362 +13545,262 @@ async function cloudStatusFixed(){
 
 \
 <script>
-// ===== PATCH: OPS_ORDERS_V2 MASTER (authoritative) =====
-// 云端：public.ops_orders_v2
-// 本地：覆盖式重建（NO MERGE），避免任何“漂移/随机变化”。
+/* ===== OPS_ORDERS_V2 MASTER (authoritative) =====
+   云端：public.ops_orders_v2（app_key=dalemy）
+   本地：覆盖式重建（NO MERGE），保证多次拉取结果稳定、无漂移
+*/
 (function(){
   const ORDER_TABLE = 'ops_orders_v2';
 
-  function ss(x){ return (x==null?'':String(x)).trim(); }
-  function up(x){ return ss(x).toUpperCase(); }
+  function ss(x){ return (x==null?'':String(x)); }
+  function trim(x){ return ss(x).trim(); }
+  function up(x){ return trim(x).toUpperCase(); }
   function num(x){
-    const s = ss(x);
-    if(!s) return 0;
-    const v = Number(String(s).replace(/,/g,''));
-    return Number.isFinite(v) ? v : 0;
+    if (x==null || x==='') return 0;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
   }
-  function toastMsg(msg){
-    try{ if(typeof window.toast==='function') return window.toast(msg); }catch(e){}
-    try{ console.log('[CLOUD]', msg); }catch(e){}
-  }
-  function parseNote(n){
-    if(n==null) return {};
-    if(typeof n==='object') return n;
-    const s = ss(n);
-    if(!s) return {};
-    try{ return JSON.parse(s); }catch(e){ return {}; }
+  function safeJson(v){
+    if (v==null) return {};
+    if (typeof v === 'object') return v;
+    try{ return JSON.parse(String(v)); }catch(e){ return {}; }
   }
   function noteGet(note, keys){
-    if(!note || typeof note!=='object') return '';
-    for(const k of keys){
-      if(Object.prototype.hasOwnProperty.call(note, k)){
-        const v = note[k];
-        if(v==null) continue;
-        const s = ss(v);
-        if(s!=='') return s;
-      }
+    if (!note) return '';
+    for (const k of keys){
+      if (Object.prototype.hasOwnProperty.call(note, k)) return note[k];
     }
     return '';
   }
-  function marketToCurrency(mk){
-    try{ if(window.U && typeof window.U.marketToCurrency==='function') return window.U.marketToCurrency(mk); }catch(e){}
-    const M = up(mk);
-    const map = { US:'USD', UK:'GBP', DE:'EUR', FR:'EUR', IT:'EUR', ES:'EUR', CA:'CAD', JP:'JPY' };
-    return map[M] || '';
+
+  function toastInfo(msg){
+    try{
+      if (window.toast) return window.toast(msg);
+      if (window.U && window.U.toast) return window.U.toast(msg);
+    }catch(e){}
+    try{ console.log('[OPS_V2]', msg); }catch(e){}
+    return null;
   }
 
-  async function getSB(){
-    if(typeof window.ensureSupabaseSDK==='function') await window.ensureSupabaseSDK();
-    const wrap = (typeof window.getCloudClientOrNull==='function') ? window.getCloudClientOrNull({quiet:false}) : null;
-    if(!wrap || !wrap.client || !wrap.cfg) return null;
-    return wrap;
+  function getCfg(){
+    try{
+      return (window.__CLOUD_CFG__ || window.cloudCfg || window.CLOUD_CFG || window.syncCfg || {});
+    }catch(e){ return {}; }
+  }
+  function getSupabaseUrl(){
+    const cfg=getCfg();
+    return cfg.url || cfg.supabaseUrl || cfg.supabase_url || cfg.SUPABASE_URL || window.SUPABASE_URL || window.CLOUD_URL || '';
+  }
+  function getSupabaseAnon(){
+    const cfg=getCfg();
+    return cfg.anon || cfg.anonKey || cfg.supabaseAnon || cfg.supabase_anon || cfg.SUPABASE_ANON || window.SUPABASE_ANON || window.CLOUD_ANON || '';
+  }
+  function getAppKey(){
+    const cfg=getCfg();
+    return cfg.appKey || cfg.app_key || cfg.app || cfg.app_name || cfg.APP_KEY || window.APP_KEY || 'dalemy';
+  }
+  function getClient(){
+    const url=getSupabaseUrl();
+    const anon=getSupabaseAnon();
+    if (!url || !anon) throw new Error('missing_supabase_cfg');
+    if (!window.supabase || !window.supabase.createClient) throw new Error('missing_supabase_umd');
+    return window.supabase.createClient(url, anon, { auth: { persistSession: false } });
   }
 
-  async function selectAllRows(sb, appKey){
-    const pageSize = 1000;
-    let from = 0;
-    const out = [];
-    while(true){
-      const to = from + pageSize - 1;
-      const q = sb.from(ORDER_TABLE)
-        .select('id,app_key,seller_name,order_no,market,asin,product_name,unit_price,fx_rate,review_req,payout_status,review_status,note,created_at,updated_at')
+  function blankState(){
+    // 兼容 v6.4.2 结构：sellers/products/orders/batches + seq
+    const S = window.S && typeof window.S === 'object' ? window.S : {};
+    return {
+      sellers: [],
+      products: [],
+      orders: [],
+      batches: Array.isArray(S.batches) ? S.batches : [],
+      settleBatches: Array.isArray(S.settleBatches) ? S.settleBatches : (Array.isArray(S.batches) ? S.batches : []),
+      seq: (S && typeof S.seq==='object') ? S.seq : { seller:1, product:1, order:1, batch:1 }
+    };
+  }
+
+  async function pullAllRows(){
+    const client=getClient();
+    const appKey=getAppKey();
+    const pageSize=1000;
+    let from=0;
+    const rows=[];
+    for(;;){
+      const to=from + pageSize - 1;
+      const q = client
+        .from(ORDER_TABLE)
+        .select('*')
         .eq('app_key', appKey)
-        .order('created_at', {ascending:true})
-        .order('id', {ascending:true})
+        .order('id', { ascending: true })
         .range(from, to);
       const { data, error } = await q;
-      if(error) throw error;
-      if(!data || !data.length) break;
-      out.push.apply(out, data);
-      if(data.length < pageSize) break;
+      if (error) throw error;
+      if (!data || data.length===0) break;
+      rows.push(...data);
+      if (data.length < pageSize) break;
       from += pageSize;
     }
-    return out;
+    return rows;
   }
 
-  function buildLocalStateFromRows(rows){
-    // 1) sellers
-    const sellerNames = Array.from(new Set(rows.map(r=>ss(r.seller_name)).filter(Boolean)))
-      .sort((a,b)=>a.localeCompare(b,'zh-Hans-CN'));
+  function buildStateFromRows(rows){
+    const S = blankState();
+
+    // 先标准化行：保证字段名称一致
+    const items = rows.map(r=>{
+      const note = safeJson(r.note);
+      // asin_key 在云端是 generated stored；如果没返回，也按规则本地计算
+      const asin = trim(r.asin);
+      const productName = trim(r.product_name);
+      const asinKey = trim(r.asin_key) || (asin ? asin : ('NAME:' + productName));
+      return {
+        cloudId: ss(r.id),
+        sellerName: trim(r.seller_name),
+        orderNo: trim(r.order_no),
+        market: trim(r.market),
+        asin,
+        asinKey,
+        productName,
+        unitPrice: num(r.unit_price),
+        fxRate: num(r.fx_rate),
+        reviewReq: trim(r.review_req) || trim(noteGet(note, ['回评需求','review_req','review'])),
+        payoutStatus: up(r.payout_status) || up(noteGet(note, ['payout_status','返款状态'])),
+        reviewStatus: up(r.review_status) || up(noteGet(note, ['review_status','回评状态'])),
+        note
+      };
+    });
+
+    // sellers：按 sellerName 排序，确保确定性
+    const sellerNames = Array.from(new Set(items.map(it=>it.sellerName).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'zh-Hans-CN'));
     const sellerIdByName = new Map();
-    const sellers = sellerNames.map((name, idx)=>{
+    sellerNames.forEach((name, idx)=>{
       const id = 'S' + (idx+1);
       sellerIdByName.set(name, id);
-      return { id, name, marketFx:{}, commissionCny:{}, notes:'' };
+      S.sellers.push({ id, name, markets: [], fx: {}, commission: {}, note:'' });
     });
 
-    // 2) products (optional，但用于弹窗/联动)
-    const prodKeySet = new Map();
-    for(const r of rows){
-      const sellerName = ss(r.seller_name);
-      const productName = ss(r.product_name);
-      if(!sellerName || !productName) continue;
-      const mk = up(r.market);
-      const asin = ss(r.asin);
-      const key = sellerName + '|' + mk + '|' + asin + '|' + productName;
-      if(!prodKeySet.has(key)) prodKeySet.set(key, { sellerName, mk, asin, productName, note: parseNote(r.note) });
-    }
-    const prodKeys = Array.from(prodKeySet.keys()).sort();
+    // products：按 key 排序，确保确定性
+    const productKeySet = new Set();
+    items.forEach(it=>{
+      const key = [it.sellerName, it.market, it.asinKey, it.productName].join('||');
+      productKeySet.add(key);
+    });
+    const productKeys = Array.from(productKeySet).sort((a,b)=>a.localeCompare(b,'zh-Hans-CN'));
     const productIdByKey = new Map();
-    const products = prodKeys.map((k, idx)=>{
-      const it = prodKeySet.get(k);
+    productKeys.forEach((k, idx)=>{
       const id = 'P' + (idx+1);
       productIdByKey.set(k, id);
-      const n = it.note || {};
-      // 兼容：产品层可带入卖家折扣/回评类型/买手佣金（用于录入联动）
-      const discount = num(noteGet(n, ['卖家折扣','discount','seller_discount']));
-      const buyerCommission = num(noteGet(n, ['下单佣金','买手佣金','buyer_commission','commission']));
-      const reviewType = ss(r.get('review_req') if False else '')
-      return {
+      const [sellerName, market, asinKey, productName] = k.split('||');
+      const sellerId = sellerIdByName.get(sellerName) || '';
+      // 从 note 里抽取可用的联动字段（可选）
+      // 注意：这里只是录入联动，不参与“云端权威”；你后续要严格对齐金额字段，再继续补充映射
+      S.products.push({
         id,
-        name: it.productName,
-        asin: it.asin || '',
-        market: it.mk || '',
-        sellerId: sellerIdByName.get(it.sellerName) || '',
-        sellerName: it.sellerName,
-        discount,
-        buyerCommission,
+        name: productName,
+        asin: (asinKey && asinKey.startsWith('NAME:')) ? '' : asinKey,
+        market: market || '',
+        sellerId,
+        sellerName,
+        discount: 0,
+        buyerCommission: 0,
         reviewType: '',
         note: ''
-      };
+      });
     });
 
-    // 3) orders
-    const orders = [];
-    for(const r of rows){
-      const sellerName = ss(r.seller_name);
-      const sellerId = sellerIdByName.get(sellerName) || '';
-      const orderId = ss(r.order_no).slice(0,19);
-      if(!sellerId || !orderId) continue;
+    // orders：保持与 rows 一一对应（云端一行=一订单）
+    items.forEach((it, idx)=>{
+      const sellerId = sellerIdByName.get(it.sellerName) || '';
+      const pkey = [it.sellerName, it.market, it.asinKey, it.productName].join('||');
+      const productId = productIdByKey.get(pkey) || '';
+      const currency = (it.market && it.market.toUpperCase()==='US') ? 'USD' :
+                       (it.market && it.market.toUpperCase()==='UK') ? 'GBP' :
+                       (it.market && it.market.toUpperCase()==='DE') ? 'EUR' :
+                       (it.market && it.market.toUpperCase()==='FR') ? 'EUR' :
+                       (it.market && it.market.toUpperCase()==='IT') ? 'EUR' :
+                       (it.market && it.market.toUpperCase()==='ES') ? 'EUR' :
+                       (it.market && it.market.toUpperCase()==='CA') ? 'CAD' :
+                       (it.market && it.market.toUpperCase()==='JP') ? 'JPY' : '';
+      const orderId = it.orderNo;
 
-      const mk = up(r.market) || 'US';
-      const currency = marketToCurrency(mk);
-      const asin = ss(r.asin);
-      const productName = ss(r.product_name);
-      const prodKey = sellerName + '|' + mk + '|' + asin + '|' + productName;
-      const productId = productIdByKey.get(prodKey) || null;
-
-      const note = parseNote(r.note);
-      const discount = num(noteGet(note, ['卖家折扣','discount','seller_discount']));
-      const buyerCommission = num(noteGet(note, ['下单佣金','买手佣金','buyer_commission','commission']));
-      const fx = num(r.fx_rate);
-      const amount = num(r.unit_price);
-      const reviewReq = ss(r.review_req) || ss(noteGet(note, ['回评需求','review_req','review']));
-
-      // 状态：保持最小可用；后续你要完全对齐云端字段，再继续细化
-      const rvStatus = up(r.review_status) || up(noteGet(note, ['review_status','回评状态']));
-      const pyStatus = up(r.payout_status) || up(noteGet(note, ['payout_status','返款状态']));
-
-      orders.append if False else None
-      orders.append({
-        id: 'O' + (orders.length+1),
-        cloudId: ss(r.id),
-        createdAt: Date.parse(r.created_at) if ss(r.created_at) else Date.now(),
-        updatedAt: Date.parse(r.updated_at) if ss(r.updated_at) else Date.now(),
-
+      S.orders.push({
+        id: 'O' + (idx+1),
+        cloudId: it.cloudId,
+        // 兼容字段：原系统常用 orderId / sellerId / productId
         orderId,
-        key: (window.U && typeof window.U.orderKey==='function') ? window.U.orderKey(sellerId, orderId, asin) : (sellerId+'::'+orderId+'::'+asin),
         sellerId,
         productId,
-        market: mk,
+        sellerName: it.sellerName,
+        productName: it.productName,
+        asin: it.asin,
+        market: it.market,
         currency,
-        amount,
-        discount,
-        buyerCommission,
-        asin,
-        title: ss(r.product_name) || ss(noteGet(note, ['title','标题','产品'])),
-        fx: fx || 0,
-        fxOverride: fx || null,
-        reviewReq: reviewReq || 'auto',
-        note: ss(r.note if isinstance(r.note,str) else ''),
-        date: (ss(r.created_at) ? ss(r.created_at).slice(0,10) : (window.U && window.U.today ? window.U.today() : '')),
-
-        // v6.4.2 兼容字段
-        principal: { settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-        commission:{ settled:false, batchId:null, amountCny:0, settledAmountCny:0 },
-        review: { status: (rvStatus||'PENDING'), doneType:null, date:'', link:'', note:'' },
-        payoutStatus: pyStatus || ''
+        amount: it.unitPrice,
+        fxRate: it.fxRate,
+        reviewReq: it.reviewReq,
+        // 状态：保持最小一致
+        reviewStatus: it.reviewStatus || 'PENDING',
+        payoutStatus: it.payoutStatus || 'PENDING',
+        // 其它字段保留空，后续你要对齐 v6.4.2 的全流程再补
+        note: '',
+        createdAt: Date.now(),
+        updatedAt: Date.now()
       });
-    }
+    });
 
-    // 4) assemble
-    const st = (typeof window.blankState==='function') ? window.blankState() : {sellers:[],products:[],orders:[],batches:[],payoutBatches:[],seq:{seller:1,product:1,order:1,batch:1,payoutBatch:1}};
-    st.sellers = sellers;
-    st.products = products;
-    st.orders = orders;
-    if(typeof window.computeSeq==='function'){
-      try{ window.S = st; window.computeSeq(); st.seq = window.S.seq; }catch(e){}
-    }else{
-      st.seq = { seller:sellers.length+1, product:products.length+1, order:orders.length+1, batch:1, payoutBatch:1 };
-    }
-    return st;
-  }
-
-  async function robustCloudPull(){
-    const wrap = await getSB();
-    if(!wrap) return;
-    const sb = wrap.client;
-    const appKey = ss(wrap.cfg.appKey || wrap.cfg.app_key);
-    if(!appKey){ toastMsg('请先设置 app_key'); return; }
-
-    toastMsg('云端拉取中（ops_orders_v2）...');
-    try{
-      const rows = await selectAllRows(sb, appKey);
-      const st = buildLocalStateFromRows(rows);
-      // 覆盖式写入
-      window.S = st;
-      if(typeof window.saveNow==='function') await window.saveNow({skipPayoutSnapshot:true});
-      try{ window.UI && (window.UI.page=1); window.UI && window.UI.selected && window.UI.selected.clear(); }catch(e){}
-      if(typeof window.renderAll==='function') window.renderAll();
-      toastMsg('云端拉取完成：' + rows.length + ' 单');
-    }catch(e){
-      console.error(e);
-      alert('云端拉取失败：' + (e && e.message ? e.message : String(e)));
-    }
-  }
-
-  function mapLocalOrderToRow(o){
-    const seller = (window.S && Array.isArray(window.S.sellers)) ? window.S.sellers.find(s=>s.id===o.sellerId) : null;
-    const sellerName = seller ? ss(seller.name) : '';
-    const prod = (window.S && Array.isArray(window.S.products) && o.productId) ? window.S.products.find(p=>p.id===o.productId) : null;
-    const productName = ss((prod && prod.name) || o.title || o.note || 'NO_PRODUCT');
-    const asin = ss(o.asin);
-    const mk = up(o.market) || 'US';
-
-    const note = {
-      currency: ss(o.currency),
-      seller_discount: o.discount,
-      buyer_commission: o.buyerCommission,
-      fx_override: o.fxOverride,
-      local_id: ss(o.id),
-      local_key: ss(o.key)
+    // seq：与当前数量对齐
+    S.seq = {
+      seller: S.sellers.length + 1,
+      product: S.products.length + 1,
+      order: S.orders.length + 1,
+      batch: (S.batches ? S.batches.length : 0) + 1
     };
 
-    return {
-      // 云端唯一键 A
-      app_key: ss((window.getCloudCfgOrNull && window.getCloudCfgOrNull().app_key) || (window.getCloudCfgOrNull && window.getCloudCfgOrNull().appKey) || ''),
-      seller_name: sellerName,
-      order_no: ss(o.orderId).slice(0,19),
-      market: mk,
-      asin: asin || null,
-      product_name: productName,
-      unit_price: (o.amount==null?null:Number(o.amount)),
-      fx_rate: (o.fxOverride==null? (o.fx==null?null:Number(o.fx)) : Number(o.fxOverride)),
-      review_req: ss(o.reviewReq) || null,
-      payout_status: ss(o.payoutStatus || '' ) || null,
-      review_status: ss((o.review && o.review.status) || '' ) || null,
-      note: note
-    };
+    return S;
   }
 
-  async function upsertOrders(rows, onConflict){
-    const wrap = await getSB();
-    if(!wrap) return {ok:false, error:'no cloud cfg'};
-    const sb = wrap.client;
-    const appKey = ss(wrap.cfg.appKey || wrap.cfg.app_key);
-    for(const r of rows):
-      r['app_key']=appKey
-    try:
-      pass
-    except:
-      pass
+  async function v2PullAndRebuild(){
+    toastInfo('云端拉取(v2)：开始…');
+    const rows = await pullAllRows();
+    const built = buildStateFromRows(rows);
+    // 写回全局并持久化
+    window.S = built;
     try{
-      const { data, error } = await sb.from(ORDER_TABLE).upsert(rows, { onConflict, ignoreDuplicates: false });
-      if(error) return {ok:false, error};
-      return {ok:true, data};
-    }catch(e){
-      return {ok:false, error:e};
-    }
-  }
-
-  async function robustCloudPush(opts){
-    opts = opts || {};
-    const st = window.S;
-    const orders = (st && Array.isArray(st.orders)) ? st.orders : [];
-    if(!orders.length){ alert('本地无订单可推送'); return; }
-
-    const rows = orders.map(mapLocalOrderToRow).filter(r=>r.seller_name && r.order_no && r.product_name);
-    if(!rows.length){ alert('无可推送订单（缺少卖家/订单号/产品名）'); return; }
-
-    toastMsg('云端推送中（ops_orders_v2）...');
-    const onConflict = 'app_key,seller_name,order_no,product_name,asin_key';
-    const res = await upsertOrders(rows, onConflict);
-    if(!res.ok){
-      console.error(res.error);
-      alert('云端推送失败：' + (res.error && res.error.message ? res.error.message : String(res.error)));
-      return;
-    }
-    toastMsg('云端推送完成：' + rows.length + ' 单（upsert）');
-  }
-
-  async function robustCloudStatus(){
-    const wrap = await getSB();
-    if(!wrap) return;
-    const sb = wrap.client;
-    const appKey = ss(wrap.cfg.appKey || wrap.cfg.app_key);
-    try{
-      const { data, error, count } = await sb.from(ORDER_TABLE).select('id', { count:'exact', head:true }).eq('app_key', appKey);
-      if(error) throw error;
-      alert('云端订单状态（ops_orders_v2）\n\napp_key=' + appKey + '\n订单数=' + (count==null?'?':count));
-    }catch(e){
-      alert('云端状态查询失败：' + (e && e.message ? e.message : String(e)));
-    }
-  }
-
-  // --- Auto push on Save Order (single order) ---
-  async function upsertOneLocalOrder(localOrderId){
-    try{
-      const st = window.S;
-      const o = st && Array.isArray(st.orders) ? st.orders.find(x=>x.id===localOrderId) : null;
-      if(!o) return;
-      const row = mapLocalOrderToRow(o);
-      if(!row.seller_name || !row.order_no || !row.product_name) return;
-      const onConflict = 'app_key,seller_name,order_no,product_name,asin_key';
-      const res = await upsertOrders([row], onConflict);
-      if(!res.ok) throw res.error;
-    }catch(e){
-      console.error('[AUTO-UPSERT] failed', e);
-      try{ toastMsg('自动推送失败（请手动云端推送）：' + (e && e.message ? e.message : String(e))); }catch(_e){}
-    }
-  }
-
-  // --- Hook/Override ---
-  window.robustCloudPull = robustCloudPull;
-  window.robustCloudPush = robustCloudPush;
-  window.robustCloudStatus = robustCloudStatus;
-
-  // Rebind buttons to avoid older handlers
-  document.addEventListener('DOMContentLoaded', ()=>{
-    try{
-      const bPush = document.getElementById('btnCloudPush');
-      const bPushForce = document.getElementById('btnCloudPushForce');
-      const bStatus = document.getElementById('btnCloudStatus');
-      const bPull = document.getElementById('btnCloudPull');
-      if(bPush) bPush.onclick = ()=>robustCloudPush({force:false});
-      if(bPushForce) bPushForce.onclick = ()=>robustCloudPush({force:true});
-      if(bStatus) bStatus.onclick = ()=>robustCloudStatus();
-      if(bPull) bPull.onclick = ()=>robustCloudPull();
+      if (typeof window.saveNow === 'function') await window.saveNow();
     }catch(e){}
-  }, { once:true });
+    try{
+      if (typeof window.render === 'function') window.render();
+    }catch(e){}
+    toastInfo('云端拉取(v2)：完成 rows=' + rows.length);
+    return { ok:true, count: rows.length };
+  }
 
-  // Wrap Actions.saveOrder to auto-upsert the affected order
-  try{
-    if(window.Actions && typeof window.Actions.saveOrder==='function' && !window.Actions.__v2_wrapped){
-      const orig = window.Actions.saveOrder.bind(window.Actions);
-      window.Actions.saveOrder = function(){
-        const before = (window.S && Array.isArray(window.S.orders)) ? window.S.orders[0]?.id : null;
-        orig();
-        // after save, newest order is usually at index 0
-        const afterId = (window.S && Array.isArray(window.S.orders)) ? window.S.orders[0]?.id : null;
-        const id = afterId || before;
-        if(id) upsertOneLocalOrder(id);
-      };
-      window.Actions.__v2_wrapped = true;
-    }
-  }catch(e){}
+  // 强制接管：云端拉取/强制拉取按钮
+  function bindButtons(){
+    const btns = Array.from(document.querySelectorAll('button, a')).filter(el=>{
+      const t = trim(el.textContent);
+      return /云端拉取|强制拉取|云端同步|拉取/.test(t);
+    });
+    btns.forEach(b=>{
+      const t=trim(b.textContent);
+      if (/拉取/.test(t)){
+        b.onclick = (ev)=>{ ev && ev.preventDefault && ev.preventDefault(); v2PullAndRebuild().catch(err=>{ console.error(err); alert('云端拉取失败：'+(err.message||err)); }); };
+      }
+    });
+  }
 
+  // 暴露给旧代码调用
+  window.opsV2Pull = v2PullAndRebuild;
+
+  // DOM ready 后绑定
+  if (document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded', bindButtons);
+  }else{
+    bindButtons();
+  }
 })();
-// ===== END PATCH: OPS_ORDERS_V2 MASTER (authoritative) =====
 </script>
+
 
 </body></html>
