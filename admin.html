@@ -1122,7 +1122,8 @@ async function cloudPull(opts){
     // 重新计算序号/索引，持久化并刷新 UI
     try{ if(typeof restorePayoutSnapshot==="function") restorePayoutSnapshot(S); }catch(_e){}
     try{ if(typeof computeSeq==="function") computeSeq(); }catch(_e){}
-    try{ if(typeof saveNow==="function") saveNow(); else if(typeof save==="function") save(); }catch(_e){}
+      // (disabled) saveNow during pull
+      try{ window.S = S; window.state = S; }catch(e){}
     try{ if(typeof renderAll==="function") renderAll(); }catch(_e){}
 
     const sc = (S && S.sellers && S.sellers.length) || 0;
@@ -13863,7 +13864,8 @@ function _ensureSeller(localState, sellerName){
       }
 
       // Persist & render
-      try{ if(typeof saveNow==='function') await saveNow(); }catch(e){}
+      // (disabled) saveNow during pull
+      try{ window.S = S; window.state = S; }catch(e){}
       try{ if(typeof renderOrders==='function') renderOrders(); }catch(e){}
       try{ if(typeof renderPayout==='function') renderPayout(); }catch(e){}
 
