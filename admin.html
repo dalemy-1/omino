@@ -13675,3 +13675,255 @@ async function cloudStatusFixed(){
 })();
 </script>
 </body></html>
+
+
+<script>
+/* =========================
+   PATCH_V2_MASTER v7.4 (applyfix)
+   Goals:
+   - Force ALL cloud buttons to use ops_orders_v2 (even if legacy scripts exist)
+   - After pull: build virtual sellers/products and orders with sellerId/productId so renderOrders can display
+   - Persist to local (best-effort saveNow / IDB)
+   - Status popup must show v2 + version
+========================= */
+(function(){
+  const PATCH_VER = "v7.4";
+  const TABLE = "ops_orders_v2";
+  const APP_KEY_DEFAULT = "dalemy";
+
+  function logOnce(){
+    if(window.__PATCH_V2_MASTER_V74_LOGGED) return;
+    window.__PATCH_V2_MASTER_V74_LOGGED = true;
+    try{ console.log("[PATCH_V2_MASTER "+PATCH_VER+"] loaded. table="+TABLE); }catch(e){}
+  }
+
+  function getAppKey(){
+    try{
+      const cfg = window.CLOUD || window.cloudCfg || window._cloudCfg || null;
+      const ak = cfg && (cfg.app_key || cfg.appKey);
+      return (ak && String(ak).trim()) || APP_KEY_DEFAULT;
+    }catch(e){
+      return APP_KEY_DEFAULT;
+    }
+  }
+
+  function pickSupabaseClient(){
+    // Most common places we've seen across versions
+    return window.sb || window.supabaseClient || window._sb || window.client || (window.SUPABASE && window.SUPABASE.client) || null;
+  }
+
+  function dHash(str){
+    // deterministic id helper
+    str = String(str||"");
+    let h1 = 0x811c9dc5;
+    for(let i=0;i<str.length;i++){
+      h1 ^= str.charCodeAt(i);
+      h1 = (h1 + ((h1<<1)+(h1<<4)+(h1<<7)+(h1<<8)+(h1<<24))) >>> 0;
+    }
+    return ("h"+h1.toString(16).padStart(8,"0"));
+  }
+
+  function ensureState(){
+    if(!window.S || typeof window.S!=="object") window.S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
+    if(!window.UI || typeof window.UI!=="object") window.UI = {};
+    // pagination defaults
+    if(!window.UI.pageSize) window.UI.pageSize = 100;
+    if(!window.UI.page) window.UI.page = 1;
+    if(!window.UI.selectedOrderIds) window.UI.selectedOrderIds = new Set();
+    return window.S;
+  }
+
+  function normStr(x){ return (x==null?"":String(x)).trim(); }
+  function normUpper(x){ return normStr(x).toUpperCase(); }
+
+  function mapReviewReq(x){
+    const s = normStr(x);
+    if(!s) return "";
+    // keep as-is (already Chinese in your data)
+    return s;
+  }
+
+  function applyV2RowsToLocal(rows){
+    const S = ensureState();
+    const appKey = getAppKey();
+
+    // build sellers/products by name deterministically
+    const sellerByName = new Map();
+    const productByKey = new Map(); // market+asin_key
+    const sellers = [];
+    const products = [];
+
+    function getSellerId(name){
+      const nm = normStr(name);
+      const key = nm.toLowerCase();
+      if(!key) return "";
+      if(sellerByName.has(key)) return sellerByName.get(key).id;
+      const id = "seller_"+dHash(appKey+"|"+key);
+      const obj = { id, name: nm };
+      sellerByName.set(key, obj);
+      sellers.push(obj);
+      return id;
+    }
+
+    function getProductId(row){
+      const mk = normUpper(row.market);
+      const asinKey = normUpper(row.asin_key || row.asin || "");
+      const pName = normStr(row.product_name || "");
+      const key = (mk||"") + "|" + (asinKey||("NAME:"+pName));
+      if(productByKey.has(key)) return productByKey.get(key).id;
+      const id = "prod_"+dHash(appKey+"|"+key);
+      const obj = {
+        id,
+        name: pName || "(未命名产品)",
+        asin: normUpper(row.asin || ""),
+        asinKey: asinKey || "",
+        market: mk || ""
+      };
+      productByKey.set(key, obj);
+      products.push(obj);
+      return id;
+    }
+
+    const orders = [];
+    for(const r of (rows||[])){
+      const orderNo = normStr(r.order_no);
+      const sellerName = normStr(r.seller_name);
+      const market = normUpper(r.market);
+      const asin = normUpper(r.asin || "");
+      const asinKey = normUpper(r.asin_key || (asin ? asin : ("NAME:"+normStr(r.product_name||""))));
+      const productName = normStr(r.product_name||"");
+      const unitPrice = (r.unit_price==null?0:Number(r.unit_price)||0);
+      const fxRate = (r.fx_rate==null?0:Number(r.fx_rate)||0);
+      const reviewReq = mapReviewReq(r.review_req);
+
+      const sellerId = getSellerId(sellerName);
+      const productId = getProductId(r);
+
+      // deterministic local oid
+      const oid = "ord_"+dHash(appKey+"|"+sellerName+"|"+orderNo+"|"+asinKey);
+
+      orders.push({
+        id: oid,
+        orderId: orderNo,
+        sellerId,
+        productId,
+        market: market || "",
+        asin: asin || "",
+        // UI uses title sometimes
+        title: productName || "",
+        //金额字段：renderOrders用 o.amount
+        amount: unitPrice,
+        unit_price: unitPrice,
+        fxRate: fxRate,
+        fx_rate: fxRate,
+        reviewType: reviewReq,
+        // minimal status fields compatible with existing UI
+        review: { status: normStr(r.review_status||"") },
+        principal: { settled: false, cny: 0 },
+        commission: { settled: false, cny: 0 },
+        // keep raw note for future mapping
+        _cloud: { table: TABLE, app_key: appKey, db_id: r.id || null, asin_key: asinKey, note: r.note || {} }
+      });
+    }
+
+    // overwrite local state (orders-focused)
+    S.sellers = sellers;
+    S.products = products;
+    S.orders = orders;
+
+    // best effort persist
+    try{
+      if(typeof window.saveNow==="function") window.saveNow();
+      else if(typeof window.persistNow==="function") window.persistNow();
+    }catch(e){}
+
+    // force render
+    try{ if(typeof window.renderOrders==="function") window.renderOrders(); }catch(e){}
+    try{ if(typeof window.renderKPI==="function") window.renderKPI(); }catch(e){}
+    try{ if(typeof window.renderSelects==="function") window.renderSelects(); }catch(e){}
+
+    return { sellers: sellers.length, products: products.length, orders: orders.length };
+  }
+
+  async function pullV2(){
+    const sb = pickSupabaseClient();
+    if(!sb || !sb.from) return alert("未找到 Supabase client，请先点“云端设置”并刷新。");
+    const appKey = getAppKey();
+
+    // pagination
+    const pageSize = 1000;
+    let from = 0;
+    let all = [];
+    while(true){
+      const { data, error } = await sb.from(TABLE)
+        .select("id,app_key,seller_name,order_no,market,asin,product_name,unit_price,fx_rate,review_req,review_status,payout_status,note,created_at,updated_at,asin_key")
+        .eq("app_key", appKey)
+        .order("created_at", { ascending: true })
+        .range(from, from + pageSize - 1);
+      if(error) throw error;
+      const rows = data || [];
+      all = all.concat(rows);
+      if(rows.length < pageSize) break;
+      from += pageSize;
+    }
+
+    const c = applyV2RowsToLocal(all);
+    alert("云端拉取完成：" + c.orders + " 条（" + TABLE + "）\nPATCH_V2_MASTER=" + PATCH_VER);
+  }
+
+  async function statusV2(){
+    const sb = pickSupabaseClient();
+    if(!sb || !sb.from) return alert("未找到 Supabase client，请先点“云端设置”并刷新。");
+    const appKey = getAppKey();
+    const { count, error } = await sb.from(TABLE).select("id", { count:"exact", head:true }).eq("app_key", appKey);
+    if(error) return alert("云端状态失败：" + (error.message||JSON.stringify(error)));
+    alert("云端订单归档状态（"+TABLE+"）\nPATCH_V2_MASTER="+PATCH_VER+"\napp_key="+appKey+"\n云端订单="+(count??0));
+  }
+
+  function hardBindButtons(){
+    // clone nodes to remove existing handlers
+    const byId = (id)=>document.getElementById(id);
+    const ids = [
+      ["btnCloudPull", pullV2],
+      ["btnCloudStatus", statusV2],
+      ["btnCloudPullOrders", pullV2], // some versions
+      ["btnCloudStatusOrders", statusV2]
+    ];
+    ids.forEach(([id, fn])=>{
+      const el = byId(id);
+      if(!el) return;
+      if(el.__v74_bound) return;
+      const clone = el.cloneNode(true);
+      el.parentNode.replaceChild(clone, el);
+      clone.__v74_bound = true;
+      clone.addEventListener("click", (e)=>{ e.preventDefault(); e.stopPropagation(); fn(); }, true);
+    });
+
+    // also bind by text for safety
+    const btns = Array.from(document.querySelectorAll("button, a")).filter(b=>{
+      const t = (b.textContent||"").trim();
+      return t==="云端拉取" || t==="云端状态";
+    });
+    btns.forEach(b=>{
+      if(b.__v74_bound_text) return;
+      b.__v74_bound_text = true;
+      b.addEventListener("click", (e)=>{
+        const t = (b.textContent||"").trim();
+        if(t==="云端拉取"){ e.preventDefault(); e.stopPropagation(); pullV2(); }
+        if(t==="云端状态"){ e.preventDefault(); e.stopPropagation(); statusV2(); }
+      }, true);
+    });
+  }
+
+  logOnce();
+  // expose version for debugging
+  window.__PATCH_V2_MASTER = PATCH_VER;
+  window.__V2_TABLE = TABLE;
+
+  document.addEventListener("DOMContentLoaded", ()=>{
+    hardBindButtons();
+    // keep rebinding in case legacy code re-attaches
+    setInterval(hardBindButtons, 1200);
+  });
+})();
+</script>
