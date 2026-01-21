@@ -13332,7 +13332,7 @@ async function cloudStatusFixed(){
 
 
 <script>
-/* PATCH_V2_MASTER v7.2 (CLEAN) — ops_orders_v2 as cloud master
+/* PATCH_V2_MASTER v7.3 (CLEAN) — ops_orders_v2 as cloud master
    Goals:
    1) Pull: deterministic,覆盖式重建本地模型 + 立即持久化（IndexedDB主库） + 立即render
    2) Push: 从内存/表格提取订单，写入ops_orders_v2（app_key=dalemy）并 upsert
@@ -13340,7 +13340,7 @@ async function cloudStatusFixed(){
    4) No spam: 绑定只打印一次
 */
 (function(){
-  const PATCH_VER = 'v7.2';
+  const PATCH_VER = 'v7.3';
   const ORDER_TABLE = 'ops_orders_v2';
 
   const logOnceKey = '__PATCH_V2_MASTER_LOG_ONCE__';
@@ -13425,6 +13425,10 @@ async function cloudStatusFixed(){
   }
 
   function forceRender(){
+    // 主应用渲染（优先）
+    try{ if(typeof window.renderAll === 'function') window.renderAll(); }catch(e){}
+    try{ if(typeof window.renderOrders === 'function') window.renderOrders(); }catch(e){}
+    // 同步模块/其它渲染（兼容）
     try{ if(typeof window.render === 'function') window.render(); }catch(e){}
     // 兜底：触发一次轻微交互让页面刷新（不依赖内部实现）
     try{
@@ -13668,57 +13672,6 @@ async function cloudStatusFixed(){
   bindAll();
   // 为了抵抗旧版重复 rerender 反绑：低频重绑，不打印日志
   setInterval(bindAll, 1500);
-})();
-</script>
-<script>
-/** HARD FIX: force Cloud Status to use ops_orders_v2 and show patch version */
-(function(){
-  const TABLE = 'ops_orders_v2';
-  window.__V2_TABLE = TABLE;
-  window.__PATCH_V2_MASTER = 'v7.2-hot-status';
-
-  function pickSupabaseClient(){
-    // try find existing supabase client on page
-    return window.supabaseClient || window.sb || window._sb || window.client || window.SUPABASE || null;
-  }
-
-  async function showV2Status(){
-    const sb = pickSupabaseClient();
-    if(!sb || !sb.from){
-      alert("云端状态（强制v2）：未找到 supabase client（请先完成云端设置/刷新）");
-      return;
-    }
-    const app = (window.CLOUD && window.CLOUD.app_key) || window.__CLOUD_APPKEY || 'dalemy';
-    const { count, error } = await sb.from(TABLE).select('id', { count: 'exact', head: true }).eq('app_key', app);
-    if(error){
-      alert("云端状态（强制v2）失败：" + (error.message || JSON.stringify(error)));
-      return;
-    }
-    alert(
-      "云端订单归档状态（" + TABLE + "）\n" +
-      "PATCH_V2_MASTER=" + window.__PATCH_V2_MASTER + "\n" +
-      "app_key=" + app + "\n" +
-      "云端订单=" + (count ?? 0)
-    );
-  }
-
-  // Rebind Cloud Status button: remove old handlers (clone node) then bind ours
-  function bindOnce(){
-    const btns = Array.from(document.querySelectorAll('button, a')).filter(b=>{
-      const t = (b.textContent||'').trim();
-      return t === '云端状态' || t === 'Cloud Status';
-    });
-    if(!btns.length) return;
-
-    btns.forEach(b=>{
-      const clone = b.cloneNode(true);
-      b.parentNode.replaceChild(clone, b);
-      clone.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); showV2Status(); }, true);
-    });
-  }
-
-  bindOnce();
-  setInterval(bindOnce, 1500); // 防止旧代码反绑
 })();
 </script>
 </body></html>
