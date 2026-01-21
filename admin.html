@@ -13857,7 +13857,7 @@ async function cloudStatusFixed(){
 
   async function cloudStatusV77(){
     const cloud = await getCloud();
-    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    if(!cloud) return _alert("未设置云端（请先点 云端设置）。");
     const { client: sb, cfg } = cloud;
     const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
     if(!appKey) return _alert("云端配置缺少 app_key。");
@@ -13880,7 +13880,7 @@ async function cloudStatusFixed(){
 
   async function cloudPushV77(){
     const cloud = await getCloud();
-    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    if(!cloud) return _alert("未设置云端（请先点 云端设置）。");
     const { client: sb, cfg } = cloud;
     const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
     if(!appKey) return _alert("云端配置缺少 app_key。");
@@ -14050,7 +14050,7 @@ async function cloudStatusFixed(){
 
   async function cloudPullV77(){
     const cloud = await getCloud();
-    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    if(!cloud) return _alert("未设置云端（请先点 云端设置）。");
     const { client: sb, cfg } = cloud;
     const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
     if(!appKey) return _alert("云端配置缺少 app_key。");
