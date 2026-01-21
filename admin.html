@@ -933,43 +933,45 @@ async function getLocalSnapshotPreferIDB(){
 }
 
 async function cloudStatus(){
-  const sb = getCloudClientOrNull({quiet:true});
+  const sb = getCloudClientOrNull();
+  if(!sb) return;
   const cfg = getCloudCfgOrNull();
-  const lines = [];
-  lines.push("云端主库模式（v7.7 三表）");
-  if(!cfg){
-    alert("未配置 Supabase 云端。\n请先点击：设置云端（Supabase）");
-    return { ok:false, reason:"no_cfg" };
-  }
-  lines.push("");
-  lines.push("URL: " + cfg.url);
-  lines.push("APP_KEY: " + cfg.app_key);
-  lines.push("读写表：ops_sellers_v1 / ops_products_v1 / ops_orders_v2");
 
-  if(!sb){
-    alert(lines.join("\n") + "\n\n（Supabase SDK 未加载或密钥无效）");
-    return { ok:false, reason:"no_client" };
+  const forceReinit = !!o.forceReinit;
+
+  // Ensure SDK is available (best-effort, quiet mode friendly)
+  if(!(window.supabase && window.supabase.createClient)){
+    // Avoid await here (function is sync); just kick off loader.
+    if(typeof ensureSupabaseSDK==="function") ensureSupabaseSDK();
   }
 
+  if(!cfg || !cfg.url || !cfg.anon || !cfg.appKey){
+    toast("请先设置云端（Supabase URL / anon key / app_key）","warn");
+    return;
+  }
   const { client } = sb;
-
-  async function countTable(table){
-    try{
-      const { count, error } = await client.from(table).select("id", { count:"exact", head:true }).eq("app_key", cfg.app_key);
-      if(error) return "ERR";
-      return String(count ?? 0);
-    }catch(_e){ return "ERR"; }
+  try{
+    const { data, error } = await client.from("ops_cloud_snapshots_v1").select("app_key,hash,updated_at,created_at,payload").eq("app_key", cfg.appKey).maybeSingle();
+    if(error) throw error;
+    if(!data){
+      alert("云端暂无快照（app_key=" + cfg.appKey + "）。");
+      return;
+    }
+    const payload = data.payload || {};
+    const c = _countSnapshot(payload);
+    const size = (()=>{ try{return JSON.stringify(payload).length;}catch(e){return 0;} })();
+    const msg =
+      "云端快照状态\n\n" +
+      "app_key: " + data.app_key + "\n" +
+      "hash: " + data.hash + "\n" +
+      "updated_at: " + data.updated_at + "\n" +
+      "created_at: " + data.created_at + "\n\n" +
+      "内容统计：卖家" + c.sc + " 产品" + c.pc + " 订单" + c.oc + " 批次" + c.bc + "\n" +
+      "payload 大小：" + size + " chars";
+    alert(msg);
+  }catch(e){
+    toast("云端状态失败：" + (e && e.message ? e.message : String(e)),"err");
   }
-
-  const cS = await countTable("ops_sellers_v1");
-  const cP = await countTable("ops_products_v1");
-  const cO = await countTable("ops_orders_v2");
-
-  lines.push("");
-  lines.push(`云端计数：卖家=${cS} 产品=${cP} 订单=${cO}`);
-
-  alert(lines.join("\n"));
-  return { ok:true, sellers:+cS||0, products:+cP||0, orders:+cO||0 };
 }
 
 async function cloudPush(opts){
@@ -980,268 +982,71 @@ async function cloudPush(opts){
   const force = !!(opts && opts.force);
 
   try{
-    // 1) 读取本地快照（IDB 优先）
     const local = await getLocalSnapshotPreferIDB();
     if(!local.ok){
       alert("无法获取本地数据快照：\n" + (local.reason||"unknown"));
       return { ok:false, reason:"no_local_snapshot" };
     }
-    const snap = _normalizeSnapshot(local.payload) || {};
-    const sellers = Array.isArray(snap.sellers) ? snap.sellers : [];
-    const products = Array.isArray(snap.products) ? snap.products : [];
-    const orders = Array.isArray(snap.orders) ? snap.orders : [];
+    const finalPayload = _normalizeSnapshot(local.payload) || {};
+    const counts = local.counts || _countSnapshot(finalPayload);
+    const sc = counts.sc||0, pc = counts.pc||0, oc = counts.oc||0, bc = counts.bc||0;
 
-    const sc=sellers.length, pc=products.length, oc=orders.length;
-
-    if(!force && sc===0 && pc===0 && oc===0){
+    // Plan A safety gate: block "empty local" unless forced
+    if(!force && sc===0 && pc===0 && oc===0 && bc===0){
       const ok = confirm(
-        "安全保护：当前本地数据为 0（卖家/产品/订单均为空）。\n\n" +
-        "如果继续推送，可能会把云端清空（或造成误判）。\n\n" +
-        "确定要继续吗？"
+        "安全保护：当前本地数据为 0（卖家/产品/订单/批次均为空）。\n\n"
+        + "数据来源：" + local.source + "\n\n"
+        + "为避免误覆盖云端，本次推送已被拦截。\n\n"
+        + "如你确认这是正确的空库初始化，请按住 Shift 再点击“云端推送”进行强制推送。"
       );
-      if(!ok) return { ok:false, cancelled:true };
+      if(!ok) return { ok:false, reason:"blocked_empty_local" };
+      // 用户点了确认，但仍不强制；这里保持拦截，防止误操作
+      return { ok:false, reason:"blocked_empty_local" };
     }
 
-    // 2) 工具：分批
-    const chunk = (arr, size)=> {
-      const out=[]; for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size));
-      return out;
+    // Step 1: pull cloud snapshot (best-effort)
+    let cloud = null;
+    try{
+      const { data: row, error: e } = await client.from("ops_cloud_snapshots_v1")
+        .select("app_key,hash,payload,counts,updated_at,created_at")
+        .eq("app_key", cfg.appKey).maybeSingle();
+      if(e) throw e;
+      cloud = row || null;
+    }catch(_e){ cloud = null; }
+
+    // Step 2: merge (Plan A: union by id; prefer newer updatedAt)
+    const localSnap = finalPayload || {};
+    const cloudSnap = (cloud && cloud.payload) ? cloud.payload : null;
+
+    const merged = (cloudSnap && typeof mergeSnapshotsPlanA==="function")
+      ? mergeSnapshotsPlanA(localSnap, cloudSnap)
+      : (cloudSnap ? _mergeSnapshotsFallback(localSnap, cloudSnap) : localSnap);
+
+    const mergedCounts = _countSnapshot(merged);
+    const mergedHash = (typeof simpleHash==="function") ? simpleHash(JSON.stringify(merged)) : Date.now();
+
+    // If we have cloud hash and merged has same hash, skip push
+    if(cloud && cloud.hash && String(cloud.hash)===String(mergedHash)){
+      console.log(`[PUSH] 无需推送：合并后 hash 未变化（hash=${mergedHash}）`);
+      return { ok:true, skipped:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
+    }
+
+    // Step 3: upsert merged snapshot
+    const nowIso = new Date().toISOString();
+    const row = {
+      app_key: cfg.appKey,
+      hash: mergedHash,
+      payload: merged,
+      counts: mergedCounts,
+      updated_at: nowIso
     };
-    const asinKeyOf = (name, asin)=>{
-      const a = (asin||"").trim();
-      if(a) return a;
-      const n = (name||"").trim();
-      return "NAME:" + n;
-    };
 
-    // 3) upsert 卖家（以 seller.id 作为 seller_name 的稳定键）
-    const sellerRows = sellers
-      .filter(s=>s && (s.id||"").trim())
-      .map(s=>({
-        app_key: cfg.app_key,
-        seller_name: String(s.id).trim(),
-        note: s  // jsonb：保留 fx/commission/contact/remark 等全量信息
-      }));
+    const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict: "app_key" });
+    if(error) throw error;
 
-    // 去重（按 seller_name）
-    const seenSeller = new Set();
-    const sellerRowsUniq = [];
-    for(const r of sellerRows){
-      const k = r.seller_name;
-      if(seenSeller.has(k)) continue;
-      seenSeller.add(k);
-      sellerRowsUniq.push(r);
-    }
-
-    for(const part of chunk(sellerRowsUniq, 500)){
-      const { error } = await client.from("ops_sellers_v1").upsert(part, { onConflict:"app_key,seller_name" });
-      if(error) throw error;
-    }
-
-    // 4) 拉取 seller 映射（seller_name -> uuid）
-    const sellerMap = {};
-    {
-      let from = 0;
-      const step = 5000;
-      while(true){
-        const { data, error } = await client
-          .from("ops_sellers_v1")
-          .select("id,seller_name")
-          .eq("app_key", cfg.app_key)
-          .range(from, from+step-1);
-        if(error) throw error;
-        (data||[]).forEach(r=>{ sellerMap[r.seller_name] = r.id; });
-        if(!data || data.length < step) break;
-        from += step;
-      }
-    }
-
-    // 5) upsert 产品（以 app_key+market+asin_key 唯一）
-    const productRows = products
-      .filter(p=>p && (p.market||"").trim())
-      .map(p=>{
-        const market = String(p.market).trim();
-        const name = (p.name||"").trim();
-        const asin = (p.asin||"").trim();
-        const asin_key = asinKeyOf(name, asin);
-
-        const seller_name = (p.sellerId||"").trim();
-        const seller_id = sellerMap[seller_name] || null;
-
-        return {
-          app_key: cfg.app_key,
-          market,
-          asin_key,
-          product_name: name || null,
-          asin: asin || null,
-          review_req: p.reviewType || p.reviewReq || null,
-          discount: (typeof U!=="undefined" && U.num) ? U.num(p.discount) : (p.discount ?? null),
-          buyer_commission_cny: (typeof U!=="undefined" && U.num) ? U.num(p.buyerCommission) : (p.buyerCommission ?? null),
-          seller_id,
-          remark: p.remark || null
-        };
-      });
-
-    // 去重（按 market+asin_key）
-    const seenProd = new Set();
-    const productRowsUniq = [];
-    for(const r of productRows){
-      const k = r.market + "||" + r.asin_key;
-      if(seenProd.has(k)) continue;
-      seenProd.add(k);
-      productRowsUniq.push(r);
-    }
-
-    for(const part of chunk(productRowsUniq, 500)){
-      const { error } = await client.from("ops_products_v1").upsert(part, { onConflict:"app_key,market,asin_key" });
-      if(error) throw error;
-    }
-
-    // 6) 拉取 product 映射（market||asin_key -> uuid）
-    const productMap = {};
-    {
-      let from = 0;
-      const step = 5000;
-      while(true){
-        const { data, error } = await client
-          .from("ops_products_v1")
-          .select("id,market,asin_key")
-          .eq("app_key", cfg.app_key)
-          .range(from, from+step-1);
-        if(error) throw error;
-        (data||[]).forEach(r=>{ productMap[r.market+"||"+r.asin_key] = r.id; });
-        if(!data || data.length < step) break;
-        from += step;
-      }
-    }
-
-    // 本地 productId -> 关键字段映射（帮助订单构造）
-    const localProdById = {};
-    for(const p of products){
-      if(p && p.id) localProdById[p.id] = p;
-    }
-
-    // 7) upsert 订单（仅外键匹配；文本字段只做展示兜底）
-    const orderRows = [];
-    const skipped = [];
-
-    for(const o of orders){
-      if(!o) continue;
-      const order_no = (o.orderId||o.order_no||"").trim();
-      const seller_name = (o.sellerId||o.seller_name||"").trim();
-      if(!order_no || !seller_name){
-        skipped.push({order_no, reason:"missing_order_or_seller"});
-        continue;
-      }
-
-      const seller_id = sellerMap[seller_name];
-      if(!seller_id){
-        skipped.push({order_no, seller_name, reason:"seller_not_found_in_cloud"});
-        continue;
-      }
-
-      // product resolve: prefer local productId -> product; else fallback by market+asin_key from order
-      let market = (o.market||"").trim();
-      let asin = (o.asin||"").trim();
-      let product_name = "";
-      let asin_key = "";
-
-      const p = localProdById[o.productId] || null;
-      if(p){
-        market = (p.market||market||"").trim();
-        product_name = (p.name||"").trim();
-        asin = (p.asin||asin||"").trim();
-        asin_key = asinKeyOf(product_name, asin);
-      }else{
-        // fallback
-        product_name = (o.note||o.product_name||"").trim();
-        asin_key = asinKeyOf(product_name, asin);
-      }
-
-      if(!market){
-        skipped.push({order_no, seller_name, reason:"missing_market"});
-        continue;
-      }
-
-      const product_id = productMap[market+"||"+asin_key];
-      if(!product_id){
-        // 若产品表未命中：尝试即刻补写一个最小产品（避免订单卡死）
-        const pr = {
-          app_key: cfg.app_key,
-          market,
-          asin_key,
-          product_name: product_name || null,
-          asin: asin || null,
-          review_req: (o.reviewReq||o.review_req||null),
-          seller_id: seller_id
-        };
-        const { error: e2 } = await client.from("ops_products_v1").upsert([pr], { onConflict:"app_key,market,asin_key" });
-        if(e2) throw e2;
-
-        // 重新查一次该产品 id（小查询）
-        const { data: d3, error: e3 } = await client.from("ops_products_v1").select("id").eq("app_key", cfg.app_key).eq("market", market).eq("asin_key", asin_key).limit(1);
-        if(e3) throw e3;
-        const pid = d3 && d3[0] && d3[0].id;
-        if(pid) productMap[market+"||"+asin_key] = pid;
-      }
-
-      const final_product_id = productMap[market+"||"+asin_key];
-      if(!final_product_id){
-        skipped.push({order_no, seller_name, market, asin_key, reason:"product_not_resolved"});
-        continue;
-      }
-
-      // 订单字段（事实字段）
-      const unit_price = (typeof U!=="undefined" && U.num) ? U.num(o.amount) : (o.amount ?? null);
-      const fx_override = (typeof U!=="undefined" && U.num) ? U.num(o.fxOverride) : (o.fxOverride ?? null);
-
-      const review_status = (o.review && o.review.status) ? o.review.status : (o.review_status||null);
-      const payout_status = (o.payout && o.payout.status) ? o.payout.status : (o.payout_status||null);
-
-      orderRows.push({
-        app_key: cfg.app_key,
-        seller_id,
-        product_id: final_product_id,
-
-        // 事实字段
-        order_no,
-        market: market || null,
-        currency: (o.currency||null),
-        unit_price: unit_price,
-        fx_override: fx_override,
-        review_req: (o.reviewReq||o.review_req||null),
-        review_status: review_status,
-        payout_status: payout_status,
-
-        // 展示兜底字段（不参与匹配）
-        seller_name: seller_name,
-        product_name: product_name || null,
-        asin: asin || null,
-        asin_key: asin_key,
-
-        // 保留全量订单结构，便于回填/兼容
-        note: o
-      });
-    }
-
-    // 分批 upsert 订单（避免超时）
-    for(const part of chunk(orderRows, 500)){
-      const { error } = await client.from("ops_orders_v2").upsert(part, { onConflict:"app_key,seller_id,order_no,product_id" });
-      if(error) throw error;
-    }
-
-    const msg = `云端推送完成：卖家${sellerRowsUniq.length} 产品${productRowsUniq.length} 订单${orderRows.length}` + (skipped.length?`（跳过${skipped.length}）`:"");
-    console.log("[V7.7 PUSH]", msg, { skipped: skipped.slice(0,20) });
-    toast(msg, skipped.length ? "warn" : "ok");
-
-    if(skipped.length){
-      // 只弹一次简报，避免刷屏
-      const head = skipped.slice(0,20).map(x=>`${x.order_no||"?"} | ${x.seller_name||""} | ${x.reason}`).join("\n");
-      alert("推送完成，但有部分订单未能写入（前 20 条）：\n\n" + head + (skipped.length>20 ? `\n... 还有 ${skipped.length-20} 条` : ""));
-    }
-
-    return { ok:true, pushed:{ sellers:sellerRowsUniq.length, products:productRowsUniq.length, orders:orderRows.length }, skipped: skipped.length, local_source: local.source };
-
+    console.log(`[PUSH] 推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${mergedHash}，local_src=${local.source}）`);
+    toast(`云端推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}`,"ok");
+    return { ok:true, hash: mergedHash, counts: mergedCounts, local_source: local.source };
   }catch(e){
     console.error(e);
     const msg = (e && (e.message||e.details||e.hint)) ? (e.message||e.details||e.hint) : String(e);
@@ -1258,9 +1063,8 @@ async function cloudPull(opts){
   const sb = getCloudClientOrNull();
   if(!sb){ cloudPromptAndSave(); return { ok:false, reason:"no_client" }; }
   const { client, cfg } = sb;
-
   if(!force){
-    if(!confirm(`从云端拉取会覆盖本地当前数据（本地仅作为缓存）。
+    if(!confirm(`从云端拉取会覆盖本地当前数据。
 
 建议：先点「导出 JSON」本地存一份备份。
 
@@ -1268,150 +1072,66 @@ async function cloudPull(opts){
   }
 
   try{
-    // 工具：分页读取
-    async function fetchAll(table, select){
-      const out = [];
-      const step = 5000;
-      let from = 0;
-      while(true){
-        const q = client.from(table).select(select).eq("app_key", cfg.app_key).range(from, from+step-1);
-        const { data, error } = await q;
-        if(error) throw error;
-        out.push(...(data||[]));
-        if(!data || data.length < step) break;
-        from += step;
-      }
-      return out;
-    }
-    const asinKeyOf = (name, asin)=>{
-      const a = (asin||"").trim();
-      if(a) return a;
-      const n = (name||"").trim();
-      return "NAME:" + n;
-    };
+    toast("云端拉取中…");
 
-    // 1) 拉 sellers/products/orders
-    const cloudSellers = await fetchAll("ops_sellers_v1", "id,seller_name,note,created_at,updated_at");
-    const cloudProducts = await fetchAll("ops_products_v1", "id,market,asin_key,product_name,asin,review_req,discount,buyer_commission_cny,seller_id,remark,created_at,updated_at");
-    const cloudOrders = await fetchAll("ops_orders_v2", "id,order_no,market,currency,unit_price,fx_override,review_req,review_status,payout_status,asin,asin_key,product_name,seller_name,seller_id,product_id,note,created_at,updated_at");
+    const { data, error } = await client
+      .from("ops_cloud_snapshots_v1")
+      .select("payload,hash,updated_at,created_at,app_key")
+      .eq("app_key", cfg.appKey)
+      .maybeSingle();
 
-    // 2) 建映射
-    const sellerUuidToName = {};
-    const sellerNameToUuid = {};
-    for(const s of cloudSellers){
-      if(!s) continue;
-      sellerUuidToName[s.id] = s.seller_name;
-      sellerNameToUuid[s.seller_name] = s.id;
+    if(error) throw error;
+
+    if(!data || data.payload == null){
+      alert("云端没有可用快照（app_key=" + cfg.appKey + "）。");
+      return;
     }
 
-    // 3) 组装本地 sellers（以 seller_name 作为本地 seller.id，稳定）
-    const localSellers = cloudSellers.map(s=>{
-      const base = (s && s.note && typeof s.note==="object") ? s.note : {};
-      const sid = s.seller_name;
-      const name = base.name || sid;
-      // 兼容旧结构字段
-      return {
-        id: sid,
-        name: name,
-        contact: base.contact || "",
-        remark: base.remark || "",
-        fx: base.fx || {},
-        commission: base.commission || {}
-      };
-    });
+    // payload 可能是 JSON 字符串或对象
+    let payload = data.payload;
+    if(typeof payload === "string"){
+      try{ payload = JSON.parse(payload); }catch(_e){}
+    }
 
-    // 4) 组装本地 products（生成本地 product.id 并建立映射：cloud_uuid -> local_id）
-    const cloudProdIdToLocalId = {};
-    let prodSeq = 1;
-    const localProducts = cloudProducts.map(p=>{
-      const localId = "P_CLOUD_" + (prodSeq++);
-      cloudProdIdToLocalId[p.id] = localId;
+    // Apply into app state (this app uses S as the live state)
+    if(typeof S !== "undefined"){
+      S = payload;
+      window.state = S;
+    }else{
+      window.state = payload;
+    }
 
-      const seller_name = sellerUuidToName[p.seller_id] || "";
-      return {
-        id: localId,
-        name: p.product_name || "",
-        asin: p.asin || (p.asin_key && !String(p.asin_key).startsWith("NAME:") ? p.asin_key : ""),
-        market: p.market,
-        sellerId: seller_name,
-        reviewType: p.review_req || "",
-        discount: p.discount ?? 0,
-        buyerCommission: p.buyer_commission_cny ?? 0,
-        remark: p.remark || ""
-      };
-    });
-
-    // 5) 组装本地 orders（把 seller_id/product_id resolve 回本地 sellerId/productId）
-    let orderSeq = 1;
-    const localOrders = cloudOrders.map(o=>{
-      const seller_name = sellerUuidToName[o.seller_id] || o.seller_name || "";
-      const localProductId = cloudProdIdToLocalId[o.product_id] || "";
-      const orderId = o.order_no;
-
-      // 尽量恢复旧结构（兼容页面逻辑）
-      const orderObj = (o.note && typeof o.note==="object") ? o.note : {};
-      // 关键字段以云端为准覆盖（避免本地漂移）
-      orderObj.id = orderObj.id || ("O_CLOUD_" + (orderSeq++));
-      orderObj.orderId = orderId;
-      orderObj.sellerId = seller_name;
-      orderObj.productId = localProductId;
-      orderObj.market = o.market || orderObj.market || "";
-      orderObj.currency = o.currency || orderObj.currency || "";
-      orderObj.amount = (o.unit_price ?? orderObj.amount ?? null);
-      orderObj.fxOverride = (o.fx_override ?? orderObj.fxOverride ?? null);
-      orderObj.reviewReq = o.review_req || orderObj.reviewReq || "";
-      orderObj.asin = o.asin || orderObj.asin || "";
-      orderObj.note = orderObj.note || o.product_name || "";
-
-      // review/payout 状态兜底
-      if(!orderObj.review) orderObj.review = { status:"PENDING", date:"", link:"", note:"", doneType:"" };
-      if(o.review_status) orderObj.review.status = o.review_status;
-
-      if(o.payout_status){
-        orderObj.payout = orderObj.payout || {};
-        orderObj.payout.status = o.payout_status;
-        orderObj.payout_status = o.payout_status;
-      }
-
-      return orderObj;
-    });
-
-    // 6) 写回本地 S（本地仅缓存）
-    S = blankState();
-    S.sellers = localSellers;
-    S.products = localProducts;
-    S.orders = localOrders;
-    S.batches = []; // 结算批次：后续如要云端化再迁移；当前 pull 不从云端恢复
-    S.payoutBatches = S.payoutBatches || [];
-
-    // 重建序号
-    try{ if(typeof computeSeq==="function") computeSeq(); }catch(_e){}
-    try{ if(typeof saveNow==="function") saveNow(); else if(typeof save==="function") save(); }catch(_e){}
-
-    // UI reset
+    // 关键：拉取后重置一些 UI 过滤/选择，避免“数据已恢复但被筛选为空”
     try{
-      if(UI && UI.selected && UI.selected.clear) UI.selected.clear();
-      if(UI && UI.payoutSelected && UI.payoutSelected.clear) UI.payoutSelected.clear();
+      UI.selected && UI.selected.clear && UI.selected.clear();
+      UI.payoutSelected && UI.payoutSelected.clear && UI.payoutSelected.clear();
       if(typeof payoutResetView==="function") payoutResetView();
       if($("filterSeller")) $("filterSeller").value = "ALL";
       if($("orderSearch")) $("orderSearch").value = "";
       if($("filterPrincipal")) $("filterPrincipal").value = "ALL";
       if($("filterCommission")) $("filterCommission").value = "ALL";
-      if(UI) UI.page = 1;
-      if(UI) UI.tab = "dashboard";
+      UI.page = 1;
+      UI.tab = "dashboard";
     }catch(_e){}
 
+    // 重新计算序号/索引，持久化并刷新 UI
+    try{ if(typeof restorePayoutSnapshot==="function") restorePayoutSnapshot(S); }catch(_e){}
+    try{ if(typeof computeSeq==="function") computeSeq(); }catch(_e){}
+    try{ if(typeof saveNow==="function") saveNow(); else if(typeof save==="function") save(); }catch(_e){}
     try{ if(typeof renderAll==="function") renderAll(); }catch(_e){}
-    toast(`云端拉取完成：卖家${localSellers.length} 产品${localProducts.length} 订单${localOrders.length}`,"ok");
 
-    return { ok:true, counts:{ sellers:localSellers.length, products:localProducts.length, orders:localOrders.length } };
+    const sc = (S && S.sellers && S.sellers.length) || 0;
+    const pc = (S && S.products && S.products.length) || 0;
+    const oc = (S && S.orders && S.orders.length) || 0;
+    const bc = (S && S.batches && S.batches.length) || 0;
 
-  }catch(e){
+    toast(`云端拉取完成：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${String(data.hash||"").slice(0,8)}…）`);
+  
+    return { ok:true, hash: data.hash, counts:{ sc, pc, oc, bc } };
+}catch(e){
     console.error(e);
-    const msg = (e && (e.message||e.details||e.hint)) ? (e.message||e.details||e.hint) : String(e);
-    toast("云端拉取失败：" + msg,"err");
-    alert("云端拉取失败：\n" + msg);
-    return { ok:false, reason:"pull_failed", error: msg };
+    try{ toast("云端拉取失败：" + (e && e.message ? e.message : String(e)),"err"); }catch(_e){ alert("云端拉取失败：\n" + (e && e.message ? e.message : String(e))); }
+    return { ok:false, error: (e && e.message ? e.message : String(e)) };
   }
 }
 
@@ -12719,16 +12439,16 @@ async function cloudStatusFixed(){
   // Default: autpush OFF (用户可手动开启；但即使开启，也会在本地订单=0 时拒绝推送)
   try{ if(localStorage.getItem(AUTOPUSH_KEY)==null) localStorage.setItem(AUTOPUSH_KEY,'0'); }catch(e){}
 
-  // Hard override buttons + globals (v7.7 三表主库实现)
-  // 说明：云端为唯一主库；push 顺序固定 sellers→products→orders；pull 按外键 resolve。
-  window.cloudStatus = cloudStatus;
-  window.cloudPull = cloudPull;
-  window.cloudPush = cloudPush;
+  // Hard override buttons + globals (override any snapshot-based implementation)
+  window.cloudStatus = ordersCloudStatus;
+  window.cloudPull = ordersCloudPull;
+  window.cloudPush = ordersCloudPush;
 
   // Compatibility: some builds bind buttons to robustCloud* wrappers.
-  window.robustCloudStatus = cloudStatus;
-  window.robustCloudPull = cloudPull;
-  window.robustCloudPush = cloudPush;
+  // Force them to route to the orders-table implementation.
+  window.robustCloudStatus = ordersCloudStatus;
+  window.robustCloudPull = ordersCloudPull;
+  window.robustCloudPush = ordersCloudPush;
 
   document.addEventListener('DOMContentLoaded', ()=>{
     const byId = (id)=>document.getElementById(id);
@@ -13988,1174 +13708,481 @@ async function cloudStatusFixed(){
   window.__V2_TABLE = TABLE;
 })();
 </script>
-/* V7.7_THREE_TABLE_PATCH_V1 */
+
 <script>
+/* ===========================
+   V7.7 FINAL: IndexedDB as the ONLY local authority for Cloud Push/Pull
+   - Always read/write main state from IndexedDB (ops_v642_main/kv/main_state_v1)
+   - Cloud is the authority; local is cache
+   - Three-table model: ops_sellers_v1 / ops_products_v1 / ops_orders_v2
+   =========================== */
 (function(){
-  const PATCH_TAG = "v7.7";
-  const T_SELLERS = "ops_sellers_v1";
-  const T_PRODUCTS = "ops_products_v1";
-  const T_ORDERS = "ops_orders_v2";
+  const V77 = "7.7-final-idb";
+  const IDB_DB = "ops_v642_main";
+  const IDB_STORE = "kv";
+  const IDB_KEY = "main_state_v1";
+  const LS_KEY = "ops_rebuild_v6_4_2_state";
 
-  function _normStr(x){ return String(x==null?"":x).trim(); }
-  function _asinKey(p){
-    const asin = _normStr(p.asin || p.ASIN || p.asin_code);
-    if(asin) return asin;
-    const nm = _normStr(p.name || p.product_name || p.title);
-    return nm ? ("NAME:"+nm) : "";
+  function _now(){ return new Date().toISOString(); }
+  function _s(x){ return (x==null) ? "" : String(x).trim(); }
+  function _n(x){ const v = Number(x); return Number.isFinite(v) ? v : null; }
+
+  function _alert(msg){ try{ alert(msg); }catch(e){ console.log(msg); } }
+
+  async function idbOpen(dbName){
+    return await new Promise((resolve,reject)=>{
+      const req = indexedDB.open(dbName);
+      req.onerror = ()=>reject(req.error||new Error("idb_open_failed"));
+      req.onsuccess = ()=>resolve(req.result);
+      req.onupgradeneeded = ()=>{ /* do not create stores here */ };
+    });
   }
-  function _sellerName(s){
-    return _normStr(s.seller_name || s.name || s.sellerName || s.title || s.id);
+  async function idbGet(dbName, storeName, key){
+    const db = await idbOpen(dbName);
+    try{
+      return await new Promise((resolve,reject)=>{
+        const tx = db.transaction([storeName], "readonly");
+        const st = tx.objectStore(storeName);
+        const req = st.get(key);
+        req.onsuccess = ()=>resolve(req.result);
+        req.onerror = ()=>reject(req.error||new Error("idb_get_failed"));
+      });
+    } finally {
+      try{ db.close(); }catch(e){}
+    }
+  }
+  async function idbSet(dbName, storeName, key, value){
+    const db = await idbOpen(dbName);
+    try{
+      return await new Promise((resolve,reject)=>{
+        const tx = db.transaction([storeName], "readwrite");
+        const st = tx.objectStore(storeName);
+        const req = st.put(value, key);
+        req.onsuccess = ()=>resolve(true);
+        req.onerror = ()=>reject(req.error||new Error("idb_put_failed"));
+      });
+    } finally {
+      try{ db.close(); }catch(e){}
+    }
   }
 
-  async function _getCloud(){
-    const cfg = (typeof getCloudCfgOrNull === "function") ? getCloudCfgOrNull() : null;
-    if(!cfg){ alert("未设置云端（请先点“云端设置”）。"); return null; }
-    if(typeof ensureSupabase === "function") await ensureSupabase(true);
-    const wrap = (typeof getCloudClient === "function") ? getCloudClient(cfg, true, false) : null;
-    if(!wrap || !wrap.client){ alert("Supabase SDK 未就绪，请稍后重试或刷新页面。"); return null; }
-    return wrap;
+  function normalizeState(st){
+    st = st && typeof st === "object" ? st : {};
+    const out = {
+      sellers: Array.isArray(st.sellers) ? st.sellers : [],
+      products: Array.isArray(st.products) ? st.products : [],
+      orders: Array.isArray(st.orders) ? st.orders : [],
+      batches: Array.isArray(st.batches) ? st.batches : [],
+      payoutBatches: Array.isArray(st.payoutBatches) ? st.payoutBatches : [],
+      settings: st.settings && typeof st.settings==="object" ? st.settings : {},
+      seq: st.seq && typeof st.seq==="object" ? st.seq : {}
+    };
+    return out;
+  }
+
+  async function loadLocalMainState(){
+    // 1) Prefer direct IDB key used by UI
+    try{
+      const v = await idbGet(IDB_DB, IDB_STORE, IDB_KEY);
+      if(v && typeof v === "object"){
+        return { state: normalizeState(v), source: "idb:"+IDB_DB+"/"+IDB_STORE+"/"+IDB_KEY };
+      }
+    }catch(e){}
+    // 2) Fallback: existing helper if present
+    try{
+      if(typeof window.getLocalSnapshotPreferIDB === "function"){
+        const r = await window.getLocalSnapshotPreferIDB();
+        const st = r && (r.data||r.state||r);
+        if(st && typeof st === "object") return { state: normalizeState(st), source: (r&&r.source)||"helper" };
+      }
+    }catch(e){}
+    // 3) Fallback: localStorage
+    try{
+      const raw = localStorage.getItem(LS_KEY);
+      if(raw){
+        const st = JSON.parse(raw);
+        return { state: normalizeState(st), source: "localStorage:"+LS_KEY };
+      }
+    }catch(e){}
+    // 4) Final fallback
+    return { state: normalizeState(window.S||window.state||{}), source: "window.S" };
+  }
+
+  async function saveLocalMainState(state){
+    const st = normalizeState(state);
+    // write IDB
+    try{ await idbSet(IDB_DB, IDB_STORE, IDB_KEY, st); }catch(e){}
+    // optional compatibility write
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(st)); }catch(e){}
+    // bind to globals so existing render uses it
+    try{
+      window.S = st; window.state = st;
+      try{ S = st; }catch(_e){}
+      try{ state = st; }catch(_e){}
+    }catch(e){}
+  }
+
+  async function getCloud(){
+    if(typeof window._getCloudClient === "function"){
+      return await window._getCloudClient();
+    }
+    // fallback: try existing globals
+    if(window.supabase && window.__cloudCfg){
+      return { client: window.supabase.createClient(window.__cloudCfg.url, window.__cloudCfg.anon), cfg: window.__cloudCfg };
+    }
+    return null;
+  }
+
+  function buildAsinKey(asin, name){
+    const a = _s(asin);
+    if(a) return a;
+    const n = _s(name);
+    return n ? ("NAME:"+n) : "";
+  }
+
+  function pickSellerName(s){
+    // agreed rule: seller_name is stable; prefer s.name, fallback s.id
+    const name = _s(s && (s.name||s.seller_name||s.title));
+    const id = _s(s && (s.id||s.sellerId));
+    return name || id;
+  }
+
+  function pickProductName(p){
+    return _s(p && (p.name||p.product_name||p.title));
+  }
+
+  function pickMarket(p, o){
+    return _s((p && (p.market||p.country)) || (o && (o.market||o.country||o.site)) ) || "";
   }
 
   async function cloudStatusV77(){
-    const cloud = await _getCloud(); if(!cloud) return;
-    const sb = cloud.client;
-    const appKey = cloud.cfg.app_key;
-
-    async function cnt(table){
-      const { count, error } = await sb.from(table).select("id", { count:"exact", head:true }).eq("app_key", appKey);
-      if(error) throw error;
-      return count||0;
-    }
-
-    try{
-      const [cs, cp, co] = await Promise.all([cnt(T_SELLERS), cnt(T_PRODUCTS), cnt(T_ORDERS)]);
-      alert(
-        "云端主库状态（三表）\n" +
-        "PATCH_V2_MASTER="+PATCH_TAG+"\n" +
-        "app_key="+appKey+"\n\n" +
-        T_SELLERS+"="+cs+"\n" +
-        T_PRODUCTS+"="+cp+"\n" +
-        T_ORDERS+"="+co
-      );
-    }catch(e){
-      console.error(e);
-      alert("云端状态失败："+(e && (e.message||e.toString())));
-    }
+    const cloud = await getCloud();
+    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    const { client: sb, cfg } = cloud;
+    const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
+    if(!appKey) return _alert("云端配置缺少 app_key。");
+    const q = (t)=>sb.from(t).select("id", { count:"exact", head:true }).eq("app_key", appKey);
+    const [a,b,c] = await Promise.allSettled([q("ops_sellers_v1"), q("ops_products_v1"), q("ops_orders_v2")]);
+    const cnt = (r)=> (r && r.status==="fulfilled" && r.value) ? (r.value.count||0) : ("ERR");
+    _alert(
+      "云端状态（三表主库）
+"+
+      "V7.7="+V77+"
+"+
+      "app_key="+appKey+"
+"+
+      "ops_sellers_v1="+cnt(a)+"
+"+
+      "ops_products_v1="+cnt(b)+"
+"+
+      "ops_orders_v2="+cnt(c)
+    );
   }
 
   async function cloudPushV77(){
-    const cloud = await _getCloud(); if(!cloud) return;
-    const sb = cloud.client;
-    const appKey = cloud.cfg.app_key;
+    const cloud = await getCloud();
+    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    const { client: sb, cfg } = cloud;
+    const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
+    if(!appKey) return _alert("云端配置缺少 app_key。");
 
-    // 读本地权威（优先 IDB）
-    let local;
-    try{
-      if(typeof getLocalSnapshotPreferIDB === "function") {
-        const r = await getLocalSnapshotPreferIDB();
-        local = r && (r.data||r.state||r) || {};
-      } else {
-        local = window.S || window.state || {};
-      }
-    }catch(e){
-      local = window.S || window.state || {};
-    }
-
-    const sellers = Array.isArray(local.sellers) ? local.sellers : [];
-    const products = Array.isArray(local.products) ? local.products : [];
-    const orders = Array.isArray(local.orders) ? local.orders : [];
+    const local = await loadLocalMainState();
+    const st = local.state;
+    const sellers = st.sellers||[];
+    const products = st.products||[];
+    const orders = st.orders||[];
 
     // 1) upsert sellers
     const sellerRows = [];
-    const sellerNameToLocalId = new Map();
+    const localSellerIdToName = new Map();
     for(const s of sellers){
-      const name = _sellerName(s);
-      if(!name) continue;
-      sellerRows.push({ app_key: appKey, seller_name: name, note: (s.note||s.remark||null) });
-      // 记录本地 sellerId 到 name 的映射（用于后续订单/产品关联）
-      if(s && (s.id!=null)) sellerNameToLocalId.set(String(s.id), name);
+      if(!s) continue;
+      const sn = pickSellerName(s);
+      if(!sn) continue;
+      localSellerIdToName.set(_s(s.id||s.sellerId||sn), sn);
+      sellerRows.push({ app_key: appKey, seller_name: sn, remark: _s(s.remark||"") });
+    }
+    // de-dup by seller_name
+    const seenSeller = new Set();
+    const sellerRowsDedup = [];
+    for(const r of sellerRows){
+      const k = r.seller_name;
+      if(!k || seenSeller.has(k)) continue;
+      seenSeller.add(k);
+      sellerRowsDedup.push(r);
     }
 
-    // dedupe sellers by seller_name
-    const seenSeller = new Set();
-    const sellerRows2 = [];
-    for(const r of sellerRows){
-      if(seenSeller.has(r.seller_name)) continue;
-      seenSeller.add(r.seller_name);
-      sellerRows2.push(r);
+    let sellerUpserted = 0;
+    let sellerNameToUuid = new Map();
+    try{
+      if(sellerRowsDedup.length){
+        const { data, error } = await sb.from("ops_sellers_v1")
+          .upsert(sellerRowsDedup, { onConflict: "app_key,seller_name" })
+          .select("id,seller_name");
+        if(error) throw error;
+        sellerUpserted = Array.isArray(data) ? data.length : 0;
+      }
+      // fetch all sellers for mapping
+      const { data: sAll, error: sErr } = await sb.from("ops_sellers_v1").select("id,seller_name").eq("app_key", appKey);
+      if(sErr) throw sErr;
+      (sAll||[]).forEach(r=> sellerNameToUuid.set(_s(r.seller_name), _s(r.id)));
+    }catch(e){
+      return _alert("云端推送失败：卖家 upsert/映射失败
+
+"+(e && (e.message||JSON.stringify(e)) ));
     }
 
     // 2) upsert products
     const productRows = [];
+    const localProductIdToKey = new Map(); // local pid -> {market, asin_key}
     for(const p of products){
-      const market = _normStr(p.market || p.Market || p.country);
-      const asin_key = _asinKey(p);
+      if(!p) continue;
+      const name = pickProductName(p);
+      const asin = _s(p.asin||"");
+      const market = _s(p.market||"");
+      const asin_key = buildAsinKey(asin, name);
       if(!market || !asin_key) continue;
-      const nm = _normStr(p.name || p.product_name || p.title);
-      const asin = _normStr(p.asin || p.ASIN || "");
-      const review_req = _normStr(p.reviewType || p.review_req || p.review || "");
-      const discount = (p.discount!=null && p.discount!=="") ? Number(p.discount) : null;
-      const buyer_commission_cny = (p.buyerCommission!=null && p.buyerCommission!=="") ? Number(p.buyerCommission) : (p.buyer_commission_cny!=null?Number(p.buyer_commission_cny):null);
-      // seller_id：如果本地产品有 sellerId，则先用 sellerNameToLocalId 找 name，稍后通过云端回填 id（这里先写 null，避免 FK 不存在）
+      localProductIdToKey.set(_s(p.id||p.productId||""), { market, asin_key });
       productRows.push({
         app_key: appKey,
         market,
         asin_key,
-        product_name: nm||null,
+        product_name: name||null,
         asin: asin||null,
-        review_req: review_req||null,
-        discount: (Number.isFinite(discount)?discount:null),
-        buyer_commission_cny: (Number.isFinite(buyer_commission_cny)?buyer_commission_cny:null),
-        seller_id: null,
-        remark: _normStr(p.remark||p.note||"")||null
+        review_req: _s(p.review_req||p.reviewReq||p.reviewType||"")||null,
+        discount: (p.discount!=null && p.discount!=="") ? _n(p.discount) : null,
+        buyer_commission_cny: (p.buyer_commission_cny!=null && p.buyerCommissionCny!=null) ? null : null,
+        remark: _s(p.remark||"")||null
       });
     }
-    // dedupe products by (market, asin_key)
+    // de-dup by market+asin_key
     const seenProd = new Set();
-    const productRows2 = [];
+    const productRowsDedup = [];
     for(const r of productRows){
-      const k = r.market+"||"+r.asin_key;
+      const k = r.market+"|"+r.asin_key;
       if(seenProd.has(k)) continue;
       seenProd.add(k);
-      productRows2.push(r);
+      productRowsDedup.push(r);
     }
 
-    const result = {
-      pushedSellers: 0,
-      pushedProducts: 0,
-      pushedOrders: 0,
-      skippedOrders: 0,
-      issues: []
-    };
-
+    let productUpserted = 0;
+    let prodKeyToUuid = new Map();
     try{
-      if(sellerRows2.length){
-        const { error } = await sb.from(T_SELLERS)
-          .upsert(sellerRows2, { onConflict: "app_key,seller_name" });
+      if(productRowsDedup.length){
+        const { data, error } = await sb.from("ops_products_v1")
+          .upsert(productRowsDedup, { onConflict: "app_key,market,asin_key" })
+          .select("id,market,asin_key");
         if(error) throw error;
-        result.pushedSellers = sellerRows2.length;
+        productUpserted = Array.isArray(data) ? data.length : 0;
       }
-
-      // 拉回 seller_id 映射（seller_name -> id）
-      const sellerIdByName = new Map();
-      {
-        const { data, error } = await sb.from(T_SELLERS)
-          .select("id,seller_name")
-          .eq("app_key", appKey);
-        if(error) throw error;
-        for(const r of (data||[])) sellerIdByName.set(r.seller_name, r.id);
-      }
-
-      // 填充产品 seller_id（如果本地产品能关联到卖家）
-      for(const p of products){
-        const market = _normStr(p.market || p.Market || p.country);
-        const asin_key = _asinKey(p);
-        if(!market || !asin_key) continue;
-        const localSellerId = (p.sellerId!=null) ? String(p.sellerId) : (p.seller_id!=null?String(p.seller_id):"");
-        const sellerName = localSellerId ? (sellerNameToLocalId.get(localSellerId) || "") : _normStr(p.seller_name||p.sellerName||"");
-        const sid = sellerName ? (sellerIdByName.get(sellerName) || null) : null;
-        // 在 productRows2 里找到并更新
-        const key = market+"||"+asin_key;
-        for(const r of productRows2){
-          if((r.market+"||"+r.asin_key)===key){
-            r.seller_id = sid;
-            break;
-          }
-        }
-      }
-
-      if(productRows2.length){
-        const { error } = await sb.from(T_PRODUCTS)
-          .upsert(productRows2, { onConflict: "app_key,market,asin_key" });
-        if(error) throw error;
-        result.pushedProducts = productRows2.length;
-      }
-
-      // product 映射（market||asin_key -> id）
-      const productIdByKey = new Map();
-      {
-        const { data, error } = await sb.from(T_PRODUCTS)
-          .select("id,market,asin_key")
-          .eq("app_key", appKey);
-        if(error) throw error;
-        for(const r of (data||[])) productIdByKey.set(r.market+"||"+r.asin_key, r.id);
-      }
-
-      // 3) upsert orders（如无订单，不应阻塞 sellers/products 推送）
-      const orderRows = [];
-      for(const o of orders){
-        const order_no = _normStr(o.orderNo || o.order_no || o.order || o.id2);
-        if(!order_no) continue;
-
-        // seller_id：优先本地 order.sellerId -> sellers[] 映射到 seller_name -> 云端 id
-        const localSid = (o.sellerId!=null) ? String(o.sellerId) : (o.seller_id!=null?String(o.seller_id):"");
-        const sellerName = localSid ? (sellerNameToLocalId.get(localSid) || "") : _normStr(o.seller_name||o.sellerName||"");
-        const seller_id = sellerName ? (sellerIdByName.get(sellerName) || null) : null;
-
-        const market = _normStr(o.market || o.Market || "");
-        const asin_key = _asinKey({ asin:o.asin, name:o.productName||o.product_name||o.name||"" }) || _normStr(o.asin_key||"");
-        const prodKey = (market && asin_key) ? (market+"||"+asin_key) : "";
-        const product_id = prodKey ? (productIdByKey.get(prodKey) || null) : null;
-
-        if(!seller_id || !product_id){
-          result.skippedOrders++;
-          if(result.issues.length < 50){
-            result.issues.push({
-              order_no,
-              reason: !seller_id ? "缺 seller_id" : "缺 product_id",
-              hint: !seller_id ? ("卖家未能匹配："+(sellerName||"(空)")) : ("产品未能匹配：market="+market+" asin_key="+asin_key)
-            });
-          }
-          continue;
-        }
-
-        orderRows.push({
-          app_key: appKey,
-          seller_id,
-          product_id,
-          order_no,
-          market: market||null,
-          currency: _normStr(o.currency||"")||null,
-          amount: (o.amount!=null && o.amount!=="") ? Number(o.amount) : (o.unit_price!=null?Number(o.unit_price):null),
-          fx_override: (o.fxOverride!=null && o.fxOverride!=="") ? Number(o.fxOverride) : (o.fx_override!=null?Number(o.fx_override):null),
-          review_status: _normStr(o.reviewStatus||o.review_status||"")||null,
-          payout_status: _normStr(o.payoutStatus||o.payout_status||"")||null,
-          pay_status: _normStr(o.payStatus||o.pay_status||"")||null,
-          comm_status: _normStr(o.commStatus||o.comm_status||"")||null,
-          remark: _normStr(o.remark||o.note||"")||null,
-          // 展示兜底字段（不参与匹配）
-          seller_name: sellerName||null,
-          product_name: _normStr(o.productName||o.product_name||"")||null,
-          asin_key: asin_key||null,
-          asin: _normStr(o.asin||"")||null
-        });
-      }
-
-      if(orderRows.length){
-        const { error } = await sb.from(T_ORDERS)
-          .upsert(orderRows, { onConflict: "app_key,seller_id,order_no,product_id" });
-        if(error) throw error;
-        result.pushedOrders = orderRows.length;
-      }
-
-      // 提示
-      let msg =
-        "云端推送完成（三表）\n" +
-        "PATCH_V2_MASTER="+PATCH_TAG+"\n" +
-        "app_key="+appKey+"\n\n" +
-        "卖家 upsert："+result.pushedSellers+"\n" +
-        "产品 upsert："+result.pushedProducts+"\n" +
-        "订单 upsert："+result.pushedOrders+"\n";
-      if(result.skippedOrders){
-        msg += "\n跳过订单："+result.skippedOrders+"（前 50 条原因见控制台）\n";
-        console.warn("[V7.7 PUSH] skipped issues:", result.issues);
-      }
-      alert(msg);
+      const { data: pAll, error: pErr } = await sb.from("ops_products_v1").select("id,market,asin_key").eq("app_key", appKey);
+      if(pErr) throw pErr;
+      (pAll||[]).forEach(r=> prodKeyToUuid.set(_s(r.market)+"|"+_s(r.asin_key), _s(r.id)));
     }catch(e){
-      console.error(e);
-      alert("云端推送失败："+(e && (e.message||e.toString())));
-    }
-  }
+      return _alert("云端推送失败：产品 upsert/映射失败
 
-  function _bind(){
-    try{
-      const bPush = document.getElementById("btnCloudPush");
-      const bStatus = document.getElementById("btnCloudStatus");
-      // pull 目前你这版已能正常拉取 orders_v2，这里先不改，只修复 status/push 的“落回 v1”问题
-      if(bStatus) bStatus.onclick = ()=> cloudStatusV77();
-      if(bPush) bPush.onclick = ()=> cloudPushV77();
-      // 同时覆盖全局，避免被旧逻辑调用
-      window.cloudStatus = cloudStatusV77;
-      window.cloudPush = cloudPushV77;
-      window.ordersCloudStatus = cloudStatusV77;
-      window.ordersCloudPush = cloudPushV77;
-      console.log("[V7.7] three-table patch bound:", PATCH_TAG);
-    }catch(e){ console.warn("[V7.7] bind failed", e); }
-  }
-
-  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", _bind);
-  else _bind();
-})();
-</script>
-
-<!-- ===================== V7.7 THREE-TABLE MASTER OVERRIDE (PATCH3) ===================== -->
-<script>
-(function(){
-  // 强制三表主库：ops_sellers_v1 / ops_products_v1 / ops_orders_v2
-  const V77 = {
-    SELLERS: "ops_sellers_v1",
-    PRODUCTS: "ops_products_v1",
-    ORDERS: "ops_orders_v2",
-    APPKEY: null,
-    sb: null
-  };
-
-  function _nowIso(){ return new Date().toISOString(); }
-  function _s(v){ return (v==null) ? "" : String(v); }
-  function _trim(v){ return _s(v).trim(); }
-  function _num(v){
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-  function _asinKey(asin, name){
-    const a = _trim(asin);
-    if(a) return a;
-    const n = _trim(name);
-    return "NAME:" + (n || "UNKNOWN");
-  }
-
-  function _toast(msg){
-    try{ if(typeof window.showNotice === "function") return window.showNotice("提示", msg); }catch(e){}
-    try{ if(typeof window.toast === "function") return window.toast(msg); }catch(e){}
-    try{ alert(msg); }catch(e){}
-  }
-
-  function _getCfg(){
-    try{
-      if(typeof window.getCloudCfg === "function") return window.getCloudCfg();
-    }catch(e){}
-    // 最后兜底：从 localStorage 读取
-    const url = (localStorage.getItem("SUPABASE_URL")||localStorage.getItem("OPS_CLOUD_URL")||"").trim();
-    const anon = (localStorage.getItem("SUPABASE_ANON")||localStorage.getItem("OPS_CLOUD_ANON_KEY")||"").trim();
-    const app = (localStorage.getItem("OPS_CLOUD_APP_KEY")||localStorage.getItem("app_key")||"dalemy").trim();
-    return { url, anon, app_key: app };
-  }
-
-  function _getSupabase(){
-    if(V77.sb) return V77.sb;
-    const cfg = _getCfg();
-    V77.APPKEY = cfg.app_key || "dalemy";
-    if(!cfg.url || !cfg.anon){
-      _toast("请先设置云端（Supabase URL / anon key）。");
-      throw new Error("missing_supabase_cfg");
-    }
-    const sb = (window.supabase && window.supabase.createClient) ? window.supabase.createClient(cfg.url, cfg.anon) : null;
-    if(!sb){
-      _toast("Supabase SDK 未加载（supabase.createClient 不存在）。");
-      throw new Error("missing_supabase_sdk");
-    }
-    V77.sb = sb;
-    return sb;
-  }
-
-  async function _count(table){
-    const sb = _getSupabase();
-    const q = await sb.from(table).select("id", { count: "exact", head: true });
-    if(q.error) throw q.error;
-    return q.count || 0;
-  }
-
-  async function cloudStatusV77(){
-    try{
-      const cfg = _getCfg();
-      const app = (cfg.app_key||"dalemy").trim() || "dalemy";
-      V77.APPKEY = app;
-      const sellers = await _count(V77.SELLERS);
-      const products = await _count(V77.PRODUCTS);
-      const orders = await _count(V77.ORDERS);
-      alert(
-        "云端主库三表状态：\n" +
-        `app_key=${app}\n` +
-        `ops_sellers_v1=${sellers}\n` +
-        `ops_products_v1=${products}\n` +
-        `ops_orders_v2=${orders}\n` +
-        "V7.7=ON"
-      );
-    }catch(e){
-      alert("云端状态失败：" + (e && e.message ? e.message : String(e)));
-    }
-  }
-
-  function _localState(){
-    // 兼容：S 是全局状态
-    const S = window.S;
-    if(!S) return { sellers:[], products:[], orders:[] };
-    return {
-      sellers: Array.isArray(S.sellers) ? S.sellers : [],
-      products: Array.isArray(S.products) ? S.products : [],
-      orders: Array.isArray(S.orders) ? S.orders : []
-    };
-  }
-
-  async function cloudPushV77(){
-    const sb = _getSupabase();
-    const { sellers, products, orders } = _localState();
-
-    // ---- 1) sellers upsert ----
-    const sellerRows = sellers
-      .map(s=>({
-        app_key: V77.APPKEY,
-        seller_name: _trim(s.name || s.seller_name || s.sellerName || s.id),
-        note: s.note || null,
-        remark: s.remark || null,
-        updated_at: _nowIso()
-      }))
-      .filter(r=>r.seller_name);
-
-    // ---- 2) products upsert (include derived from orders if needed) ----
-    const productMapById = new Map();
-    for(const p of products){ if(p && p.id) productMapById.set(p.id, p); }
-
-    const derivedProducts = [];
-    for(const o of orders){
-      if(!o) continue;
-      let p = o.productId ? productMapById.get(o.productId) : null;
-      const market = _trim((p && p.market) || o.market || "");
-      const asin = _trim((p && (p.asin||p.asin_key)) || o.asin || "");
-      const pname = _trim((p && (p.name||p.product_name)) || o.title || o.note || "");
-      // 没选产品也要能推：用订单字段构造一个产品行（只要 market/asin_key 定得住）
-      if(!p){
-        const ak = _asinKey(asin, pname);
-        if(market && ak){
-          derivedProducts.push({
-            app_key: V77.APPKEY,
-            market,
-            asin_key: ak,
-            product_name: pname || null,
-            asin: asin || null,
-            review_req: _trim(o.reviewReq || o.review_req || "") || null,
-            discount: _num(o.discount),
-            buyer_commission_cny: null,
-            seller_id: null,
-            updated_at: _nowIso()
-          });
-        }
-      }
+"+(e && (e.message||JSON.stringify(e)) ));
     }
 
-    const productRowsBase = products.map(p=>{
-      const market = _trim(p.market || "");
-      const asin = _trim(p.asin || "");
-      const pname = _trim(p.name || p.product_name || "");
-      const asin_key = _asinKey(asin, pname);
-      return {
-        app_key: V77.APPKEY,
-        market,
-        asin_key,
-        product_name: pname || null,
-        asin: asin || null,
-        review_req: _trim(p.reviewType || p.review_req || "") || null,
-        discount: _num(p.discount),
-        buyer_commission_cny: _num(p.buyerCommissionCny || p.buyer_commission_cny),
-        seller_id: null,
-        remark: p.remark || null,
-        updated_at: _nowIso()
-      };
-    }).filter(r=>r.market && r.asin_key);
-
-    // 去重：按 app_key+market+asin_key
-    const prodKey = (r)=> `${r.app_key}||${r.market}||${r.asin_key}`;
-    const prodSeen = new Set();
-    const productRows = [];
-    for(const r of [...productRowsBase, ...derivedProducts]){
-      const k = prodKey(r);
-      if(prodSeen.has(k)) continue;
-      prodSeen.add(k);
-      productRows.push(r);
-    }
-
-    // ---- 3) upsert sellers/products then fetch ids maps ----
-    let upSellers = 0, upProducts = 0, upOrders = 0;
-
-    if(sellerRows.length){
-      const q = await sb.from(V77.SELLERS)
-        .upsert(sellerRows, { onConflict: "app_key,seller_name" })
-        .select("id, seller_name");
-      if(q.error) throw q.error;
-      upSellers = (q.data||[]).length;
-    }
-
-    if(productRows.length){
-      const q = await sb.from(V77.PRODUCTS)
-        .upsert(productRows, { onConflict: "app_key,market,asin_key" })
-        .select("id, market, asin_key");
-      if(q.error) throw q.error;
-      upProducts = (q.data||[]).length;
-    }
-
-    // build maps for fk resolving
-    const sellerRows2 = await sb.from(V77.SELLERS).select("id, seller_name").eq("app_key", V77.APPKEY);
-    if(sellerRows2.error) throw sellerRows2.error;
-    const sellerIdByName = new Map((sellerRows2.data||[]).map(r=>[String(r.seller_name), r.id]));
-
-    const productRows2 = await sb.from(V77.PRODUCTS).select("id, market, asin_key").eq("app_key", V77.APPKEY);
-    if(productRows2.error) throw productRows2.error;
-    const productIdByKey = new Map((productRows2.data||[]).map(r=>[`${r.market}||${r.asin_key}`, r.id]));
-
-    // ---- 4) orders upsert (only when we can resolve FKs) ----
+    // 3) upsert orders (only those we can resolve to seller_id & product_id)
     const orderRows = [];
     const skipped = [];
     for(const o of orders){
       if(!o) continue;
-      const order_no = _trim(o.orderId || o.order_no || o.orderNo || "");
-      const sellerIdLocal = _trim(o.sellerId || "");
-      // 本地卖家是 sellerId -> seller.name
-      let sellerName = "";
-      try{
-        if(window.U && typeof window.U.sellerById === "function"){
-          const s = window.U.sellerById(sellerIdLocal);
-          sellerName = _trim(s && s.name);
-        }
-      }catch(e){}
-      if(!sellerName) sellerName = _trim(o.seller_name || "");
-      const seller_id = sellerIdByName.get(sellerName);
+      const order_no = _s(o.orderId||o.order_no||o.orderNo);
+      if(!order_no){ skipped.push({reason:"缺少订单号", o}); continue; }
 
-      const market = _trim(o.market || "");
-      // resolve product key
-      let p = null;
-      try{ p = o.productId ? productMapById.get(o.productId) : null; }catch(e){}
-      const asin = _trim((p && p.asin) || o.asin || "");
-      const pname = _trim((p && (p.name||p.product_name)) || o.title || o.note || "");
-      const asin_key = _asinKey(asin, pname);
-      const product_id = productIdByKey.get(`${market}||${asin_key}`);
+      // resolve seller_name
+      const localSellerId = _s(o.sellerId||o.seller_id||"");
+      const seller_name = localSellerIdToName.get(localSellerId) || _s(o.seller_name||o.sellerName||"");
+      const seller_id = sellerNameToUuid.get(_s(seller_name));
+      if(!seller_id){ skipped.push({reason:"无法解析 seller_id", order_no, seller_name}); continue; }
 
-      if(!order_no || !sellerName){
-        skipped.push({ reason:"missing seller/order_no", order_no, sellerName });
-        continue;
-      }
-      if(!seller_id || !product_id){
-        skipped.push({ reason:"missing fk", order_no, sellerName, market, asin_key, hasSeller:!!seller_id, hasProduct:!!product_id });
-        continue;
-      }
+      // resolve product via productId or asin+name+market
+      const prod = (o.productId!=null) ? (st.products||[]).find(p=>_s(p.id)==_s(o.productId)) : null;
+      const market = _s(o.market||pickMarket(prod,o));
+      const asin = _s((prod && prod.asin) || o.asin || "");
+      const pname = _s((prod && (prod.name||prod.product_name)) || o.product_name || o.productName || "");
+      const asin_key = buildAsinKey(asin, pname);
+      if(!market || !asin_key){ skipped.push({reason:"无法解析 market/asin_key", order_no, market, asin_key}); continue; }
+
+      const product_id = prodKeyToUuid.get(market+"|"+asin_key);
+      if(!product_id){ skipped.push({reason:"无法解析 product_id（云端未找到对应产品）", order_no, market, asin_key}); continue; }
 
       orderRows.push({
-        app_key: V77.APPKEY,
+        app_key: appKey,
         seller_id,
         product_id,
-        seller_name: sellerName,
         order_no,
         market: market || null,
-        asin: asin || null,
-        asin_key,
-        product_name: pname || null,
-
-        unit_price: _num(o.amount),
-        fx_override: _num(o.fx),
-
-        review_req: _trim(o.reviewReq || "") || null,
-        review_status: _trim((o.review && o.review.status) || o.review_status || "") || null,
-        payout_status: _trim((o.payout && o.payout.status) || o.payout_status || "") || null,
-
-        note: o.note || null,
-        updated_at: _nowIso()
+        currency: _s(o.currency||o.ccy||"")||null,
+        amount: (o.amount!=null && o.amount!=="") ? _n(o.amount) : _n(o.unit_price||o.unitPrice),
+        fx_override: (o.fx_override!=null && o.fx_override!=="") ? _n(o.fx_override) : (o.fxOverride!=null? _n(o.fxOverride): null),
+        review_status: _s(o.review_status||o.reviewStatus|| (o.review&&o.review.status)||"")||null,
+        pay_status: _s(o.pay_status||o.payStatus||"")||null,
+        payout_status: _s(o.payout_status||o.payoutStatus|| (o.payout&&o.payout.status)||"")||null,
+        remark: _s(o.remark||o.note||"")||null
       });
     }
 
-    if(!orderRows.length){
-      const msg = skipped.length
-        ? ("没有可推送的订单（外键无法解析）。\n" + JSON.stringify(skipped.slice(0,10), null, 2))
-        : "没有可推送的订单。";
-      alert(msg);
-      return;
+    let orderUpserted = 0;
+    try{
+      if(orderRows.length){
+        const { data, error } = await sb.from("ops_orders_v2")
+          .upsert(orderRows, { onConflict: "app_key,seller_id,order_no,product_id" })
+          .select("id");
+        if(error) throw error;
+        orderUpserted = Array.isArray(data) ? data.length : 0;
+      }
+    }catch(e){
+      return _alert("云端推送失败：订单 upsert 失败
+
+"+(e && (e.message||JSON.stringify(e)) ));
     }
 
-    // 为了兼容你当前云端的唯一约束（你之前 v2 里是 app_key+seller_name+order_no+asin_key）
-    const q3 = await sb.from(V77.ORDERS)
-      .upsert(orderRows, { onConflict: "app_key,seller_name,order_no,asin_key" })
-      .select("id");
-    if(q3.error) throw q3.error;
-    upOrders = (q3.data||[]).length;
-
-    alert(
-      "云端推送完成（V7.7 三表）\n" +
-      `卖家 upsert: ${upSellers}\n` +
-      `产品 upsert: ${upProducts}\n` +
-      `订单 upsert: ${upOrders}\n` +
-      (skipped.length ? `跳过: ${skipped.length}（外键解析失败/缺字段）` : "")
-    );
+    const msg =
+      "云端推送完成（三表主库）
+"+
+      "V7.7="+V77+"
+"+
+      "app_key="+appKey+"
+"+
+      "本地来源="+local.source+"
+"+
+      "本地数量：卖家="+sellers.length+" 产品="+products.length+" 订单="+orders.length+"
+"+
+      "卖家 upsert="+sellerUpserted+"
+"+
+      "产品 upsert="+productUpserted+"
+"+
+      "订单 upsert="+orderUpserted+"
+"+
+      (skipped.length ? ("
+跳过订单="+skipped.length+"（控制台查看前10条）") : "");
+    console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
+    _alert(msg);
   }
 
   async function cloudPullV77(){
-    // 先不强制替换你现有 pull（你反馈 pull 正常）
-    // 这里只做一个提示：避免按钮仍指向旧 v1
-    alert("V7.7 提示：当前 pull 已可用。若仍出现错配/漂移，再切换为三表 resolve pull。");
-  }
+    const cloud = await getCloud();
+    if(!cloud) return _alert("未设置云端（请先点“云端设置”）。");
+    const { client: sb, cfg } = cloud;
+    const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
+    if(!appKey) return _alert("云端配置缺少 app_key。");
 
-  // ===== 强制接管按钮：使用 capture 先拦截旧 onclick =====
-  function hijack(){
-    const bStatus = document.getElementById("btnCloudStatus");
-    const bPush = document.getElementById("btnCloudPush");
-    const bPull = document.getElementById("btnCloudPull");
-
-    if(bStatus){
-      bStatus.addEventListener("click", function(ev){
-        ev.preventDefault(); ev.stopImmediatePropagation();
-        cloudStatusV77();
-      }, true);
-    }
-    if(bPush){
-      bPush.addEventListener("click", function(ev){
-        ev.preventDefault(); ev.stopImmediatePropagation();
-        cloudPushV77();
-      }, true);
-    }
-    if(bPull){
-      // 先不完全替换 pull（避免影响你现有稳定拉取）；但也拦截旧 v1 提示时可手动启用
-      // 如需强制三表 pull，把下面两行打开即可：
-      // ev.preventDefault(); ev.stopImmediatePropagation(); cloudPullV77();
-    }
-    // 同时覆写全局方法，防止别处调用旧函数
-    window.ordersCloudStatus = cloudStatusV77;
-    window.cloudStatus = cloudStatusV77;
-    window.ordersCloudPush = cloudPushV77;
-    window.cloudPush = cloudPushV77;
-  }
-
-  // 延迟接管，确保覆盖任何后续绑定
-  setTimeout(hijack, 0);
-  setTimeout(hijack, 500);
-  setTimeout(hijack, 1500);
-})();
-</script>
-
-<script>
-/* ===== V7.7 PATCH4: 强制全局覆写云端状态/推送，且允许“无订单也推卖家/产品” ===== */
-(function(){
-  const V77 = { ver: "7.7-patch4" };
-
-  function pickAppKey(){
-    try{
-      if(window.__cloud_cfg && window.__cloud_cfg.app_key) return String(window.__cloud_cfg.app_key||'').trim();
-    }catch(e){}
-    try{
-      const el=document.getElementById("cloudAppKey");
-      if(el && el.value) return String(el.value||'').trim();
-    }catch(e){}
-    try{
-      if(window.S && window.S.settings && window.S.settings.cloud && window.S.settings.cloud.app_key) return String(window.S.settings.cloud.app_key||'').trim();
-    }catch(e){}
-    return "dalemy";
-  }
-
-  async function getClientOrThrow(){
-    const wrap = (typeof window.getCloudClientOrNull==="function") ? await window.getCloudClientOrNull() : null;
-    if(!wrap || !wrap.client || typeof wrap.client.from!=="function"){
-      throw new Error("cloud_client_missing");
-    }
-    return wrap;
-  }
-
-  function asinKeyFrom(productOrOrder){
-    const asin = String((productOrOrder && productOrOrder.asin) || (productOrOrder && productOrOrder.asin_norm) || "").trim();
-    if(asin) return asin;
-    const name = String((productOrOrder && productOrOrder.product_name) || (productOrOrder && productOrOrder.name) || (productOrOrder && productOrOrder.title) || "").trim();
-    return name ? ("NAME:" + name) : "";
-  }
-
-  function safeSellerName(seller){
-    const n = String((seller && seller.name) || (seller && seller.seller_name) || "").trim();
-    return n;
-  }
-
-  function asNum(x){
-    const n = Number(x);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  async function v77CloudStatus(){
-    const appKey = pickAppKey();
-    const {client} = await getClientOrThrow();
-    async function count(table){
-      const { count, error } = await client.from(table).select("*", { count: "exact", head: true }).eq("app_key", appKey);
-      if(error) throw error;
-      return count || 0;
-    }
-    const [sc, pc, oc] = await Promise.all([
-      count("ops_sellers_v1"),
-      count("ops_products_v1"),
-      count("ops_orders_v2")
+    // pull all three tables
+    const [sRes,pRes,oRes] = await Promise.all([
+      sb.from("ops_sellers_v1").select("*").eq("app_key", appKey),
+      sb.from("ops_products_v1").select("*").eq("app_key", appKey),
+      sb.from("ops_orders_v2").select("*").eq("app_key", appKey)
     ]);
-    alert(
-      "云端状态（三表主库）\n" +
-      "V7.7=" + V77.ver + "\n" +
-      "app_key=" + appKey + "\n" +
-      "ops_sellers_v1=" + sc + "\n" +
-      "ops_products_v1=" + pc + "\n" +
-      "ops_orders_v2=" + oc
-    );
-  }
+    if(sRes.error) return _alert("云端拉取失败（sellers）："+sRes.error.message);
+    if(pRes.error) return _alert("云端拉取失败（products）："+pRes.error.message);
+    if(oRes.error) return _alert("云端拉取失败（orders）："+oRes.error.message);
 
-  async function v77CloudPush(){
-    const appKey = pickAppKey();
-    const {client} = await getClientOrThrow();
+    const sellersCloud = sRes.data||[];
+    const productsCloud = pRes.data||[];
+    const ordersCloud = oRes.data||[];
 
-    const S = window.S || {sellers:[], products:[], orders:[]};
-    const sellers = Array.isArray(S.sellers) ? S.sellers : [];
-    const products = Array.isArray(S.products) ? S.products : [];
-    const orders = Array.isArray(S.orders) ? S.orders : [];
-
-    // ---- 1) upsert sellers
-    const sellerRows = sellers
-      .map(s=>({ app_key: appKey, seller_name: safeSellerName(s), remark: (s.remark||null) }))
-      .filter(r=>r.seller_name);
-
-    let sellerMapByName = new Map();
-    let sellersUp = 0;
-
-    if(sellerRows.length){
-      const { data, error } = await client
-        .from("ops_sellers_v1")
-        .upsert(sellerRows, { onConflict: "app_key,seller_name" })
-        .select("id, seller_name");
-      if(error) throw error;
-      sellersUp = (data||[]).length;
-      (data||[]).forEach(r=> sellerMapByName.set(String(r.seller_name), String(r.id)));
-    }
-
-    // 若 select 返回不全，补拉一次（更稳）
-    if(sellerRows.length && sellerMapByName.size < sellerRows.length){
-      const names = sellerRows.map(r=>r.seller_name);
-      const { data, error } = await client
-        .from("ops_sellers_v1")
-        .select("id, seller_name")
-        .eq("app_key", appKey)
-        .in("seller_name", names);
-      if(error) throw error;
-      (data||[]).forEach(r=> sellerMapByName.set(String(r.seller_name), String(r.id)));
-    }
-
-    // ---- 2) upsert products
-    // 建本地 sellerId -> sellerName
-    const localSellerNameById = new Map();
-    sellers.forEach(s=>{
-      if(s && s.id) localSellerNameById.set(String(s.id), safeSellerName(s));
+    // Build local cache (simple, deterministic)
+    const sellerIdToName = new Map();
+    const sellersLocal = sellersCloud.map((r,i)=>{
+      const name = _s(r.seller_name);
+      sellerIdToName.set(_s(r.id), name);
+      return { id: name || ("S"+(i+1)), name: name, remark: _s(r.remark||"") };
     });
 
-    const productRows = products.map(p=>{
-      const market = String(p.market||"").trim();
-      const asin_key = asinKeyFrom(p);
-      if(!market || !asin_key) return null;
-      const sellerName = localSellerNameById.get(String(p.sellerId||"")) || "";
-      const seller_id = sellerName ? (sellerMapByName.get(sellerName)||null) : null;
+    const prodIdToLocalId = new Map();
+    const productsLocal = productsCloud.map((r,i)=>{
+      const lid = _s(r.market)+"|"+_s(r.asin_key);
+      prodIdToLocalId.set(_s(r.id), lid);
       return {
-        app_key: appKey,
-        market,
-        asin_key,
-        product_name: String(p.name||"").trim() || null,
-        asin: String(p.asin||"").trim() || null,
-        review_req: String(p.reviewType||p.review_req||"").trim() || null,
-        discount: asNum(p.discount),
-        buyer_commission_cny: asNum(p.buyerCommission),
-        seller_id,
-        remark: String(p.remark||"").trim() || null
+        id: lid || ("P"+(i+1)),
+        name: _s(r.product_name||""),
+        asin: _s(r.asin||""),
+        market: _s(r.market||""),
+        reviewReq: _s(r.review_req||""),
+        discount: r.discount==null ? "" : r.discount,
+        buyerCommission: r.buyer_commission_cny==null ? "" : r.buyer_commission_cny,
+        remark: _s(r.remark||"")
       };
-    }).filter(Boolean);
-
-    let productMapByKey = new Map(); // market|asin_key -> id
-    let productsUp = 0;
-
-    if(productRows.length){
-      const { data, error } = await client
-        .from("ops_products_v1")
-        .upsert(productRows, { onConflict: "app_key,market,asin_key" })
-        .select("id, market, asin_key");
-      if(error) throw error;
-      productsUp = (data||[]).length;
-      (data||[]).forEach(r=>{
-        productMapByKey.set(String(r.market)+"|"+String(r.asin_key), String(r.id));
-      });
-    }
-
-    if(productRows.length && productMapByKey.size < productRows.length){
-      const markets = [...new Set(productRows.map(r=>r.market))];
-      // 分 market 拉，避免 in 过长
-      for(const mk of markets){
-        const keys = productRows.filter(r=>r.market===mk).map(r=>r.asin_key);
-        const { data, error } = await client
-          .from("ops_products_v1")
-          .select("id, market, asin_key")
-          .eq("app_key", appKey)
-          .eq("market", mk)
-          .in("asin_key", keys);
-        if(error) throw error;
-        (data||[]).forEach(r=>{
-          productMapByKey.set(String(r.market)+"|"+String(r.asin_key), String(r.id));
-        });
-      }
-    }
-
-    // ---- 3) upsert orders (允许 0 条)
-    // 本地 productId -> product
-    const localProductById = new Map();
-    products.forEach(p=>{
-      if(p && p.id) localProductById.set(String(p.id), p);
     });
 
-    const skipped = [];
-    const orderRows = [];
+    const ordersLocal = ordersCloud.map((r,i)=>{
+      const orderId = _s(r.order_no);
+      const seller_name = sellerIdToName.get(_s(r.seller_id)) || "";
+      const sellerId = seller_name; // cache sellerId as seller_name for stability
+      const productLocalId = prodIdToLocalId.get(_s(r.product_id)) || "";
+      return {
+        id: "O"+(i+1),
+        orderId,
+        sellerId,
+        productId: productLocalId,
+        market: _s(r.market||""),
+        currency: _s(r.currency||""),
+        amount: r.amount==null ? "" : r.amount,
+        fx_override: r.fx_override==null ? "" : r.fx_override,
+        pay_status: _s(r.pay_status||""),
+        review_status: _s(r.review_status||""),
+        payout_status: _s(r.payout_status||""),
+        note: _s(r.remark||"")
+      };
+    });
 
-    for(const o of orders){
-      const order_no = String(o.orderId||o.order_no||"").trim();
-      const localSellerId = String(o.sellerId||"").trim();
-      const sellerName = localSellerNameById.get(localSellerId) || "";
-      const seller_id = sellerName ? (sellerMapByName.get(sellerName)||null) : null;
+    // merge into existing state (keep other modules)
+    const local = await loadLocalMainState();
+    const next = local.state;
+    next.sellers = sellersLocal;
+    next.products = productsLocal;
+    next.orders = ordersLocal;
+    next._cloud_meta = { pulled_at: _now(), app_key: appKey, v: V77 };
 
-      if(!order_no){ skipped.push({id:o.id, reason:"missing_order_no"}); continue; }
-      if(!seller_id){ skipped.push({id:o.id, reason:"missing_seller_id", sellerName}); continue; }
+    await saveLocalMainState(next);
 
-      let market = String(o.market||"").trim();
-      let asin_key = "";
-      let product_id = null;
-
-      const lp = o.productId ? localProductById.get(String(o.productId)) : null;
-      if(lp){
-        if(!market) market = String(lp.market||"").trim();
-        asin_key = asinKeyFrom({ asin: lp.asin, name: lp.name });
-      }else{
-        // 未选产品：用订单 asin 或 note 兜底
-        asin_key = asinKeyFrom({ asin: o.asin, name: (o.title||o.note||"") });
-      }
-      if(!market){ skipped.push({id:o.id, reason:"missing_market", order_no}); continue; }
-      if(!asin_key){ skipped.push({id:o.id, reason:"missing_asin_key", order_no}); continue; }
-
-      product_id = productMapByKey.get(market+"|"+asin_key) || null;
-      if(!product_id){
-        skipped.push({id:o.id, reason:"product_not_found_in_cloud", order_no, market, asin_key});
-        continue;
-      }
-
-      orderRows.push({
-        app_key: appKey,
-        seller_id,
-        product_id,
-        order_no,
-        market,
-        currency: String(o.currency||"").trim() || null,
-        amount: asNum(o.amount),
-        fx_override: asNum(o.fx),
-        review_status: (o.review && o.review.status) ? String(o.review.status) : (String(o.reviewStatus||o.review_status||"")||null),
-        review_done_type: (o.review && o.review.doneType) ? String(o.review.doneType) : (String(o.reviewDoneType||"")||null),
-        review_done_date: (o.review && o.review.date) ? String(o.review.date) : null,
-        review_link: (o.review && o.review.link) ? String(o.review.link) : (String(o.review_link||"")||null),
-        review_note: (o.review && o.review.note) ? String(o.review.note) : (String(o.review_note||"")||null),
-        pay_status: String(o.payStatus||o.pay_status||"").trim() || null,
-        comm_status: String(o.commStatus||o.comm_status||"").trim() || null,
-        payout_status: String(o.payoutStatus||o.payout_status||"").trim() || null,
-        remark: String(o.note||o.remark||"").trim() || null
-      });
-    }
-
-    let ordersUp = 0;
-    if(orderRows.length){
-      const { data, error } = await client
-        .from("ops_orders_v2")
-        .upsert(orderRows, { onConflict: "app_key,seller_id,order_no,product_id" })
-        .select("id");
-      if(error) throw error;
-      ordersUp = (data||[]).length;
-    }
-
-    // 反馈
-    let msg =
-      "云端推送完成（三表主库）\n" +
-      "app_key=" + appKey + "\n" +
-      "卖家 upsert=" + sellerRows.length + "（返回 " + sellersUp + "）\n" +
-      "产品 upsert=" + productRows.length + "（返回 " + productsUp + "）\n" +
-      "订单 upsert=" + orderRows.length + "（返回 " + ordersUp + ")";
-    if(skipped.length){
-      msg += "\n\n跳过订单=" + skipped.length + "（前10条）\n" + skipped.slice(0,10).map(x=>"- "+x.reason+" "+(x.order_no||x.id||"")).join("\n");
-    }
-    alert(msg);
+    try{ if(typeof window.render === "function") window.render(); }catch(e){}
+    _alert("云端拉取完成（三表主库）
+V7.7="+V77+"
+app_key="+appKey+"
+卖家="+sellersLocal.length+" 产品="+productsLocal.length+" 订单="+ordersLocal.length+"
+已写入 IndexedDB 作为本地缓存。");
   }
 
-  // ---- 强制覆写：任何旧按钮/旧 handler 最终都会调用到这里
-  window.v77CloudStatus = async function(){
-    try{ await v77CloudStatus(); }catch(e){ console.error(e); alert("云端状态失败："+(e && e.message ? e.message : e)); }
-  };
-  window.v77CloudPush = async function(){
-    try{ await v77CloudPush(); }catch(e){ console.error(e); alert("云端推送失败："+(e && e.message ? e.message : e)); }
-  };
+  // === Force override (double insurance) ===
+  window.cloudStatus = cloudStatusV77;
+  window.cloudPush = cloudPushV77;
+  window.cloudPull = cloudPullV77;
 
-  // 覆写旧函数名（关键：你现在弹窗仍是 v1，就说明还在走旧函数名）
-  window.ordersCloudStatus = window.v77CloudStatus;
-  window.ordersCloudPush   = window.v77CloudPush;
-  window.cloudStatus       = window.v77CloudStatus;
-  window.cloudPush         = window.v77CloudPush;
+  window.ordersCloudStatus = cloudStatusV77;
+  window.ordersCloudPush = cloudPushV77;
+  window.ordersCloudPull = cloudPullV77;
 
-  // capture 拦截（双保险）
-  document.addEventListener("click", function(ev){
-    const t = ev.target && (ev.target.closest ? ev.target.closest("button") : ev.target);
-    if(!t) return;
-    const id = t.id || "";
-    const txt = (t.innerText||t.textContent||"").trim();
+  // Capture intercept so old handlers never run
+  function bindCapture(){
+    const btnStatus = document.getElementById("btnCloudStatus") || Array.from(document.querySelectorAll("button")).find(b=>/云端状态/.test(b.textContent||""));
+    const btnPush = document.getElementById("btnCloudPush") || Array.from(document.querySelectorAll("button")).find(b=>/云端推送/.test(b.textContent||""));
+    const btnPull = document.getElementById("btnCloudPull") || Array.from(document.querySelectorAll("button")).find(b=>/云端拉取/.test(b.textContent||""));
 
-    const isStatus = (id==="btnCloudStatus") || (txt==="云端状态");
-    const isPush   = (id==="btnCloudPush")   || (txt==="云端推送");
-
-    if(isStatus){
-      ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
-      window.v77CloudStatus();
-      return;
-    }
-    if(isPush){
-      ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
-      window.v77CloudPush();
-      return;
-    }
-  }, true);
-
-  console.log("[V7.7] PATCH4 installed. override global cloudStatus/cloudPush.");
-})();
-</script>
-
-
-<!-- ===================== V7.7 THREE-TABLE MASTER OVERRIDE (PATCH5 DIAG) ===================== -->
-<script>
-(function(){
-  const PATCH_TAG = "7.7-patch5-diag";
-  const T = { SELLERS:"ops_sellers_v1", PRODUCTS:"ops_products_v1", ORDERS:"ops_orders_v2" };
-
-  function getCloudCfg(){
-    // 兼容多种存放位置
-    const S = window.S || window.__S || null;
-    const cfg = (S && S.settings && S.settings.cloud) ? S.settings.cloud : null;
-    const url = cfg && (cfg.url || cfg.supabaseUrl) ? (cfg.url || cfg.supabaseUrl) : (window.SUPABASE_URL || "");
-    const anon = cfg && (cfg.anon || cfg.anonKey || cfg.key) ? (cfg.anon || cfg.anonKey || cfg.key) : (window.SUPABASE_ANON || "");
-    const app_key = cfg && (cfg.app_key || cfg.appKey) ? (cfg.app_key || cfg.appKey) : (window.APP_KEY || "dalemy");
-    return {url, anon, app_key};
-  }
-
-  function getClient(){
-    const {url, anon} = getCloudCfg();
-    if(!url || !anon) return null;
-    // 复用全局 client（避免 GoTrueClient 警告）
-    if(window.__SB_V77 && window.__SB_V77_url===url) return window.__SB_V77;
-    if(!(window.supabase && window.supabase.createClient)) return null;
-    const c = window.supabase.createClient(url, anon, { auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } });
-    window.__SB_V77 = c; window.__SB_V77_url = url;
-    return c;
-  }
-
-  function toast(msg){
-    try{
-      if(window.U && window.U.toast) return window.U.toast(msg);
-    }catch(e){}
-    alert(msg);
-  }
-
-  async function countTable(client, table, app_key){
-    const {count, error} = await client.from(table).select("id", {count:"exact", head:true}).eq("app_key", app_key);
-    return {count: count||0, error};
-  }
-
-  async function probeWrite(client, app_key){
-    const seller_name = "__probe__" + Date.now();
-    const ins = await client.from(T.SELLERS).insert({app_key, seller_name}).select("id").limit(1);
-    if(ins.error) return {ok:false, step:"insert", error: ins.error};
-    const id = (ins.data && ins.data[0] && ins.data[0].id) ? ins.data[0].id : null;
-    if(!id) return {ok:false, step:"insert_no_id", error: {message:"insert ok but no id returned"}};
-    const del = await client.from(T.SELLERS).delete().eq("id", id);
-    if(del.error) return {ok:false, step:"delete", error: del.error};
-    return {ok:true};
-  }
-
-  async function cloudStatusV77(){
-    const client = getClient();
-    const {app_key} = getCloudCfg();
-    if(!client) return toast("云端未就绪：缺少 Supabase url/anon 或 supabase.js 未加载。");
-    const a = await countTable(client, T.SELLERS, app_key);
-    const b = await countTable(client, T.PRODUCTS, app_key);
-    const c = await countTable(client, T.ORDERS, app_key);
-    const lines = [
-      "云端状态（三表主库）",
-      "V7.7="+PATCH_TAG,
-      "app_key="+app_key,
-      `${T.SELLERS}=${a.count}` + (a.error?(" (ERR:"+a.error.message+")"):""),
-      `${T.PRODUCTS}=${b.count}` + (b.error?(" (ERR:"+b.error.message+")"):""),
-      `${T.ORDERS}=${c.count}` + (c.error?(" (ERR:"+c.error.message+")"):""),
-    ];
-    alert(lines.join("\n"));
-  }
-
-  async function cloudPushV77(){
-    const client = getClient();
-    const {app_key} = getCloudCfg();
-    if(!client) return toast("云端未就绪：缺少 Supabase url/anon 或 supabase.js 未加载。");
-
-    const S = window.S;
-    const sellers = (S && Array.isArray(S.sellers)) ? S.sellers : [];
-    const products = (S && Array.isArray(S.products)) ? S.products : [];
-    const orders  = (S && Array.isArray(S.orders)) ? S.orders : [];
-
-    // 先做一次写入探针，快速定位是否“权限/表不存在/网络”
-    const probe = await probeWrite(client, app_key);
-    if(!probe.ok){
-      alert([
-        "云端推送失败：写入探针未通过（极可能是权限/表策略/网络）",
-        "step="+probe.step,
-        "error="+(probe.error && (probe.error.message || JSON.stringify(probe.error)) ? (probe.error.message || JSON.stringify(probe.error)) : "unknown")
-      ].join("\n"));
-      return;
-    }
-
-    // 卖家 upsert（seller_name = 本地 seller.id）
-    let sellersOk = 0, productsOk = 0, ordersOk = 0;
-    let errS = null, errP = null, errO = null;
-
-    if(sellers.length){
-      const rows = sellers.map(x => ({
-        app_key,
-        seller_name: String(x.id || x.sellerId || x.name || "").trim(),
-        remark: x.remark || null
-      })).filter(r => r.seller_name);
-      const r = await client.from(T.SELLERS).upsert(rows, { onConflict: "app_key,seller_name" }).select("id");
-      errS = r.error || null;
-      sellersOk = r.data ? r.data.length : 0;
-    }
-
-    if(products.length){
-      const rows = products.map(p => {
-        const market = String(p.market || p.marketCode || "").trim();
-        const asin = String(p.asin || "").trim();
-        const name = String(p.name || p.product_name || "").trim();
-        const asin_key = asin ? asin : (name ? ("NAME:"+name) : "");
-        return {
-          app_key,
-          market,
-          asin_key,
-          product_name: name || null,
-          asin: asin || null,
-          review_req: p.reviewType || p.review_req || null,
-          discount: (p.discount!==undefined && p.discount!==null && p.discount!=="") ? Number(p.discount) : null,
-          buyer_commission_cny: (p.buyerCommission!==undefined && p.buyerCommission!==null && p.buyerCommission!=="") ? Number(p.buyerCommission) : null,
-          remark: p.remark || null
-        };
-      }).filter(r => r.market && r.asin_key);
-      const r = await client.from(T.PRODUCTS).upsert(rows, { onConflict: "app_key,market,asin_key" }).select("id");
-      errP = r.error || null;
-      productsOk = r.data ? r.data.length : 0;
-    }
-
-    // 订单：本次仅做“验证通路”——推送前 20 条（避免一次性 select 返回过大）
-    if(orders.length){
-      // 建 seller 映射
-      const sellerMap = new Map();
-      if(sellers.length){
-        // 以 seller_name 反查云端 id
-        const names = sellers.map(s=>String(s.id||"").trim()).filter(Boolean);
-        if(names.length){
-          const q = await client.from(T.SELLERS).select("id,seller_name").eq("app_key", app_key).in("seller_name", names.slice(0, 1000));
-          if(!q.error && q.data) q.data.forEach(r=>sellerMap.set(r.seller_name, r.id));
-        }
-      }
-      // 建 product 映射（market+asin_key）
-      const prodMap = new Map();
-      if(products.length){
-        // 分 market 查询（避免 in 过长）
-        const byM = {};
-        products.forEach(p=>{
-          const m=String(p.market||"").trim(); if(!m) return;
-          const asin=String(p.asin||"").trim(); const name=String(p.name||p.product_name||"").trim();
-          const ak=asin?asin:(name?("NAME:"+name):""); if(!ak) return;
-          (byM[m]=byM[m]||new Set()).add(ak);
-        });
-        for(const m in byM){
-          const aks = Array.from(byM[m]).slice(0, 1000);
-          const q = await client.from(T.PRODUCTS).select("id,market,asin_key").eq("app_key", app_key).eq("market", m).in("asin_key", aks);
-          if(!q.error && q.data) q.data.forEach(r=>prodMap.set(r.market+"||"+r.asin_key, r.id));
-        }
-      }
-
-      const slice = orders.slice(0, 20);
-      const rows = [];
-      const skipped = [];
-      slice.forEach(o=>{
-        const sellerLocal = String(o.sellerId || o.seller_id || "").trim();
-        const order_no = String(o.orderId || o.order_no || o.orderNo || "").trim();
-        const pidLocal = o.productId || o.product_id || null;
-        let market = String(o.market || "").trim();
-        let asin = String(o.asin || "").trim();
-        let pname = String(o.productName || o.product_name || "").trim();
-
-        // 若订单选择了产品，从产品补 market/asin_key
-        let asin_key = "";
-        if(pidLocal){
-          const p = products.find(x=>String(x.id)===String(pidLocal));
-          if(p){
-            market = market || String(p.market||"").trim();
-            asin = asin || String(p.asin||"").trim();
-            pname = pname || String(p.name||p.product_name||"").trim();
-          }
-        }
-        asin_key = asin ? asin : (pname ? ("NAME:"+pname) : "");
-        const seller_id = sellerMap.get(sellerLocal) || null;
-        const product_id = (market && asin_key) ? (prodMap.get(market+"||"+asin_key) || null) : null;
-
-        if(!seller_id || !product_id || !order_no){
-          skipped.push({order_no, need:{seller_id:!!seller_id, product_id:!!product_id, order_no:!!order_no}, market, asin_key, sellerLocal});
-          return;
-        }
-        rows.push({
-          app_key,
-          seller_id,
-          product_id,
-          order_no,
-          market: market || null,
-          currency: o.currency || null,
-          amount: (o.amount!==undefined && o.amount!==null && o.amount!=="") ? Number(o.amount) : null,
-          fx_override: (o.fxOverride!==undefined && o.fxOverride!==null && o.fxOverride!=="") ? Number(o.fxOverride) : null,
-          review_status: o.reviewStatus || null,
-          pay_status: o.payStatus || null,
-          comm_status: o.commStatus || null,
-          payout_status: o.payoutStatus || null,
-          remark: o.remark || null
-        });
-      });
-
-      if(rows.length){
-        const r = await client.from(T.ORDERS).upsert(rows, { onConflict: "app_key,seller_id,order_no,product_id" }).select("id");
-        errO = r.error || null;
-        ordersOk = r.data ? r.data.length : 0;
-      }else{
-        errO = null;
-        ordersOk = 0;
-      }
-
-      if(skipped.length){
-        console.warn("[V7.7] orders skipped (first 10)", skipped.slice(0,10));
-      }
-    }
-
-    const lines = [
-      "云端推送完成（三表主库）",
-      "V7.7="+PATCH_TAG,
-      "app_key="+app_key,
-      `本地：卖家=${sellers.length} 产品=${products.length} 订单=${orders.length}`,
-      `卖家 upsert=${sellersOk}` + (errS?(" (ERR:"+errS.message+")"):""),
-      `产品 upsert=${productsOk}` + (errP?(" (ERR:"+errP.message+")"):""),
-      `订单 upsert(仅前20条验证)=${ordersOk}` + (errO?(" (ERR:"+errO.message+")"):""),
-      "说明：若本地很多订单，本次仅推送前20条用于验证链路；确认无误后我再给你放开全量推送。"
-    ];
-    alert(lines.join("\n"));
-  }
-
-  function bind(){
-    // 覆写全局函数名（双保险）
-    window.ordersCloudStatus = cloudStatusV77;
-    window.ordersCloudPush = cloudPushV77;
-    window.cloudStatus = cloudStatusV77;
-    window.cloudPush = cloudPushV77;
-
-    // 捕获阶段拦截（避免旧逻辑抢回）
-    const map = [
-      {sel:"#btnCloudStatus", fn:cloudStatusV77},
-      {sel:"#btnCloudPush", fn:cloudPushV77}
-    ];
-    map.forEach(({sel, fn})=>{
-      const el = document.querySelector(sel);
-      if(!el) return;
-      el.addEventListener("click", function(ev){
-        ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
-        fn().catch(e=>alert("V7.7 push/status 异常："+(e && e.message ? e.message : e)));
+    const cap = (btn, fn)=>{
+      if(!btn) return;
+      btn.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); }catch(e){}
+        fn();
       }, true);
-    });
-
-    console.log("[V7.7] PATCH5 diag bound:", PATCH_TAG);
+    };
+    cap(btnStatus, cloudStatusV77);
+    cap(btnPush, cloudPushV77);
+    cap(btnPull, cloudPullV77);
   }
 
-  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", bind);
-  else bind();
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", bindCapture);
+  }else{
+    bindCapture();
+  }
+
+  console.log("[V7.7] FINAL IDB patch installed:", V77);
 })();
 </script>
 
-</body></html>
+</body>
+</html>
