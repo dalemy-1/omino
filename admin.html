@@ -14472,5 +14472,330 @@ async function cloudStatusFixed(){
   }
 })();
 </script>
+
+<script>
+/* [SNAPSHOT_REST_LOCK_V1] Force single-source cloud sync: REST snapshot -> ops_cloud_snapshots_v1
+   - Eliminates supabase-js / GoTrue locks from the sync path
+   - Prevents later patches from hijacking the "云端推送/拉取/状态" buttons
+*/
+(function(){
+  "use strict";
+
+  const TAG = "[SNAPSHOT_REST_LOCK_V1]";
+  const TABLE = "ops_cloud_snapshots_v1";
+  const LS_STATE_KEY = "ops_rebuild_v6_4_2_state";
+  const IDB_KEY = "main_state_v1";
+
+  function log(){ try{ console.log.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
+  function warn(){ try{ console.warn.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
+  function err(){ try{ console.error.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
+
+  function uiAlert(msg){
+    try{
+      if(typeof window.uiAlert==="function") return window.uiAlert(msg);
+      if(typeof window._alert==="function") return window._alert(msg);
+      if(typeof window.toast==="function") return window.toast(msg);
+    }catch(_e){}
+    alert(msg);
+  }
+
+  function getCfg(){
+    try{
+      if(typeof window.getCloudCfg==="function"){
+        const c = window.getCloudCfg() || {};
+        return {
+          url: String(c.url||"").trim(),
+          anon: String(c.anon||"").trim(),
+          app_key: String(c.app_key||c.appKey||c.app||"").trim()
+        };
+      }
+    }catch(_e){}
+    // fallback
+    try{
+      const raw = localStorage.getItem("OPS_CLOUD_CFG_V1") || "{}";
+      const c = JSON.parse(raw);
+      return {
+        url: String(c.url||"").trim(),
+        anon: String(c.anon||"").trim(),
+        app_key: String(c.app_key||c.appKey||c.app||"").trim()
+      };
+    }catch(_e){}
+    return { url:"", anon:"", app_key:"" };
+  }
+
+  function restUrl(base, path){
+    const b = String(base||"").replace(/\/+$/,"");
+    const p = String(path||"").replace(/^\/+/,"");
+    return b + "/" + p;
+  }
+
+  function hdr(anon){
+    return {
+      "apikey": anon,
+      "Authorization": "Bearer " + anon,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "Prefer": "resolution=merge-duplicates,return=representation"
+    };
+  }
+
+  async function restSelect(cfg){
+    const u = restUrl(cfg.url, "rest/v1/" + TABLE + "?select=*&app_key=eq." + encodeURIComponent(cfg.app_key));
+    const r = await fetch(u, { method:"GET", headers: hdr(cfg.anon) });
+    if(!r.ok){
+      const t = await r.text().catch(()=> "");
+      throw new Error("rest_select_failed " + r.status + " " + (t||""));
+    }
+    const j = await r.json();
+    return (Array.isArray(j) && j[0]) ? j[0] : null;
+  }
+
+  async function restUpsert(cfg, row){
+    const u = restUrl(cfg.url, "rest/v1/" + TABLE + "?on_conflict=app_key");
+    const r = await fetch(u, { method:"POST", headers: hdr(cfg.anon), body: JSON.stringify([row]) });
+    if(!r.ok){
+      const t = await r.text().catch(()=> "");
+      throw new Error("rest_upsert_failed " + r.status + " " + (t||""));
+    }
+    const j = await r.json().catch(()=> null);
+    return j;
+  }
+
+  function normalizeState(anyState){
+    const st = (anyState && typeof anyState==="object") ? anyState : {};
+    const sellers = Array.isArray(st.sellers) ? st.sellers : (Array.isArray(st.sellerList)?st.sellerList:[]);
+    const products = Array.isArray(st.products) ? st.products : (Array.isArray(st.productList)?st.productList:[]);
+    const orders = Array.isArray(st.orders) ? st.orders : (Array.isArray(st.orderList)?st.orderList:[]);
+    const batches = Array.isArray(st.batches) ? st.batches : (Array.isArray(st.batchList)?st.batchList:[]);
+    return { sellers, products, orders, batches };
+  }
+
+  async function readLocalState(){
+    // Prefer global helper
+    try{
+      if(typeof window.getLocalSnapshotPreferIDB==="function"){
+        const r = await window.getLocalSnapshotPreferIDB();
+        const st = r && (r.data||r.state||r);
+        return normalizeState(st);
+      }
+    }catch(e){ warn("getLocalSnapshotPreferIDB failed", e); }
+
+    // Fallback: IndexedDB key main_state_v1
+    try{
+      if(typeof window.idbGet==="function"){
+        const st = await window.idbGet(IDB_KEY);
+        if(st) return normalizeState(st);
+      }
+    }catch(e){ warn("idbGet(main_state_v1) failed", e); }
+
+    // Fallback: localStorage snapshot
+    try{
+      const raw = localStorage.getItem(LS_STATE_KEY) || "";
+      if(raw){
+        const st = JSON.parse(raw);
+        if(st) return normalizeState(st);
+      }
+    }catch(e){}
+
+    // Last: window.S
+    try{
+      if(window.S) return normalizeState(window.S);
+    }catch(_e){}
+
+    return { sellers:[], products:[], orders:[], batches:[] };
+  }
+
+  function countState(st){
+    return {
+      sellers: (st.sellers||[]).length,
+      products: (st.products||[]).length,
+      orders: (st.orders||[]).length,
+      batches: (st.batches||[]).length
+    };
+  }
+
+  async function writeLocalState(state){
+    // 1) IndexedDB
+    try{
+      if(typeof window.idbSet==="function"){
+        await window.idbSet(IDB_KEY, state);
+      }
+    }catch(e){ warn("idbSet(main_state_v1) failed", e); }
+
+    // 2) localStorage snapshot
+    try{
+      localStorage.setItem(LS_STATE_KEY, JSON.stringify(state));
+    }catch(e){}
+
+    // 3) in-memory
+    try{ window.S = state; }catch(_e){}
+
+    // 4) re-render
+    try{ if(typeof window.render==="function") window.render(); }catch(_e){}
+  }
+
+  async function cloudStatus(){
+    const cfg = getCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app_key){
+      return uiAlert("未设置云端：请先在“云端设置”里填写 URL / anon / app_key 并保存。");
+    }
+    const local = await readLocalState();
+    const lc = countState(local);
+
+    let cloudRow = null, cloudSt = null, cc = {sellers:0,products:0,orders:0,batches:0};
+    try{
+      cloudRow = await restSelect(cfg);
+      if(cloudRow && cloudRow.payload){
+        cloudSt = normalizeState(cloudRow.payload);
+        cc = countState(cloudSt);
+      }
+    }catch(e){
+      warn("cloudStatus restSelect failed", e);
+    }
+
+    const lines = [
+      "本地统计：卖家"+lc.sellers+" 产品"+lc.products+" 订单"+lc.orders+" 批次"+lc.batches,
+      "",
+      "云端存在：" + (cloudRow ? "YES" : "NO"),
+      cloudRow ? ("云端 hash: " + (cloudRow.hash||"")) : "",
+      cloudRow ? ("云端 updated_at: " + (cloudRow.updated_at||"")) : "",
+      cloudRow ? ("云端统计：卖家"+cc.sellers+" 产品"+cc.products+" 订单"+cc.orders+" 批次"+cc.batches) : ""
+    ].filter(Boolean).join("\n");
+    uiAlert(lines);
+  }
+
+  async function cloudPush(opts){
+    opts = opts || {};
+    const force = !!opts.force;
+
+    const cfg = getCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app_key){
+      return uiAlert("未设置云端：请先在“云端设置”里填写 URL / anon / app_key 并保存。");
+    }
+
+    const local = await readLocalState();
+    const lc = countState(local);
+
+    // Safety: prevent wiping non-empty cloud with fully-empty local snapshot unless force
+    let cloudRow = null, cloudSt = null, cc = {sellers:0,products:0,orders:0,batches:0};
+    try{
+      cloudRow = await restSelect(cfg);
+      if(cloudRow && cloudRow.payload){
+        cloudSt = normalizeState(cloudRow.payload);
+        cc = countState(cloudSt);
+      }
+    }catch(e){
+      // if precheck fails, still allow push (but warn)
+      warn("cloud precheck failed (restSelect)", e);
+    }
+
+    const localTotal = lc.sellers + lc.products + lc.orders + lc.batches;
+    const cloudTotal = cc.sellers + cc.products + cc.orders + cc.batches;
+
+    if(!force && localTotal === 0 && cloudTotal > 0){
+      return uiAlert(
+        "已阻止推送：本地数据为 0（卖家/产品/订单/批次均为空）。\n\n"+
+        "为避免误覆盖云端，请先确认已加载/导入本地数据。\n"+
+        "若确需推送空快照（初始化/迁移），请点“强制推送”。"
+      );
+    }
+
+    const snapshot = { sellers: local.sellers||[], products: local.products||[], orders: local.orders||[], batches: local.batches||[] };
+    const payloadStr = JSON.stringify(snapshot);
+    const h = (typeof window.simpleHash==="function") ? window.simpleHash(payloadStr) : String(payloadStr.length);
+
+    const row = {
+      app_key: cfg.app_key,
+      payload: snapshot,
+      hash: h,
+      updated_at: new Date().toISOString()
+    };
+
+    await restUpsert(cfg, row);
+
+    uiAlert("云端推送成功（REST 快照）\n"+
+      "app_key="+cfg.app_key+"\n"+
+      "卖家="+lc.sellers+" 产品="+lc.products+" 订单="+lc.orders+" 批次="+lc.batches+"\n"+
+      "hash="+h
+    );
+  }
+
+  async function cloudPull(){
+    const cfg = getCfg();
+    if(!cfg.url || !cfg.anon || !cfg.app_key){
+      return uiAlert("未设置云端：请先在“云端设置”里填写 URL / anon / app_key 并保存。");
+    }
+
+    const cloudRow = await restSelect(cfg);
+    if(!cloudRow || !cloudRow.payload){
+      return uiAlert("云端无快照数据（ops_cloud_snapshots_v1）。");
+    }
+    const st = normalizeState(cloudRow.payload);
+    await writeLocalState(st);
+
+    uiAlert("云端拉取完成（REST 快照）\n"+
+      "app_key="+cfg.app_key+"\n"+
+      "卖家="+(st.sellers||[]).length+" 产品="+(st.products||[]).length+
+      " 订单="+(st.orders||[]).length+" 批次="+(st.batches||[]).length+"\n"+
+      "hash="+(cloudRow.hash||"")+"\n"+
+      "已写入 IndexedDB + localStorage 并尝试刷新页面。"
+    );
+  }
+
+  // --- Hard override globals (single source of truth) ---
+  window.cloudStatus = cloudStatus;
+  window.cloudPush = (opts)=>cloudPush(opts||{});
+  window.cloudPull = cloudPull;
+
+  // Also pin these names to avoid later hijacks
+  window.__snapshotRestCloud = { cloudStatus, cloudPush, cloudPull };
+
+  // --- Capture-bind buttons so later patches cannot override behavior ---
+  function findBtnByText(re){
+    try{
+      const btns = Array.from(document.querySelectorAll("button"));
+      return btns.find(b => re.test((b.textContent||"").trim()));
+    }catch(_e){}
+    return null;
+  }
+
+  function bindOne(btn, fn){
+    if(!btn) return;
+    // capture phase: run first; stop other handlers
+    btn.addEventListener("click", (ev)=>{
+      try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+      Promise.resolve().then(fn).catch((e)=>{
+        err("action failed", e);
+        uiAlert("操作失败：" + (e && (e.message||String(e))));
+      });
+    }, true);
+  }
+
+  function bindAll(){
+    const bPush = document.getElementById("btnCloudPush") || findBtnByText(/云端推送/);
+    const bForce = document.getElementById("btnCloudPushForce") || findBtnByText(/强制推送/);
+    const bPull = document.getElementById("btnCloudPull") || findBtnByText(/云端拉取/);
+    const bStatus = document.getElementById("btnCloudStatus") || findBtnByText(/云端状态/);
+
+    bindOne(bStatus, ()=>cloudStatus());
+    bindOne(bPull, ()=>cloudPull());
+    bindOne(bPush, ()=>cloudPush({force:false}));
+    bindOne(bForce, ()=>cloudPush({force:true}));
+
+    log("bound buttons:", {
+      push: !!bPush, force: !!bForce, pull: !!bPull, status: !!bStatus
+    });
+  }
+
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", bindAll, { once:true });
+  }else{
+    bindAll();
+  }
+
+  log("installed. Table="+TABLE);
+})();
+</script>
+
 </body>
 </html>
