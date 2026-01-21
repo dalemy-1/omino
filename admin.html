@@ -14278,4 +14278,333 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+<!-- ===================== V7.7 THREE-TABLE MASTER OVERRIDE (PATCH3) ===================== -->
+<script>
+(function(){
+  // 强制三表主库：ops_sellers_v1 / ops_products_v1 / ops_orders_v2
+  const V77 = {
+    SELLERS: "ops_sellers_v1",
+    PRODUCTS: "ops_products_v1",
+    ORDERS: "ops_orders_v2",
+    APPKEY: null,
+    sb: null
+  };
+
+  function _nowIso(){ return new Date().toISOString(); }
+  function _s(v){ return (v==null) ? "" : String(v); }
+  function _trim(v){ return _s(v).trim(); }
+  function _num(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function _asinKey(asin, name){
+    const a = _trim(asin);
+    if(a) return a;
+    const n = _trim(name);
+    return "NAME:" + (n || "UNKNOWN");
+  }
+
+  function _toast(msg){
+    try{ if(typeof window.showNotice === "function") return window.showNotice("提示", msg); }catch(e){}
+    try{ if(typeof window.toast === "function") return window.toast(msg); }catch(e){}
+    try{ alert(msg); }catch(e){}
+  }
+
+  function _getCfg(){
+    try{
+      if(typeof window.getCloudCfg === "function") return window.getCloudCfg();
+    }catch(e){}
+    // 最后兜底：从 localStorage 读取
+    const url = (localStorage.getItem("SUPABASE_URL")||localStorage.getItem("OPS_CLOUD_URL")||"").trim();
+    const anon = (localStorage.getItem("SUPABASE_ANON")||localStorage.getItem("OPS_CLOUD_ANON_KEY")||"").trim();
+    const app = (localStorage.getItem("OPS_CLOUD_APP_KEY")||localStorage.getItem("app_key")||"dalemy").trim();
+    return { url, anon, app_key: app };
+  }
+
+  function _getSupabase(){
+    if(V77.sb) return V77.sb;
+    const cfg = _getCfg();
+    V77.APPKEY = cfg.app_key || "dalemy";
+    if(!cfg.url || !cfg.anon){
+      _toast("请先设置云端（Supabase URL / anon key）。");
+      throw new Error("missing_supabase_cfg");
+    }
+    const sb = (window.supabase && window.supabase.createClient) ? window.supabase.createClient(cfg.url, cfg.anon) : null;
+    if(!sb){
+      _toast("Supabase SDK 未加载（supabase.createClient 不存在）。");
+      throw new Error("missing_supabase_sdk");
+    }
+    V77.sb = sb;
+    return sb;
+  }
+
+  async function _count(table){
+    const sb = _getSupabase();
+    const q = await sb.from(table).select("id", { count: "exact", head: true });
+    if(q.error) throw q.error;
+    return q.count || 0;
+  }
+
+  async function cloudStatusV77(){
+    try{
+      const cfg = _getCfg();
+      const app = (cfg.app_key||"dalemy").trim() || "dalemy";
+      V77.APPKEY = app;
+      const sellers = await _count(V77.SELLERS);
+      const products = await _count(V77.PRODUCTS);
+      const orders = await _count(V77.ORDERS);
+      alert(
+        "云端主库三表状态：\n" +
+        `app_key=${app}\n` +
+        `ops_sellers_v1=${sellers}\n` +
+        `ops_products_v1=${products}\n` +
+        `ops_orders_v2=${orders}\n` +
+        "V7.7=ON"
+      );
+    }catch(e){
+      alert("云端状态失败：" + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  function _localState(){
+    // 兼容：S 是全局状态
+    const S = window.S;
+    if(!S) return { sellers:[], products:[], orders:[] };
+    return {
+      sellers: Array.isArray(S.sellers) ? S.sellers : [],
+      products: Array.isArray(S.products) ? S.products : [],
+      orders: Array.isArray(S.orders) ? S.orders : []
+    };
+  }
+
+  async function cloudPushV77(){
+    const sb = _getSupabase();
+    const { sellers, products, orders } = _localState();
+
+    // ---- 1) sellers upsert ----
+    const sellerRows = sellers
+      .map(s=>({
+        app_key: V77.APPKEY,
+        seller_name: _trim(s.name || s.seller_name || s.sellerName || s.id),
+        note: s.note || null,
+        remark: s.remark || null,
+        updated_at: _nowIso()
+      }))
+      .filter(r=>r.seller_name);
+
+    // ---- 2) products upsert (include derived from orders if needed) ----
+    const productMapById = new Map();
+    for(const p of products){ if(p && p.id) productMapById.set(p.id, p); }
+
+    const derivedProducts = [];
+    for(const o of orders){
+      if(!o) continue;
+      let p = o.productId ? productMapById.get(o.productId) : null;
+      const market = _trim((p && p.market) || o.market || "");
+      const asin = _trim((p && (p.asin||p.asin_key)) || o.asin || "");
+      const pname = _trim((p && (p.name||p.product_name)) || o.title || o.note || "");
+      // 没选产品也要能推：用订单字段构造一个产品行（只要 market/asin_key 定得住）
+      if(!p){
+        const ak = _asinKey(asin, pname);
+        if(market && ak){
+          derivedProducts.push({
+            app_key: V77.APPKEY,
+            market,
+            asin_key: ak,
+            product_name: pname || null,
+            asin: asin || null,
+            review_req: _trim(o.reviewReq || o.review_req || "") || null,
+            discount: _num(o.discount),
+            buyer_commission_cny: null,
+            seller_id: null,
+            updated_at: _nowIso()
+          });
+        }
+      }
+    }
+
+    const productRowsBase = products.map(p=>{
+      const market = _trim(p.market || "");
+      const asin = _trim(p.asin || "");
+      const pname = _trim(p.name || p.product_name || "");
+      const asin_key = _asinKey(asin, pname);
+      return {
+        app_key: V77.APPKEY,
+        market,
+        asin_key,
+        product_name: pname || null,
+        asin: asin || null,
+        review_req: _trim(p.reviewType || p.review_req || "") || null,
+        discount: _num(p.discount),
+        buyer_commission_cny: _num(p.buyerCommissionCny || p.buyer_commission_cny),
+        seller_id: null,
+        remark: p.remark || null,
+        updated_at: _nowIso()
+      };
+    }).filter(r=>r.market && r.asin_key);
+
+    // 去重：按 app_key+market+asin_key
+    const prodKey = (r)=> `${r.app_key}||${r.market}||${r.asin_key}`;
+    const prodSeen = new Set();
+    const productRows = [];
+    for(const r of [...productRowsBase, ...derivedProducts]){
+      const k = prodKey(r);
+      if(prodSeen.has(k)) continue;
+      prodSeen.add(k);
+      productRows.push(r);
+    }
+
+    // ---- 3) upsert sellers/products then fetch ids maps ----
+    let upSellers = 0, upProducts = 0, upOrders = 0;
+
+    if(sellerRows.length){
+      const q = await sb.from(V77.SELLERS)
+        .upsert(sellerRows, { onConflict: "app_key,seller_name" })
+        .select("id, seller_name");
+      if(q.error) throw q.error;
+      upSellers = (q.data||[]).length;
+    }
+
+    if(productRows.length){
+      const q = await sb.from(V77.PRODUCTS)
+        .upsert(productRows, { onConflict: "app_key,market,asin_key" })
+        .select("id, market, asin_key");
+      if(q.error) throw q.error;
+      upProducts = (q.data||[]).length;
+    }
+
+    // build maps for fk resolving
+    const sellerRows2 = await sb.from(V77.SELLERS).select("id, seller_name").eq("app_key", V77.APPKEY);
+    if(sellerRows2.error) throw sellerRows2.error;
+    const sellerIdByName = new Map((sellerRows2.data||[]).map(r=>[String(r.seller_name), r.id]));
+
+    const productRows2 = await sb.from(V77.PRODUCTS).select("id, market, asin_key").eq("app_key", V77.APPKEY);
+    if(productRows2.error) throw productRows2.error;
+    const productIdByKey = new Map((productRows2.data||[]).map(r=>[`${r.market}||${r.asin_key}`, r.id]));
+
+    // ---- 4) orders upsert (only when we can resolve FKs) ----
+    const orderRows = [];
+    const skipped = [];
+    for(const o of orders){
+      if(!o) continue;
+      const order_no = _trim(o.orderId || o.order_no || o.orderNo || "");
+      const sellerIdLocal = _trim(o.sellerId || "");
+      // 本地卖家是 sellerId -> seller.name
+      let sellerName = "";
+      try{
+        if(window.U && typeof window.U.sellerById === "function"){
+          const s = window.U.sellerById(sellerIdLocal);
+          sellerName = _trim(s && s.name);
+        }
+      }catch(e){}
+      if(!sellerName) sellerName = _trim(o.seller_name || "");
+      const seller_id = sellerIdByName.get(sellerName);
+
+      const market = _trim(o.market || "");
+      // resolve product key
+      let p = null;
+      try{ p = o.productId ? productMapById.get(o.productId) : null; }catch(e){}
+      const asin = _trim((p && p.asin) || o.asin || "");
+      const pname = _trim((p && (p.name||p.product_name)) || o.title || o.note || "");
+      const asin_key = _asinKey(asin, pname);
+      const product_id = productIdByKey.get(`${market}||${asin_key}`);
+
+      if(!order_no || !sellerName){
+        skipped.push({ reason:"missing seller/order_no", order_no, sellerName });
+        continue;
+      }
+      if(!seller_id || !product_id){
+        skipped.push({ reason:"missing fk", order_no, sellerName, market, asin_key, hasSeller:!!seller_id, hasProduct:!!product_id });
+        continue;
+      }
+
+      orderRows.push({
+        app_key: V77.APPKEY,
+        seller_id,
+        product_id,
+        seller_name: sellerName,
+        order_no,
+        market: market || null,
+        asin: asin || null,
+        asin_key,
+        product_name: pname || null,
+
+        unit_price: _num(o.amount),
+        fx_override: _num(o.fx),
+
+        review_req: _trim(o.reviewReq || "") || null,
+        review_status: _trim((o.review && o.review.status) || o.review_status || "") || null,
+        payout_status: _trim((o.payout && o.payout.status) || o.payout_status || "") || null,
+
+        note: o.note || null,
+        updated_at: _nowIso()
+      });
+    }
+
+    if(!orderRows.length){
+      const msg = skipped.length
+        ? ("没有可推送的订单（外键无法解析）。\n" + JSON.stringify(skipped.slice(0,10), null, 2))
+        : "没有可推送的订单。";
+      alert(msg);
+      return;
+    }
+
+    // 为了兼容你当前云端的唯一约束（你之前 v2 里是 app_key+seller_name+order_no+asin_key）
+    const q3 = await sb.from(V77.ORDERS)
+      .upsert(orderRows, { onConflict: "app_key,seller_name,order_no,asin_key" })
+      .select("id");
+    if(q3.error) throw q3.error;
+    upOrders = (q3.data||[]).length;
+
+    alert(
+      "云端推送完成（V7.7 三表）\n" +
+      `卖家 upsert: ${upSellers}\n` +
+      `产品 upsert: ${upProducts}\n` +
+      `订单 upsert: ${upOrders}\n` +
+      (skipped.length ? `跳过: ${skipped.length}（外键解析失败/缺字段）` : "")
+    );
+  }
+
+  async function cloudPullV77(){
+    // 先不强制替换你现有 pull（你反馈 pull 正常）
+    // 这里只做一个提示：避免按钮仍指向旧 v1
+    alert("V7.7 提示：当前 pull 已可用。若仍出现错配/漂移，再切换为三表 resolve pull。");
+  }
+
+  // ===== 强制接管按钮：使用 capture 先拦截旧 onclick =====
+  function hijack(){
+    const bStatus = document.getElementById("btnCloudStatus");
+    const bPush = document.getElementById("btnCloudPush");
+    const bPull = document.getElementById("btnCloudPull");
+
+    if(bStatus){
+      bStatus.addEventListener("click", function(ev){
+        ev.preventDefault(); ev.stopImmediatePropagation();
+        cloudStatusV77();
+      }, true);
+    }
+    if(bPush){
+      bPush.addEventListener("click", function(ev){
+        ev.preventDefault(); ev.stopImmediatePropagation();
+        cloudPushV77();
+      }, true);
+    }
+    if(bPull){
+      // 先不完全替换 pull（避免影响你现有稳定拉取）；但也拦截旧 v1 提示时可手动启用
+      // 如需强制三表 pull，把下面两行打开即可：
+      // ev.preventDefault(); ev.stopImmediatePropagation(); cloudPullV77();
+    }
+    // 同时覆写全局方法，防止别处调用旧函数
+    window.ordersCloudStatus = cloudStatusV77;
+    window.cloudStatus = cloudStatusV77;
+    window.ordersCloudPush = cloudPushV77;
+    window.cloudPush = cloudPushV77;
+  }
+
+  // 延迟接管，确保覆盖任何后续绑定
+  setTimeout(hijack, 0);
+  setTimeout(hijack, 500);
+  setTimeout(hijack, 1500);
+})();
+</script>
 </body></html>
