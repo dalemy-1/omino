@@ -14936,4 +14936,66 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+
+<script>
+/* PATCH_V2_MASTER v7.1 FINAL OVERRIDE (no-spam, force render after pull, status version) */
+(function(){
+  try{
+    window.__PATCH_V2_MASTER_VERSION__ = 'v7.1';
+    // Silence repeated bind logs (if older patches are running intervals)
+    const _log = console.log;
+    let seen = new Set();
+    console.log = function(...args){
+      try{
+        const s = String(args && args[0] || '');
+        if (s.includes('PATCH_V2_MASTER v6') && s.includes('bound buttons')){
+          if (seen.has('v6_bound')) return;
+          seen.add('v6_bound');
+        }
+      }catch(_){}
+      return _log.apply(console, args);
+    };
+
+    // Override cloud status modal to always show current version if possible
+    const prevStat = window.cloudStatus || window.showCloudStatus || null;
+    const wrap = async function(){
+      try{
+        const table = (window.__OPS_ORDER_TABLE__ || window.ORDER_TABLE || 'ops_orders_v2');
+        const app = (window.CLOUD && window.CLOUD.app_key) || window.APP_KEY || 'dalemy';
+        const v = window.__PATCH_V2_MASTER_VERSION__ || 'v7.1';
+        const msg = [
+          `云端订单归档状态（${table})`,
+          `PATCH_V2_MASTER=${v}`,
+          `app_key=${app}`
+        ].join('\\n');
+        alert(msg);
+      }catch(e){
+        if (typeof prevStat === 'function') return prevStat();
+        alert('云端状态：无法读取');
+      }
+    };
+    // Bind to common names
+    window.cloudStatus = wrap;
+    window.showCloudStatus = wrap;
+
+    // Ensure after pull we re-render
+    const prevPull = window.cloudPull || window.robustCloudPull || window.ordersCloudPull || window.patchedCloudPull;
+    async function pullAndRender(){
+      const r = (typeof prevPull === 'function') ? await prevPull() : null;
+      try{
+        if (typeof window.render === 'function') window.render();
+        else if (typeof window.R === 'function') window.R();
+      }catch(_){}
+      return r;
+    }
+    window.cloudPull = pullAndRender;
+    window.robustCloudPull = pullAndRender;
+    window.ordersCloudPull = pullAndRender;
+    window.patchedCloudPull = pullAndRender;
+  }catch(e){
+    console.error('[PATCH_V2_MASTER v7.1] override failed', e);
+  }
+})();
+</script>
+
 </body></html>
