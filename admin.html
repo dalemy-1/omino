@@ -13679,7 +13679,7 @@ async function cloudStatusFixed(){
 
 <script>
 /* =========================
-   PATCH_V2_MASTER v7.4 (applyfix)
+   PATCH_V2_MASTER v7.5 (applyfix->statefix)
    Goals:
    - Force ALL cloud buttons to use ops_orders_v2 (even if legacy scripts exist)
    - After pull: build virtual sellers/products and orders with sellerId/productId so renderOrders can display
@@ -13687,7 +13687,7 @@ async function cloudStatusFixed(){
    - Status popup must show v2 + version
 ========================= */
 (function(){
-  const PATCH_VER = "v7.4";
+  const PATCH_VER = "v7.5";
   const TABLE = "ops_orders_v2";
   const APP_KEY_DEFAULT = "dalemy";
 
@@ -13724,12 +13724,18 @@ async function cloudStatusFixed(){
   }
 
   function ensureState(){
+    // Use the app's real state object (global `S`) first.
+    // In this codebase, the renderer reads from global `S` (not window.S).
+    try{
+      if(typeof S === "object" && S){
+        // keep window.state pointing to the same object (legacy alias)
+        window.state = S;
+        return S;
+      }
+    }catch(e){}
+    // fallback (should not happen)
     if(!window.S || typeof window.S!=="object") window.S = {sellers:[],products:[],orders:[],batches:[],seq:{seller:1,product:1,order:1,batch:1}};
-    if(!window.UI || typeof window.UI!=="object") window.UI = {};
-    // pagination defaults
-    if(!window.UI.pageSize) window.UI.pageSize = 100;
-    if(!window.UI.page) window.UI.page = 1;
-    if(!window.UI.selectedOrderIds) window.UI.selectedOrderIds = new Set();
+    window.state = window.S;
     return window.S;
   }
 
