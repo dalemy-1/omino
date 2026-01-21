@@ -15068,6 +15068,220 @@ async function cloudStatusFixed(){
   log('override ready. bound:', {status:n1,push:n2,force:n3,pull:n4, table:TABLE});
 })();
 </script>
+<script>
+/**
+ * SNAPSHOT REST FORCE TAKEOVER (final)
+ * 目标：无论页面里还有多少 PATCH/归档/SDK 同步逻辑，
+ *      “云端推送/强制推送/云端拉取/云端状态” 四个按钮最终都只走快照表 ops_cloud_snapshots_v1。
+ */
+(function(){
+  const SNAP_TABLE = 'ops_cloud_snapshots_v1';
+  const TAG = '[SNAPSHOT_FORCE]';
+
+  function pickCfg(){
+    // 兼容各种版本的存储键（尽量自动找到）
+    const ls = window.localStorage || {};
+    const cfg = {
+      url: ls.getItem('SUPABASE_URL') || ls.getItem('supabase_url') || ls.getItem('sb_url') || '',
+      anon: ls.getItem('SUPABASE_ANON_KEY') || ls.getItem('supabase_anon') || ls.getItem('sb_anon') || '',
+      app: ls.getItem('APP_KEY') || ls.getItem('app_key') || ls.getItem('APP') || 'dalemy',
+    };
+
+    // 有些版本把配置挂在 window 上（尽量兜底）
+    if(!cfg.url && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.url) cfg.url = window.__CLOUD_CFG__.url;
+    if(!cfg.anon && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.anon) cfg.anon = window.__CLOUD_CFG__.anon;
+    if((!cfg.app || cfg.app==='dalemy') && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.app) cfg.app = window.__CLOUD_CFG__.app;
+
+    // 如果还拿不到，就提示用户输入（只在真正调用时触发）
+    return cfg;
+  }
+
+  function needCfg(cfg){
+    if(!cfg.url) cfg.url = prompt('请输入 Supabase URL（形如 https://xxx.supabase.co ）') || '';
+    if(!cfg.anon) cfg.anon = prompt('请输入 Supabase anon key') || '';
+    if(!cfg.app) cfg.app = prompt('请输入 app_key（例如 dalemy）') || 'dalemy';
+    // 保存回 localStorage，后续不再弹
+    try{
+      localStorage.setItem('SUPABASE_URL', cfg.url);
+      localStorage.setItem('SUPABASE_ANON_KEY', cfg.anon);
+      localStorage.setItem('APP_KEY', cfg.app);
+    }catch(e){}
+    return cfg;
+  }
+
+  function hdr(cfg){
+    return {
+      'apikey': cfg.anon,
+      'Authorization': 'Bearer ' + cfg.anon,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates'
+    };
+  }
+
+  async function restSelect(cfg){
+    const url = cfg.url.replace(/\/$/, '') + '/rest/v1/' + SNAP_TABLE
+      + '?select=*&app_key=eq.' + encodeURIComponent(cfg.app)
+      + '&limit=1&order=updated_at.desc';
+    const r = await fetch(url, { method:'GET', headers: hdr(cfg) });
+    const t = await r.text();
+    if(!r.ok) throw new Error('REST select failed ' + r.status + ': ' + t);
+    const arr = JSON.parse(t || '[]');
+    return arr[0] || null;
+  }
+
+  async function restUpsert(cfg, row){
+    const url = cfg.url.replace(/\/$/, '') + '/rest/v1/' + SNAP_TABLE;
+    const r = await fetch(url, {
+      method:'POST',
+      headers: Object.assign(hdr(cfg), {'Prefer':'resolution=merge-duplicates,return=representation'}),
+      body: JSON.stringify([row])
+    });
+    const t = await r.text();
+    if(!r.ok) throw new Error('REST upsert failed ' + r.status + ': ' + t);
+    return t ? JSON.parse(t) : [];
+  }
+
+  function getLocalState(){
+    // 尽最大可能从 window.S / localStorage 取到状态；不在这里强依赖 IndexedDB
+    let S = null;
+    if(window.S && typeof window.S === 'object') S = window.S;
+
+    // 如果 window.S 为空，有些版本用 localStorage 快照
+    if(!S){
+      const raw = localStorage.getItem('ops_rebuild_v6_4_2_state') || localStorage.getItem('main_state_v1') || '';
+      if(raw){
+        try{ S = JSON.parse(raw); }catch(e){}
+      }
+    }
+    // 兜底结构
+    S = S || {};
+    S.sellers = Array.isArray(S.sellers) ? S.sellers : [];
+    S.products = Array.isArray(S.products) ? S.products : [];
+    S.orders = Array.isArray(S.orders) ? S.orders : [];
+    S.batches = Array.isArray(S.batches) ? S.batches : [];
+    return S;
+  }
+
+  function writeLocalState(payload){
+    // 只做“尽力写回”，避免破坏原有结构
+    try{
+      if(window.S && typeof window.S === 'object'){
+        window.S.sellers = payload.sellers || [];
+        window.S.products = payload.products || [];
+        window.S.orders = payload.orders || [];
+        window.S.batches = payload.batches || [];
+      }
+    }catch(e){}
+
+    try{
+      localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(payload));
+    }catch(e){}
+  }
+
+  async function snapshotStatus(){
+    const cfg = needCfg(pickCfg());
+    const row = await restSelect(cfg);
+    if(!row){
+      alert(`云端快照状态（${SNAP_TABLE}）\napp_key=${cfg.app}\n云端：无快照记录`);
+      return;
+    }
+    const p = row.payload || {};
+    const s = Array.isArray(p.sellers) ? p.sellers.length : 0;
+    const pr = Array.isArray(p.products) ? p.products.length : 0;
+    const o = Array.isArray(p.orders) ? p.orders.length : 0;
+    const b = Array.isArray(p.batches) ? p.batches.length : 0;
+    alert(
+      `云端快照状态（${SNAP_TABLE}）\napp_key=${cfg.app}\n` +
+      `云端：sellers=${s} products=${pr} orders=${o} batches=${b}\n` +
+      `updated_at=${row.updated_at || '(no updated_at)'}`
+    );
+  }
+
+  async function snapshotPush(force){
+    const cfg = needCfg(pickCfg());
+    const local = getLocalState();
+
+    const total = local.sellers.length + local.products.length + local.orders.length + local.batches.length;
+    const cloud = await restSelect(cfg);
+
+    // 安全策略：本地全空且云端非空时，默认拦截（避免误清空）
+    if(!force && total === 0 && cloud && cloud.payload){
+      alert('已阻止推送：本地数据全为空，云端已有数据。若确认要覆盖为空，请点【强制推送】。');
+      return;
+    }
+
+    const row = {
+      app_key: cfg.app,
+      payload: {
+        sellers: local.sellers,
+        products: local.products,
+        orders: local.orders,
+        batches: local.batches
+      },
+      updated_at: new Date().toISOString()
+    };
+
+    await restUpsert(cfg, row);
+    alert(`推送成功：已写入快照表 ${SNAP_TABLE}\napp_key=${cfg.app}\n本地：sellers=${local.sellers.length} products=${local.products.length} orders=${local.orders.length} batches=${local.batches.length}`);
+  }
+
+  async function snapshotPull(){
+    const cfg = needCfg(pickCfg());
+    const row = await restSelect(cfg);
+    if(!row || !row.payload){
+      alert(`云端拉取：云端无快照（${SNAP_TABLE}）`);
+      return;
+    }
+    const p = row.payload || {};
+    const payload = {
+      sellers: Array.isArray(p.sellers) ? p.sellers : [],
+      products: Array.isArray(p.products) ? p.products : [],
+      orders: Array.isArray(p.orders) ? p.orders : [],
+      batches: Array.isArray(p.batches) ? p.batches : []
+    };
+    writeLocalState(payload);
+    alert(`拉取成功：已写回本地\nsellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n（如列表未刷新，请手动刷新页面）`);
+  }
+
+  // 1) 强制覆盖全局函数（无论前面怎么定义）
+  window.cloudStatus = snapshotStatus;
+  window.cloudPull = snapshotPull;
+  window.cloudPush = function(){ return snapshotPush(false); };
+  window.cloudPushForce = function(){ return snapshotPush(true); };
+
+  // 2) 捕获阶段接管按钮点击，阻断 PATCH7 / orders 归档等所有后续 onclick
+  function matchBtn(t){
+    t = (t || '').replace(/\s+/g,'');
+    if(!t) return null;
+    if(t.includes('云端状态')) return 'status';
+    if(t.includes('云端拉取')) return 'pull';
+    if(t.includes('强制推送')) return 'force';
+    if(t.includes('云端推送')) return 'push';
+    return null;
+  }
+
+  document.addEventListener('click', function(ev){
+    const el = ev.target && (ev.target.closest ? ev.target.closest('button,a,input[type="button"]') : ev.target);
+    if(!el) return;
+    const key = matchBtn(el.innerText || el.value || '');
+    if(!key) return;
+
+    // 彻底阻断其它补丁
+    ev.preventDefault();
+    ev.stopPropagation();
+    if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+
+    console.log(TAG, 'takeover click =>', key);
+
+    if(key==='status') return snapshotStatus().catch(e=>alert('云端状态失败：'+e.message));
+    if(key==='pull') return snapshotPull().catch(e=>alert('云端拉取失败：'+e.message));
+    if(key==='force') return snapshotPush(true).catch(e=>alert('强制推送失败：'+e.message));
+    if(key==='push') return snapshotPush(false).catch(e=>alert('云端推送失败：'+e.message));
+  }, true);
+
+  console.log(TAG, 'installed. table=', SNAP_TABLE);
+})();
+</script>
 
 </body>
 </html>
