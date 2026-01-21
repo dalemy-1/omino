@@ -13861,16 +13861,22 @@ async function cloudStatusFixed(){
     const { client: sb, cfg } = cloud;
     const appKey = _s(cfg && (cfg.appKey||cfg.app_key));
     if(!appKey) return _alert("云端配置缺少 app_key。");
-    const q = (t)=>sb.from(t).select("id", { count:"exact", head:true }).eq("app_key", appKey);
+
+    async function q(t){
+      return sb.from(t).select("id", { count:"exact", head:true }).eq("app_key", appKey);
+    }
     const [a,b,c] = await Promise.allSettled([q("ops_sellers_v1"), q("ops_products_v1"), q("ops_orders_v2")]);
     const cnt = (r)=> (r && r.status==="fulfilled" && r.value) ? (r.value.count||0) : ("ERR");
-    _alert(`云端状态（三表主库)
-V7.7=${V77}
-app_key=${appKey}
-ops_sellers_v1=${cnt(a)}
-ops_products_v1=${cnt(b)}
-ops_orders_v2=${cnt(c)}`);
-}
+    const msg = [
+      "云端状态（三表主库）",
+      "V7.7="+V77,
+      "app_key="+appKey,
+      "ops_sellers_v1="+cnt(a),
+      "ops_products_v1="+cnt(b),
+      "ops_orders_v2="+cnt(c),
+    ].join("\n");
+    _alert(msg);
+  }
 
   async function cloudPushV77(){
     const cloud = await getCloud();
@@ -13920,9 +13926,7 @@ ops_orders_v2=${cnt(c)}`);
       if(sErr) throw sErr;
       (sAll||[]).forEach(r=> sellerNameToUuid.set(_s(r.seller_name), _s(r.id)));
     }catch(e){
-      return _alert("云端推送失败：卖家 upsert/映射失败
-
-"+(e && (e.message||JSON.stringify(e)) ));
+      return _alert("云端推送失败：卖家 upsert/映射失败\n\n"+(e && (e.message||JSON.stringify(e)) ));
     }
 
     // 2) upsert products
@@ -13972,9 +13976,7 @@ ops_orders_v2=${cnt(c)}`);
       if(pErr) throw pErr;
       (pAll||[]).forEach(r=> prodKeyToUuid.set(_s(r.market)+"|"+_s(r.asin_key), _s(r.id)));
     }catch(e){
-      return _alert("云端推送失败：产品 upsert/映射失败
-
-"+(e && (e.message||JSON.stringify(e)) ));
+      return _alert("云端推送失败：产品 upsert/映射失败\n\n"+(e && (e.message||JSON.stringify(e)) ));
     }
 
     // 3) upsert orders (only those we can resolve to seller_id & product_id)
@@ -14028,23 +14030,23 @@ ops_orders_v2=${cnt(c)}`);
         orderUpserted = Array.isArray(data) ? data.length : 0;
       }
     }catch(e){
-      return _alert("云端推送失败：订单 upsert 失败
-
-"+(e && (e.message||JSON.stringify(e)) ));
+      return _alert("云端推送失败：订单 upsert 失败\n\n"+(e && (e.message||JSON.stringify(e)) ));
     }
 
-    const msg = `云端推送完成（三表主库)
-V7.7=${V77}
-app_key=${appKey}
-本地来源=${local.source}
-本地数量：卖家=${sellers.length} 产品=${products.length} 订单=${orders.length}
-卖家 upsert=${sellerUpserted}
-产品 upsert=${productUpserted}
-订单 upsert=${orderUpserted}` + (skipped.length ? `
-跳过订单=${skipped.length}（控制台查看前10条）` : "");
-console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
-_alert(msg);
-}
+    const msg = [
+      "云端推送完成（三表主库）",
+      "V7.7="+V77,
+      "app_key="+appKey,
+      "本地来源="+local.source,
+      "本地数量：卖家="+sellers.length+" 产品="+products.length+" 订单="+orders.length,
+      "卖家 upsert="+sellerUpserted,
+      "产品 upsert="+productUpserted,
+      "订单 upsert="+orderUpserted,
+      (skipped.length ? ("跳过订单="+skipped.length+"（控制台查看前10条）") : "")
+    ].filter(Boolean).join("\n");
+    console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
+    _alert(msg);
+  }
 
   async function cloudPullV77(){
     const cloud = await getCloud();
