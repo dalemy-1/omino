@@ -14797,5 +14797,277 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+
+<script>
+/**
+ * SNAPSHOT REST FINAL OVERRIDE (v7.6-snapshot-final)
+ * Hard-lock cloud actions to ops_cloud_snapshots_v1 via REST.
+ * This override runs at the very end, in capture phase, and blocks legacy handlers.
+ */
+(function(){
+  'use strict';
+  const TAG='[SNAPSHOT_FINAL]';
+  const TABLE='ops_cloud_snapshots_v1';
+
+  function log(){ try{ console.log(TAG, ...arguments); }catch(e){} }
+
+  function toast(msg){ try{ alert(String(msg)); }catch(e){ log('toast failed', e); } }
+
+  function safeJsonParse(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
+
+  function loadCloudCfg(){
+    const v1 = safeJsonParse(localStorage.getItem('OPS_CLOUD_CFG_V1')||'');
+    const v0 = safeJsonParse(localStorage.getItem('OPS_CLOUD_CFG')||'');
+    const app = localStorage.getItem('OPS_CLOUD_APPKEY') || (v1&&v1.app) || (v0&&v0.app) || '';
+    const url = (v1&&v1.url) || (v0&&v0.url) || '';
+    const anon = (v1&&v1.anon) || (v0&&v0.anon) || '';
+    return { url, anon, app };
+  }
+
+  function normalizeUrl(u){
+    if(!u) return '';
+    return String(u).trim().replace(/\/+$/,'');
+  }
+
+  async function restFetch(cfg, path, opt){
+    const url = normalizeUrl(cfg.url);
+    if(!url || !cfg.anon) throw new Error('cloud_cfg_missing');
+    const full = url + path;
+    const headers = Object.assign({
+      'apikey': cfg.anon,
+      'Authorization': 'Bearer ' + cfg.anon,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    }, (opt && opt.headers) || {});
+    const res = await fetch(full, Object.assign({}, opt||{}, { headers }));
+    const text = await res.text();
+    let data = null;
+    try{ data = text ? JSON.parse(text) : null; }catch(e){ data = text; }
+    if(!res.ok){
+      const err = new Error('rest_error_'+res.status);
+      err.status = res.status;
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function openDB(dbName, version){
+    return new Promise((resolve, reject)=>{
+      const req = indexedDB.open(dbName, version);
+      req.onupgradeneeded = ()=>{ /* no-op */ };
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+  }
+
+  async function idbGet(dbName, version, storeName, key){
+    const db = await openDB(dbName, version);
+    return await new Promise((resolve, reject)=>{
+      const tx = db.transaction([storeName],'readonly');
+      const st = tx.objectStore(storeName);
+      const req = st.get(key);
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+  }
+
+  async function idbPut(dbName, version, storeName, value, key){
+    const db = await openDB(dbName, version);
+    return await new Promise((resolve, reject)=>{
+      const tx = db.transaction([storeName],'readwrite');
+      const st = tx.objectStore(storeName);
+      const req = (key===undefined) ? st.put(value) : st.put(value, key);
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+  }
+
+  async function readMainState(){
+    // 1) window.S
+    try{
+      if(window.S && typeof window.S==='object'){
+        const s = window.S;
+        if(Array.isArray(s.orders) || Array.isArray(s.sellers) || Array.isArray(s.products) || Array.isArray(s.batches)){
+          return s;
+        }
+      }
+    }catch(e){}
+    // 2) localStorage canonical
+    const ls = safeJsonParse(localStorage.getItem('ops_rebuild_v6_4_2_state')||'');
+    if(ls && typeof ls==='object') return ls;
+    const ls2 = safeJsonParse(localStorage.getItem('OPS_MAIN_STATE_V1')||'');
+    if(ls2 && typeof ls2==='object') return ls2;
+
+    // 3) IndexedDB main_state_v1 (known db/store for v6.4.2 baseline)
+    try{
+      const rec = await idbGet('ops_v642_main', 1, 'kv', 'main_state_v1');
+      if(rec && typeof rec==='object'){
+        if(rec.value && typeof rec.value==='object') return rec.value;
+        return rec;
+      }
+    }catch(e){
+      log('readMainState idb failed', e);
+    }
+    return { sellers:[], products:[], orders:[], batches:[] };
+  }
+
+  async function writeMainState(state){
+    // write localStorage mirrors
+    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state)); }catch(e){}
+    try{ localStorage.setItem('OPS_MAIN_STATE_V1', JSON.stringify(state)); }catch(e){}
+    // write IndexedDB (best-effort)
+    try{
+      await idbPut('ops_v642_main', 1, 'kv', { key:'main_state_v1', value: state }, 'main_state_v1');
+    }catch(e){
+      try{
+        // some builds store raw value under key
+        await idbPut('ops_v642_main', 1, 'kv', state, 'main_state_v1');
+      }catch(e2){
+        log('writeMainState idb failed', e2);
+      }
+    }
+    // update in-memory
+    try{ window.S = state; }catch(e){}
+  }
+
+  function countsOf(s){
+    const sellers = Array.isArray(s.sellers)? s.sellers.length:0;
+    const products = Array.isArray(s.products)? s.products.length:0;
+    const orders = Array.isArray(s.orders)? s.orders.length:0;
+    const batches = Array.isArray(s.batches)? s.batches.length:0;
+    return { sellers, products, orders, batches };
+  }
+
+  function isAllEmpty(c){ return (c.sellers+c.products+c.orders+c.batches)===0; }
+
+  async function snapshotSelect(cfg){
+    const q = encodeURIComponent('app_key=eq.'+cfg.app);
+    // select only needed columns
+    return await restFetch(cfg, '/rest/v1/'+TABLE+'?select=app_key,updated_at,hash,payload&'+q+'&limit=1', { method:'GET' });
+  }
+
+  async function snapshotUpsert(cfg, payload){
+    const body = [{
+      app_key: cfg.app,
+      payload: payload,
+      updated_at: new Date().toISOString()
+    }];
+    // use upsert on app_key
+    return await restFetch(cfg, '/rest/v1/'+TABLE+'?on_conflict=app_key', {
+      method:'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function snapshotStatus(){
+    const cfg = loadCloudCfg();
+    if(!cfg.app) return toast('未设置 app_key（请先在云端设置里保存）');
+    try{
+      const rows = await snapshotSelect(cfg);
+      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      const local = await readMainState();
+      const lc = countsOf(local);
+      if(!row){
+        toast('云端快照状态（'+TABLE+'）\\napp_key='+cfg.app+'\\n云端：空\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
+        return;
+      }
+      const rp = row.payload || {};
+      const rc = countsOf(rp);
+      toast('云端快照状态（'+TABLE+'）\\napp_key='+cfg.app+'\\n云端：sellers='+rc.sellers+' products='+rc.products+' orders='+rc.orders+' batches='+rc.batches+'\\nupdated_at='+(row.updated_at||'')+'\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
+    }catch(e){
+      log('status failed', e);
+      toast('云端状态失败：'+(e && e.message ? e.message : e));
+    }
+  }
+
+  async function snapshotPush(opts){
+    const force = !!(opts && opts.force);
+    const cfg = loadCloudCfg();
+    if(!cfg.app) return toast('请先在云端设置里保存 app_key / url / anon');
+    const local = await readMainState();
+    const lc = countsOf(local);
+
+    // safety: if local all empty but cloud not empty, block unless force
+    if(isAllEmpty(lc) && !force){
+      try{
+        const rows = await snapshotSelect(cfg);
+        const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+        const rc = row && row.payload ? countsOf(row.payload) : {sellers:0,products:0,orders:0,batches:0};
+        if(!isAllEmpty(rc)){
+          return toast('已阻止推送：本地全为空，云端非空。\\n为避免误清空云端，请先导入数据或点“强制推送”。');
+        }
+      }catch(e){
+        // if cannot read cloud, do not block
+        log('precheck cloud read failed, continue', e);
+      }
+    }
+
+    try{
+      await snapshotUpsert(cfg, local);
+      toast('云端推送成功（快照 REST）\\n'+TABLE+'\\napp_key='+cfg.app+'\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
+    }catch(e){
+      log('push failed', e);
+      toast('云端推送失败：'+(e && e.message ? e.message : e));
+    }
+  }
+
+  async function snapshotPull(){
+    const cfg = loadCloudCfg();
+    if(!cfg.app) return toast('请先在云端设置里保存 app_key / url / anon');
+    try{
+      const rows = await snapshotSelect(cfg);
+      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      if(!row || !row.payload){
+        return toast('云端拉取：云端快照为空（'+TABLE+'）');
+      }
+      const payload = row.payload;
+      await writeMainState(payload);
+      const c = countsOf(payload);
+      toast('云端拉取成功（快照 REST）\\n'+TABLE+'\\napp_key='+cfg.app+'\\n已写回本地：sellers='+c.sellers+' products='+c.products+' orders='+c.orders+' batches='+c.batches+'\\n将刷新页面以重渲染');
+      // best-effort re-render
+      try{
+        if(typeof window.render==='function'){ window.render(); return; }
+      }catch(e){}
+      try{ location.reload(); }catch(e){}
+    }catch(e){
+      log('pull failed', e);
+      toast('云端拉取失败：'+(e && e.message ? e.message : e));
+    }
+  }
+
+  // hard override globals used by buttons
+  window.cloudStatus = snapshotStatus;
+  window.cloudPush = function(){ return snapshotPush({force:false}); };
+  window.cloudPull = snapshotPull;
+  window.cloudPushForce = function(){ return snapshotPush({force:true}); };
+
+  // capture-phase bind & block any legacy handlers for these buttons
+  function bindByText(text, fn){
+    const btns = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
+    const hits = btns.filter(b=>{
+      const t = (b.innerText || b.value || '').trim();
+      return t === text || t.includes(text);
+    });
+    hits.forEach(b=>{
+      b.addEventListener('click', function(ev){
+        try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); }catch(e){}
+        fn();
+      }, true); // capture
+    });
+    return hits.length;
+  }
+
+  // bind common labels (兼容不同版本按钮文案)
+  const n1 = bindByText('云端状态', snapshotStatus);
+  const n2 = bindByText('云端推送', ()=>snapshotPush({force:false}));
+  const n3 = bindByText('强制推送', ()=>snapshotPush({force:true}));
+  const n4 = bindByText('云端拉取', snapshotPull);
+
+  log('override ready. bound:', {status:n1,push:n2,force:n3,pull:n4, table:TABLE});
+})();
+</script>
+
 </body>
 </html>
