@@ -14133,11 +14133,7 @@ async function cloudStatusFixed(){
     await saveLocalMainState(next);
 
     try{ if(typeof window.render === "function") window.render(); }catch(e){}
-    _alert("云端拉取完成（三表主库）
-V7.7="+V77+"
-app_key="+appKey+"
-卖家="+sellersLocal.length+" 产品="+productsLocal.length+" 订单="+ordersLocal.length+"
-已写入 IndexedDB 作为本地缓存。");
+    _alert("云端拉取完成（三表主库）\nV7.7="+V77+"\napp_key="+appKey+"\n卖家="+sellersLocal.length+" 产品="+productsLocal.length+" 订单="+ordersLocal.length+"\n已写入 IndexedDB 作为本地缓存。");
   }
 
   // === Force override (double insurance) ===
