@@ -14898,4 +14898,264 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+
+<!-- ===================== V7.7 THREE-TABLE MASTER OVERRIDE (PATCH5 DIAG) ===================== -->
+<script>
+(function(){
+  const PATCH_TAG = "7.7-patch5-diag";
+  const T = { SELLERS:"ops_sellers_v1", PRODUCTS:"ops_products_v1", ORDERS:"ops_orders_v2" };
+
+  function getCloudCfg(){
+    // 兼容多种存放位置
+    const S = window.S || window.__S || null;
+    const cfg = (S && S.settings && S.settings.cloud) ? S.settings.cloud : null;
+    const url = cfg && (cfg.url || cfg.supabaseUrl) ? (cfg.url || cfg.supabaseUrl) : (window.SUPABASE_URL || "");
+    const anon = cfg && (cfg.anon || cfg.anonKey || cfg.key) ? (cfg.anon || cfg.anonKey || cfg.key) : (window.SUPABASE_ANON || "");
+    const app_key = cfg && (cfg.app_key || cfg.appKey) ? (cfg.app_key || cfg.appKey) : (window.APP_KEY || "dalemy");
+    return {url, anon, app_key};
+  }
+
+  function getClient(){
+    const {url, anon} = getCloudCfg();
+    if(!url || !anon) return null;
+    // 复用全局 client（避免 GoTrueClient 警告）
+    if(window.__SB_V77 && window.__SB_V77_url===url) return window.__SB_V77;
+    if(!(window.supabase && window.supabase.createClient)) return null;
+    const c = window.supabase.createClient(url, anon, { auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } });
+    window.__SB_V77 = c; window.__SB_V77_url = url;
+    return c;
+  }
+
+  function toast(msg){
+    try{
+      if(window.U && window.U.toast) return window.U.toast(msg);
+    }catch(e){}
+    alert(msg);
+  }
+
+  async function countTable(client, table, app_key){
+    const {count, error} = await client.from(table).select("id", {count:"exact", head:true}).eq("app_key", app_key);
+    return {count: count||0, error};
+  }
+
+  async function probeWrite(client, app_key){
+    const seller_name = "__probe__" + Date.now();
+    const ins = await client.from(T.SELLERS).insert({app_key, seller_name}).select("id").limit(1);
+    if(ins.error) return {ok:false, step:"insert", error: ins.error};
+    const id = (ins.data && ins.data[0] && ins.data[0].id) ? ins.data[0].id : null;
+    if(!id) return {ok:false, step:"insert_no_id", error: {message:"insert ok but no id returned"}};
+    const del = await client.from(T.SELLERS).delete().eq("id", id);
+    if(del.error) return {ok:false, step:"delete", error: del.error};
+    return {ok:true};
+  }
+
+  async function cloudStatusV77(){
+    const client = getClient();
+    const {app_key} = getCloudCfg();
+    if(!client) return toast("云端未就绪：缺少 Supabase url/anon 或 supabase.js 未加载。");
+    const a = await countTable(client, T.SELLERS, app_key);
+    const b = await countTable(client, T.PRODUCTS, app_key);
+    const c = await countTable(client, T.ORDERS, app_key);
+    const lines = [
+      "云端状态（三表主库）",
+      "V7.7="+PATCH_TAG,
+      "app_key="+app_key,
+      `${T.SELLERS}=${a.count}` + (a.error?(" (ERR:"+a.error.message+")"):""),
+      `${T.PRODUCTS}=${b.count}` + (b.error?(" (ERR:"+b.error.message+")"):""),
+      `${T.ORDERS}=${c.count}` + (c.error?(" (ERR:"+c.error.message+")"):""),
+    ];
+    alert(lines.join("\n"));
+  }
+
+  async function cloudPushV77(){
+    const client = getClient();
+    const {app_key} = getCloudCfg();
+    if(!client) return toast("云端未就绪：缺少 Supabase url/anon 或 supabase.js 未加载。");
+
+    const S = window.S;
+    const sellers = (S && Array.isArray(S.sellers)) ? S.sellers : [];
+    const products = (S && Array.isArray(S.products)) ? S.products : [];
+    const orders  = (S && Array.isArray(S.orders)) ? S.orders : [];
+
+    // 先做一次写入探针，快速定位是否“权限/表不存在/网络”
+    const probe = await probeWrite(client, app_key);
+    if(!probe.ok){
+      alert([
+        "云端推送失败：写入探针未通过（极可能是权限/表策略/网络）",
+        "step="+probe.step,
+        "error="+(probe.error && (probe.error.message || JSON.stringify(probe.error)) ? (probe.error.message || JSON.stringify(probe.error)) : "unknown")
+      ].join("\n"));
+      return;
+    }
+
+    // 卖家 upsert（seller_name = 本地 seller.id）
+    let sellersOk = 0, productsOk = 0, ordersOk = 0;
+    let errS = null, errP = null, errO = null;
+
+    if(sellers.length){
+      const rows = sellers.map(x => ({
+        app_key,
+        seller_name: String(x.id || x.sellerId || x.name || "").trim(),
+        remark: x.remark || null
+      })).filter(r => r.seller_name);
+      const r = await client.from(T.SELLERS).upsert(rows, { onConflict: "app_key,seller_name" }).select("id");
+      errS = r.error || null;
+      sellersOk = r.data ? r.data.length : 0;
+    }
+
+    if(products.length){
+      const rows = products.map(p => {
+        const market = String(p.market || p.marketCode || "").trim();
+        const asin = String(p.asin || "").trim();
+        const name = String(p.name || p.product_name || "").trim();
+        const asin_key = asin ? asin : (name ? ("NAME:"+name) : "");
+        return {
+          app_key,
+          market,
+          asin_key,
+          product_name: name || null,
+          asin: asin || null,
+          review_req: p.reviewType || p.review_req || null,
+          discount: (p.discount!==undefined && p.discount!==null && p.discount!=="") ? Number(p.discount) : null,
+          buyer_commission_cny: (p.buyerCommission!==undefined && p.buyerCommission!==null && p.buyerCommission!=="") ? Number(p.buyerCommission) : null,
+          remark: p.remark || null
+        };
+      }).filter(r => r.market && r.asin_key);
+      const r = await client.from(T.PRODUCTS).upsert(rows, { onConflict: "app_key,market,asin_key" }).select("id");
+      errP = r.error || null;
+      productsOk = r.data ? r.data.length : 0;
+    }
+
+    // 订单：本次仅做“验证通路”——推送前 20 条（避免一次性 select 返回过大）
+    if(orders.length){
+      // 建 seller 映射
+      const sellerMap = new Map();
+      if(sellers.length){
+        // 以 seller_name 反查云端 id
+        const names = sellers.map(s=>String(s.id||"").trim()).filter(Boolean);
+        if(names.length){
+          const q = await client.from(T.SELLERS).select("id,seller_name").eq("app_key", app_key).in("seller_name", names.slice(0, 1000));
+          if(!q.error && q.data) q.data.forEach(r=>sellerMap.set(r.seller_name, r.id));
+        }
+      }
+      // 建 product 映射（market+asin_key）
+      const prodMap = new Map();
+      if(products.length){
+        // 分 market 查询（避免 in 过长）
+        const byM = {};
+        products.forEach(p=>{
+          const m=String(p.market||"").trim(); if(!m) return;
+          const asin=String(p.asin||"").trim(); const name=String(p.name||p.product_name||"").trim();
+          const ak=asin?asin:(name?("NAME:"+name):""); if(!ak) return;
+          (byM[m]=byM[m]||new Set()).add(ak);
+        });
+        for(const m in byM){
+          const aks = Array.from(byM[m]).slice(0, 1000);
+          const q = await client.from(T.PRODUCTS).select("id,market,asin_key").eq("app_key", app_key).eq("market", m).in("asin_key", aks);
+          if(!q.error && q.data) q.data.forEach(r=>prodMap.set(r.market+"||"+r.asin_key, r.id));
+        }
+      }
+
+      const slice = orders.slice(0, 20);
+      const rows = [];
+      const skipped = [];
+      slice.forEach(o=>{
+        const sellerLocal = String(o.sellerId || o.seller_id || "").trim();
+        const order_no = String(o.orderId || o.order_no || o.orderNo || "").trim();
+        const pidLocal = o.productId || o.product_id || null;
+        let market = String(o.market || "").trim();
+        let asin = String(o.asin || "").trim();
+        let pname = String(o.productName || o.product_name || "").trim();
+
+        // 若订单选择了产品，从产品补 market/asin_key
+        let asin_key = "";
+        if(pidLocal){
+          const p = products.find(x=>String(x.id)===String(pidLocal));
+          if(p){
+            market = market || String(p.market||"").trim();
+            asin = asin || String(p.asin||"").trim();
+            pname = pname || String(p.name||p.product_name||"").trim();
+          }
+        }
+        asin_key = asin ? asin : (pname ? ("NAME:"+pname) : "");
+        const seller_id = sellerMap.get(sellerLocal) || null;
+        const product_id = (market && asin_key) ? (prodMap.get(market+"||"+asin_key) || null) : null;
+
+        if(!seller_id || !product_id || !order_no){
+          skipped.push({order_no, need:{seller_id:!!seller_id, product_id:!!product_id, order_no:!!order_no}, market, asin_key, sellerLocal});
+          return;
+        }
+        rows.push({
+          app_key,
+          seller_id,
+          product_id,
+          order_no,
+          market: market || null,
+          currency: o.currency || null,
+          amount: (o.amount!==undefined && o.amount!==null && o.amount!=="") ? Number(o.amount) : null,
+          fx_override: (o.fxOverride!==undefined && o.fxOverride!==null && o.fxOverride!=="") ? Number(o.fxOverride) : null,
+          review_status: o.reviewStatus || null,
+          pay_status: o.payStatus || null,
+          comm_status: o.commStatus || null,
+          payout_status: o.payoutStatus || null,
+          remark: o.remark || null
+        });
+      });
+
+      if(rows.length){
+        const r = await client.from(T.ORDERS).upsert(rows, { onConflict: "app_key,seller_id,order_no,product_id" }).select("id");
+        errO = r.error || null;
+        ordersOk = r.data ? r.data.length : 0;
+      }else{
+        errO = null;
+        ordersOk = 0;
+      }
+
+      if(skipped.length){
+        console.warn("[V7.7] orders skipped (first 10)", skipped.slice(0,10));
+      }
+    }
+
+    const lines = [
+      "云端推送完成（三表主库）",
+      "V7.7="+PATCH_TAG,
+      "app_key="+app_key,
+      `本地：卖家=${sellers.length} 产品=${products.length} 订单=${orders.length}`,
+      `卖家 upsert=${sellersOk}` + (errS?(" (ERR:"+errS.message+")"):""),
+      `产品 upsert=${productsOk}` + (errP?(" (ERR:"+errP.message+")"):""),
+      `订单 upsert(仅前20条验证)=${ordersOk}` + (errO?(" (ERR:"+errO.message+")"):""),
+      "说明：若本地很多订单，本次仅推送前20条用于验证链路；确认无误后我再给你放开全量推送。"
+    ];
+    alert(lines.join("\n"));
+  }
+
+  function bind(){
+    // 覆写全局函数名（双保险）
+    window.ordersCloudStatus = cloudStatusV77;
+    window.ordersCloudPush = cloudPushV77;
+    window.cloudStatus = cloudStatusV77;
+    window.cloudPush = cloudPushV77;
+
+    // 捕获阶段拦截（避免旧逻辑抢回）
+    const map = [
+      {sel:"#btnCloudStatus", fn:cloudStatusV77},
+      {sel:"#btnCloudPush", fn:cloudPushV77}
+    ];
+    map.forEach(({sel, fn})=>{
+      const el = document.querySelector(sel);
+      if(!el) return;
+      el.addEventListener("click", function(ev){
+        ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
+        fn().catch(e=>alert("V7.7 push/status 异常："+(e && e.message ? e.message : e)));
+      }, true);
+    });
+
+    console.log("[V7.7] PATCH5 diag bound:", PATCH_TAG);
+  }
+
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", bind);
+  else bind();
+})();
+</script>
+
 </body></html>
