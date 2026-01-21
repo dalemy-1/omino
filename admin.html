@@ -1136,16 +1136,112 @@ async function cloudPull(opts){
 }
 
 // bind buttons after load
+
+/* ===================== Legacy Migration (localStorage -> IndexedDB) ===================== */
+async function migrateLegacyToIndexedDB(){
+  const A = (msg)=> (typeof window._alert==="function" ? window._alert(msg) : alert(msg));
+
+  const candidates = [
+    "ops_rebuild_v6_4_2_state",
+    "OPS_REBUILD_V6_4_2_STATE",
+    "ops_rebuild_v6_4_2_state_v2",
+    "ops_rebuild_v6_4_2_state_backup",
+    "ops_rebuild_v6_4_2_state__backup",
+    "ops_rebuild_v6_4_2_state_cloud",
+    "ops_rebuild_v6_4_2_state__cloud",
+    "ops_v6_4_2_state",
+    "ops_local_snapshot_v1",
+    "OPS_LOCAL_SNAPSHOT_V1"
+  ];
+
+  const tryParse = (raw)=>{
+    if(!raw) return null;
+    try{
+      if(raw && raw.charCodeAt && raw.charCodeAt(0)===0xFEFF) raw = raw.slice(1); // strip BOM
+      return JSON.parse(raw);
+    }catch(e){ return null; }
+  };
+
+  let foundKey = null;
+  let legacy = null;
+
+  // 1) Try known keys first
+  for(const k of candidates){
+    const obj = tryParse(localStorage.getItem(k));
+    if(!obj || typeof obj!=="object") continue;
+    const st = (obj && obj.state && typeof obj.state==="object") ? obj.state : obj;
+    const hasAny = (Array.isArray(st.orders) && st.orders.length) ||
+                   (Array.isArray(st.sellers) && st.sellers.length) ||
+                   (Array.isArray(st.products) && st.products.length) ||
+                   (Array.isArray(st.batches) && st.batches.length);
+    if(hasAny){
+      foundKey = k;
+      legacy = st;
+      break;
+    }
+  }
+
+  // 2) Fallback: scan localStorage keys
+  if(!legacy){
+    try{
+      for(let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i);
+        if(!k) continue;
+        if(!/ops/i.test(k) || !/state|snapshot/i.test(k)) continue;
+        const obj = tryParse(localStorage.getItem(k));
+        if(!obj || typeof obj!=="object") continue;
+        const st = (obj && obj.state && typeof obj.state==="object") ? obj.state : obj;
+        if(Array.isArray(st.orders) || Array.isArray(st.sellers) || Array.isArray(st.products)){
+          foundKey = k;
+          legacy = st;
+          break;
+        }
+      }
+    }catch(e){}
+  }
+
+  if(!legacy){
+    return A("未在 localStorage 找到旧版主数据快照。\n\n如果旧版在另一个浏览器/域名：请先在旧版里“导出 JSON”，再在此版本里“导入 JSON”。");
+  }
+
+  const norm = {
+    sellers: Array.isArray(legacy.sellers) ? legacy.sellers : [],
+    products: Array.isArray(legacy.products) ? legacy.products : [],
+    orders: Array.isArray(legacy.orders) ? legacy.orders : [],
+    batches: Array.isArray(legacy.batches) ? legacy.batches : []
+  };
+  norm._migrate_meta = { from:"localStorage", key:foundKey, at:new Date().toISOString(), v:"legacy_to_idb" };
+
+  const cur = await loadLocalMainState();
+  const curSt = (cur && cur.state) ? cur.state : { sellers:[], products:[], orders:[], batches:[] };
+  const curAny = (curSt.orders && curSt.orders.length) || (curSt.sellers && curSt.sellers.length) ||
+                 (curSt.products && curSt.products.length) || (curSt.batches && curSt.batches.length);
+
+  if(curAny){
+    const ok = confirm("检测到当前 IndexedDB 已有数据。\n\n【确定】= 用旧版快照覆盖 IndexedDB\n【取消】= 不覆盖");
+    if(!ok) return;
+  }
+
+  await saveLocalMainState(norm);
+  try{ if(typeof window.render==="function") window.render(); }catch(e){}
+  A("迁移完成：旧版 localStorage → IndexedDB 写入成功。\n来源="+foundKey+
+    "\n卖家="+norm.sellers.length+" 产品="+norm.products.length+" 订单="+norm.orders.length+" 批次="+norm.batches.length+
+    "\n\n建议：迁移后刷新页面一次。");
+}
+/* ===================== End Legacy Migration ===================== */
+
 window.addEventListener("load", ()=>{
   const byId = (id)=>document.getElementById(id);
   const bCfg = byId("btnCloudCfg");
   const bPush = byId("btnCloudPush");
   const bPull = byId("btnCloudPull");
   const bStatus = byId("btnCloudStatus");
+  const bMig = byId("btnMigrateLegacy");
   if(bCfg) bCfg.onclick = ()=>cloudPromptAndSave();
   if(bPush) bPush.onclick = ()=>cloudPushFixed();
   if(bPull) bPull.onclick = ()=>cloudPull();
   if(bStatus) bStatus.onclick = ()=>cloudStatusFixed();
+  if(bMig) bMig.onclick = ()=>migrateLegacyToIndexedDB().catch(e=>{ console.error(e); (typeof window._alert==="function"?window._alert:alert)("迁移失败："+(e&&e.message?e.message:e)); });
 });
 /* ===================== End Cloud Backup ===================== */
 
@@ -1220,6 +1316,7 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnCloudPush" title="把当前数据备份到云端">云端推送</button>
       <button class="btn" id="btnCloudPull" title="从云端恢复并覆盖本地">云端拉取</button>
       <button class="btn" id="btnCloudStatus" title="查看云端快照状态">云端状态</button>
+      <button class="btn" id="btnMigrateLegacy" title="把旧版 localStorage 主数据一次性迁移到 IndexedDB 作为唯一权威源" style="background:#f59e0b;border-color:#f59e0b;color:#111827;">迁移旧数据→本地库(IDB)</button>
       <button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
       <button class="btn warn" id="btnCloudPushForce" title="强制推送：即使 hash 未变化也推送（仍会合并后推送）">强制推送</button>
       <button class="btn warn" id="btnCloudPullForce" title="强制拉取：从云端覆盖本地（会二次确认）">强制拉取</button>
