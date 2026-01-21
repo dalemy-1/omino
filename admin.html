@@ -13864,20 +13864,13 @@ async function cloudStatusFixed(){
     const q = (t)=>sb.from(t).select("id", { count:"exact", head:true }).eq("app_key", appKey);
     const [a,b,c] = await Promise.allSettled([q("ops_sellers_v1"), q("ops_products_v1"), q("ops_orders_v2")]);
     const cnt = (r)=> (r && r.status==="fulfilled" && r.value) ? (r.value.count||0) : ("ERR");
-    _alert(
-      "云端状态（三表主库）
-"+
-      "V7.7="+V77+"
-"+
-      "app_key="+appKey+"
-"+
-      "ops_sellers_v1="+cnt(a)+"
-"+
-      "ops_products_v1="+cnt(b)+"
-"+
-      "ops_orders_v2="+cnt(c)
-    );
-  }
+    _alert(`云端状态（三表主库)
+V7.7=${V77}
+app_key=${appKey}
+ops_sellers_v1=${cnt(a)}
+ops_products_v1=${cnt(b)}
+ops_orders_v2=${cnt(c)}`);
+}
 
   async function cloudPushV77(){
     const cloud = await getCloud();
@@ -14040,28 +14033,18 @@ async function cloudStatusFixed(){
 "+(e && (e.message||JSON.stringify(e)) ));
     }
 
-    const msg =
-      "云端推送完成（三表主库）
-"+
-      "V7.7="+V77+"
-"+
-      "app_key="+appKey+"
-"+
-      "本地来源="+local.source+"
-"+
-      "本地数量：卖家="+sellers.length+" 产品="+products.length+" 订单="+orders.length+"
-"+
-      "卖家 upsert="+sellerUpserted+"
-"+
-      "产品 upsert="+productUpserted+"
-"+
-      "订单 upsert="+orderUpserted+"
-"+
-      (skipped.length ? ("
-跳过订单="+skipped.length+"（控制台查看前10条）") : "");
-    console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
-    _alert(msg);
-  }
+    const msg = `云端推送完成（三表主库)
+V7.7=${V77}
+app_key=${appKey}
+本地来源=${local.source}
+本地数量：卖家=${sellers.length} 产品=${products.length} 订单=${orders.length}
+卖家 upsert=${sellerUpserted}
+产品 upsert=${productUpserted}
+订单 upsert=${orderUpserted}` + (skipped.length ? `
+跳过订单=${skipped.length}（控制台查看前10条）` : "");
+console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
+_alert(msg);
+}
 
   async function cloudPullV77(){
     const cloud = await getCloud();
