@@ -14646,4 +14646,294 @@ async function cloudStatusFixed(){
 })();
 </script>
 
+
+<script>
+/* === PATCH_V2_MASTER v7 (definitive override: stable pull+persist, push from memory, price mapping) === */
+(function(){
+  'use strict';
+  const TABLE = 'ops_orders_v2';
+  const nowIso = ()=>new Date().toISOString();
+  function log(){ try{ console.log('[PATCH_V2_MASTER v7]', ...arguments); }catch(e){} }
+  function toast(msg){ try{ window.toast ? window.toast(msg) : alert(msg); }catch(e){ alert(msg); } }
+
+  function getAppKey(){
+    try{
+      if(window.CLOUD && window.CLOUD.app_key) return String(window.CLOUD.app_key||'').trim();
+      const raw = localStorage.getItem('OPS_CLOUD_CFG_V1') || localStorage.getItem('ops_cloud_cfg_v1') || '';
+      if(raw){
+        const j = JSON.parse(raw);
+        if(j && j.app_key) return String(j.app_key||'').trim();
+      }
+    }catch(e){}
+    return 'dalemy';
+  }
+
+  function getClient(){
+    // Try known globals
+    try{
+      if(window.__sb && window.__sb.from) return window.__sb;
+      if(window.supabaseClient && window.supabaseClient.from) return window.supabaseClient;
+      if(window.sb && window.sb.from) return window.sb;
+      if(window.client && window.client.from) return window.client;
+      // UMD supabase
+      if(window.supabase && window.supabase.createClient){
+        // If code already has URL/anon in CLOUD, reuse.
+        const cfg = (window.CLOUD||{});
+        if(cfg.url && cfg.anon){
+          const c = window.supabase.createClient(cfg.url, cfg.anon);
+          window.__sb = c;
+          return c;
+        }
+      }
+    }catch(e){}
+    return null;
+  }
+
+  function blankStateSafe(){
+    if(typeof window.blankState === 'function') return window.blankState();
+    return {sellers:[], products:[], orders:[], batches:[], payoutBatches:[], seq:{seller:1,product:1,order:1,batch:1,payoutBatch:1}};
+  }
+
+  function safeNum(x){
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function safeStr(x){
+    if(x==null) return '';
+    if(typeof x === 'string') return x;
+    try{ return JSON.stringify(x); }catch(e){ return String(x); }
+  }
+
+  async function pullV2(){
+    const app_key = getAppKey();
+    const sb = getClient();
+    if(!sb){ toast('云端未就绪：找不到 Supabase client'); return; }
+    const pageSize = 1000;
+    let from = 0;
+    let all = [];
+    while(true){
+      const to = from + pageSize - 1;
+      const q = sb.from(TABLE).select('*').eq('app_key', app_key).order('created_at', {ascending:true}).range(from, to);
+      const {data, error} = await q;
+      if(error){ throw error; }
+      const rows = data || [];
+      all = all.concat(rows);
+      if(rows.length < pageSize) break;
+      from += pageSize;
+      // Safety stop (avoid runaway)
+      if(from > 50000) break;
+    }
+
+    const S = blankStateSafe();
+
+    // sellers
+    const sellerIdByName = new Map();
+    function getSellerId(name){
+      const key = String(name||'').trim() || '（未命名卖家）';
+      if(sellerIdByName.has(key)) return sellerIdByName.get(key);
+      const id = 'S' + (S.sellers.length + 1);
+      sellerIdByName.set(key, id);
+      S.sellers.push({id, name:key, note:''});
+      return id;
+    }
+
+    // products (optional but helps UI)
+    const productIdByKey = new Map();
+    function getProductId(sellerId, market, asin, product_name){
+      const m = String(market||'').trim();
+      const a = String(asin||'').trim();
+      const pn = String(product_name||'').trim();
+      const key = [sellerId, m, a || ('NAME:'+pn), pn].join('|');
+      if(productIdByKey.has(key)) return productIdByKey.get(key);
+      const id = 'P' + (S.products.length + 1);
+      productIdByKey.set(key, id);
+      S.products.push({
+        id,
+        sellerId,
+        name: pn || '(未命名产品)',
+        asin: a,
+        market: m,
+        note: '',
+        discount: null,
+        buyerFee: null
+      });
+      return id;
+    }
+
+    // orders
+    all.forEach((r, idx)=>{
+      const seller_name = (r.seller_name||'').trim();
+      const order_no = (r.order_no||'').trim();
+      const market = (r.market||'').trim();
+      const asin = (r.asin||'').trim();
+      const product_name = (r.product_name||'').trim();
+      const unit_price = safeNum(r.unit_price);
+      const fx_rate = safeNum(r.fx_rate);
+      const review_req = (r.review_req||'').trim();
+
+      const sellerId = getSellerId(seller_name || '（未命名卖家）');
+      const productId = getProductId(sellerId, market, asin, product_name);
+
+      const o = {
+        id: 'O' + (idx + 1),
+        sellerId,
+        productId,
+        // v6.4.2 UI common fields
+        orderId: order_no,
+        market: market,
+        asin: asin,
+        productName: product_name,
+        reviewType: review_req || '文字评价',
+        amount: unit_price,     // 关键：金额列读取
+        unit_price: unit_price, // 兼容
+        fxRate: fx_rate,
+        fx_rate: fx_rate,
+        payoutStatus: r.payout_status || 'PENDING',
+        reviewStatus: r.review_status || 'PENDING',
+        note: (typeof r.note === 'object' && r.note) ? r.note : {},
+        cloudId: r.id,
+        createdAt: r.created_at || null,
+        updatedAt: r.updated_at || null
+      };
+      S.orders.push(o);
+    });
+
+    // seq
+    try{ window.S = S; }catch(e){}
+    try{ typeof window.computeSeq === 'function' && window.computeSeq(); }catch(e){}
+    // Persist to IndexedDB so refresh doesn't lose pulled orders
+    try{ typeof window.saveNow === 'function' && await window.saveNow({skipPayoutSnapshot:true}); }catch(e){ log('saveNow failed', e); }
+
+    try{ typeof window.render === 'function' && window.render(); }catch(e){}
+    toast('云端拉取完成：'+S.orders.length+' 条（'+TABLE+'）\\n已写入本地缓存，可刷新不丢失。');
+    log('pull ok', {n:S.orders.length});
+  }
+
+  async function pushV2(force){
+    const app_key = getAppKey();
+    const sb = getClient();
+    if(!sb){ toast('云端未就绪：找不到 Supabase client'); return; }
+
+    // Prefer in-memory state
+    const S = window.S || window.state || window.__STATE__ || null;
+    const orders = (S && Array.isArray(S.orders)) ? S.orders : [];
+    if(!orders.length){
+      toast('没有可推送的订单（本地 orders 为空）。请先保存订单，或先云端拉取一次确保本地载入。');
+      return;
+    }
+
+    // Build rows
+    const sellerNameById = new Map();
+    try{ (S.sellers||[]).forEach(s=>sellerNameById.set(s.id, s.name)); }catch(e){}
+
+    const rows = orders
+      .filter(o=>o && (o.orderId||o.order_no))
+      .map(o=>{
+        const seller_name = (o.sellerName || sellerNameById.get(o.sellerId) || '').trim();
+        const order_no = (o.orderId || o.order_no || '').trim();
+        const market = (o.market || o.country || '').trim() || null;
+        const asin = (o.asin || '').trim() || null;
+        const product_name = (o.productName || o.product_name || o.product || '').toString().trim() || '(未选产品)';
+        const unit_price = safeNum(o.amount ?? o.unit_price ?? o.unitPrice);
+        const fx_rate = safeNum(o.fxRate ?? o.fx_rate ?? o.fx);
+        const review_req = (o.reviewType || o.review_req || '').toString().trim() || null;
+
+        // note: keep object only
+        let note = {};
+        try{
+          if(typeof o.note === 'object' && o.note) note = o.note;
+          else if(typeof o.note === 'string' && o.note.trim()) note = JSON.parse(o.note);
+        }catch(e){ note = {}; }
+
+        return {
+          app_key,
+          seller_name,
+          order_no,
+          market,
+          asin,
+          product_name,
+          unit_price,
+          fx_rate: fx_rate || null,
+          review_req,
+          payout_status: o.payoutStatus || o.payout_status || null,
+          review_status: o.reviewStatus || o.review_status || null,
+          note
+        };
+      });
+
+    if(!rows.length){
+      toast('没有可推送的订单（订单号缺失）。');
+      return;
+    }
+
+    // Try stricter conflict target first (recommended new unique key)
+    const tryOn = async (onConflict)=>{
+      const {error} = await sb.from(TABLE).upsert(rows, {onConflict});
+      if(error) throw error;
+    };
+
+    try{
+      await tryOn('app_key,seller_name,order_no,asin_key');
+    }catch(e1){
+      // Fallback to old unique key (includes product_name)
+      try{
+        await tryOn('app_key,seller_name,order_no,product_name,asin_key');
+      }catch(e2){
+        log('upsert failed', e2);
+        toast('云端推送失败：'+(e2.message||safeStr(e2)));
+        return;
+      }
+    }
+
+    toast('云端推送成功：'+rows.length+' 条（'+TABLE+'）');
+    log('push ok', {n:rows.length});
+  }
+
+  async function showStatus(){
+    const app_key = getAppKey();
+    const sb = getClient();
+    if(!sb){ toast('云端未就绪：找不到 Supabase client'); return; }
+    const {count, error} = await sb.from(TABLE).select('*', {count:'exact', head:true}).eq('app_key', app_key);
+    if(error){ toast('云端状态失败：'+(error.message||safeStr(error))); return; }
+    toast('云端订单归档状态（'+TABLE+'）\\nPATCH_V2_MASTER=v7\\napp_key='+app_key+'\\n云端订单='+String(count ?? 0));
+  }
+
+  function bind(){
+    const map = [
+      ['云端拉取', ()=>pullV2().catch(e=>toast('云端拉取失败：'+(e.message||safeStr(e))))],
+      ['强制拉取', ()=>pullV2().catch(e=>toast('云端拉取失败：'+(e.message||safeStr(e))))],
+      ['云端推送', ()=>pushV2(false).catch(e=>toast('云端推送失败：'+(e.message||safeStr(e))))],
+      ['强制推送', ()=>pushV2(true).catch(e=>toast('云端推送失败：'+(e.message||safeStr(e))))],
+      ['云端状态', ()=>showStatus().catch(e=>toast('云端状态失败：'+(e.message||safeStr(e))))],
+    ];
+
+    const buttons = Array.from(document.querySelectorAll('button, a')).filter(el=>{
+      const t = (el.innerText||'').trim();
+      return map.some(([k])=>t===k);
+    });
+
+    map.forEach(([label, fn])=>{
+      const el = buttons.find(b=>(b.innerText||'').trim()===label);
+      if(!el) return;
+      // Replace node to remove previous listeners
+      const clone = el.cloneNode(true);
+      el.parentNode.replaceChild(clone, el);
+      clone.addEventListener('click', (ev)=>{ ev.preventDefault(); ev.stopPropagation(); fn(); });
+      clone.setAttribute('data-v2-master-v7', '1');
+    });
+  }
+
+  function start(){
+    bind();
+    // Rebind periodically because original app rerenders toolbar
+    setInterval(bind, 1500);
+    log('loaded @', nowIso());
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+</script>
+
 </body></html>
