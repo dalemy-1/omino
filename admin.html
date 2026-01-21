@@ -12043,33 +12043,20 @@ async function cloudStatusFixed(){
       }
     }
 
-    // Safety gate: prevent accidental cloud wipe when local is empty/smaller.
-    // Policy target: 云端数据默认“禁止删除”。
-    // - 非强制推送：只允许“增量/覆盖”，不允许把云端已有数据变少。
-    // - 强制推送：允许本地覆盖云端（用于特殊场景）。
-    if(!force && cloudRow){
-      const localSum0 = lc0.sellers+lc0.products+lc0.orders+lc0.batches;
-      const cloudSum0 = cc.sellers+cc.products+cc.orders+cc.batches;
-      if(localSum0===0 && cloudSum0>0){
-        alert('已阻止推送：本地数据为空，但云端存在数据。\n\n如确需覆盖云端，请点“强制推送”。');
-        return;
-      }
-      // If local has orders=0 but cloud has orders>0, treat as dangerous
-      if(lc0.orders===0 && cc.orders>0){
-        alert('已阻止推送：本地订单为 0，但云端订单为 '+cc.orders+'。\n\n如确需覆盖云端，请点“强制推送”。');
-        return;
-      }
-      // Additional hard guard: do not allow any category to shrink (cloud delete) unless force
-      if(lc0.sellers < cc.sellers || lc0.products < cc.products || lc0.orders < cc.orders || lc0.batches < cc.batches){
-        alert(
-          '已阻止推送：检测到“会减少云端数据”的推送（默认禁止删除云端数据）。\n\n' +
-          '云端：卖家'+cc.sellers+' 产品'+cc.products+' 订单'+cc.orders+' 批次'+cc.batches+'\n' +
-          '本地：卖家'+lc0.sellers+' 产品'+lc0.products+' 订单'+lc0.orders+' 批次'+lc0.batches+'\n\n' +
-          '如确需用本地覆盖云端，请点“强制推送”。'
-        );
-        return;
-      }
-    }
+    // Safety gate: prevent accidental cloud wipe when local is empty.
+// Policy: 云端默认“禁止删除”，本次推送走“云端优先合并”（不会删云端）。
+// 但如果云端读取失败（cloudRow=null），而本地又是空的，存在“误覆盖成空”的风险；
+// 因此仅在“本地为空且云端存在数据”时拦截，需强制推送才允许继续。
+if(!force && cloudRow){
+  const localSum0 = lc0.sellers+lc0.products+lc0.orders+lc0.batches;
+  const cloudSum0 = cc.sellers+cc.products+cc.orders+cc.batches;
+  if(localSum0===0 && cloudSum0>0){
+    alert('已阻止推送：本地数据为空，但云端存在数据。
+
+为避免误覆盖，请先完成本地导入/拉取；如确需覆盖云端，请点“强制推送”。');
+    return;
+  }
+}
 
     // Merge policy (no-delete by default): cloud-first union, then local overrides by id.
     function _idOf(o){
