@@ -3037,131 +3037,130 @@ function computeSeq(){
 }
 
 function normalizeImported(obj){
-  // 接受旧结构：兼容 v6.2/6.4 的 sellers/products/orders/batches
+  // 目标：把“导入 JSON”得到的数据，统一转成当前系统内部结构 S={sellers,products,orders,batches}
+  // 兼容：
+  // - 旧 main_state_v1（字段 seller_name / order_no / product_name 等）
+  // - 旧版本导出（字段 sellerId / orderId / title 等）
   const out = blankState();
-  out.sellers = Array.isArray(obj.sellers) ? obj.sellers : (Array.isArray(obj.seller)? obj.seller: []);
-  out.products = Array.isArray(obj.products) ? obj.products : (Array.isArray(obj.product)? obj.product: []);
-  out.orders = Array.isArray(obj.orders) ? obj.orders : (Array.isArray(obj.order)? obj.order: []);
-  // normalize orders: ensure sellerId/orderId exist, build key sellerId::orderId, allow same-seller duplicates via _1 suffix
-  const _seen = new Set();
-  out.orders = (out.orders||[]).map(o=>{
-    const x = Object.assign({}, o);
-    x.sellerId = (x.sellerId || x.seller || '').trim();
-    x.orderId  = (x.orderId || x.order_id || x.id || '').trim();
-    if(x.sellerId && x.orderId){
-      const base = x.orderId;
-      let k = U.orderKey(x.sellerId, x.orderId, x.asin);
-      let idx = 0;
-      while(_seen.has(k)){
-        idx += 1;
-        x.orderId = `${base}_${idx}`;
-        k = U.orderKey(x.sellerId, x.orderId, x.asin);
-      }
-      _seen.add(k);
-      x.key = k;
-    } else {
-      x.key = U.orderKey(x.sellerId, x.orderId, x.asin);
+
+  // ---------- helpers ----------
+  const s = (v)=> (v==null ? "" : String(v)).trim();
+  const n = (v)=>{
+    if(v==null || v==="") return "";
+    const x = Number(v);
+    return Number.isFinite(x) ? x : "";
+  };
+
+  // ---------- sellers ----------
+  const rawSellers = Array.isArray(obj && obj.sellers) ? obj.sellers
+                    : (Array.isArray(obj && obj.sell) ? obj.sell : []);
+  const sellerNameSet = new Set();
+  // (1) 先吃入显式 sellers
+  for(const r of rawSellers){
+    if(!r) continue;
+    const id = s(r.id || r.sellerId || r.seller_id || r.seller || r.seller_name || r.name);
+    const name = s(r.name || r.sellerName || r.seller_name || r.seller || r.title || id);
+    const sid = id || name;
+    if(!sid) continue;
+    sellerNameSet.add(sid);
+    out.sellers.push({
+      id: sid,
+      name: name || sid,
+      contact: s(r.contact || r.contact_way || r.contactWay || r.whatsapp || r.telegram || r.email),
+      remark: s(r.remark || r.note || r.notes || "")
+    });
+  }
+
+  // ---------- products ----------
+  const rawProducts = Array.isArray(obj && obj.products) ? obj.products
+                     : (Array.isArray(obj && obj.prod) ? obj.prod : []);
+  for(const r of rawProducts){
+    if(!r) continue;
+    const id = s(r.id || r.productId || r.product_id || r.key);
+    const name = s(r.name || r.product_name || r.title);
+    const asin = s(r.asin || r.ASIN);
+    const market = s(r.market || r.country || r.site);
+    const sellerId = s(r.sellerId || r.seller || r.seller_name || r.sellerName || r.seller_id);
+    // 这里不强制 asin（历史数据可能为空）；产品模块自己后续可补
+    out.products.push({
+      id: id || (market && asin ? (market+"::"+asin) : (name || ("P_"+Math.random().toString(16).slice(2)))),
+      name: name,
+      asin: asin,
+      market: market,
+      sellerId: sellerId
+    });
+    if(sellerId) sellerNameSet.add(sellerId);
+  }
+
+  // ---------- orders ----------
+  const rawOrders = Array.isArray(obj && obj.orders) ? obj.orders
+                   : (Array.isArray(obj && obj.ord) ? obj.ord : []);
+  for(const r of rawOrders){
+    if(!r) continue;
+
+    // 兼容字段
+    const sellerId = s(r.sellerId || r.seller || r.seller_name || r.sellerName || r.seller_id);
+    const orderId  = s(r.orderId  || r.order_id || r.order_no || r.orderNo || r.order || r.id);
+
+    // 没有“卖家+订单号”就无法稳定识别，跳过
+    if(!sellerId || !orderId) continue;
+
+    const market = s(r.market || r.country || r.site || r.marketplace);
+    const asin   = s(r.asin || r.ASIN || r.product_asin);
+    const title  = s(r.title || r.productName || r.product_name || r.name || "");
+    const discount = n(r.discount);
+    const amount   = n(r.amount);
+    const buyerCommission = n(r.buyerCommission || r.buyer_commission || r.buyer_fee);
+
+    const key = s(r.key || (sellerId+"::"+orderId));
+    const oid = s(r.id || key);
+
+    out.orders.push({
+      id: oid,
+      key: key,
+      orderId: orderId,
+      sellerId: sellerId,
+      productId: s(r.productId || r.product_id || ""),
+      market: market,
+      currency: s(r.currency || ""),
+      amount: amount,
+      discount: discount,
+      buyerCommission: buyerCommission,
+      asin: asin,
+      title: title,
+      fx: (r.fx==null ? "" : r.fx),
+      reviewReq: s(r.reviewReq || r.review_req || r.review_type || r.reviewType || ""),
+      note: s(r.note || r.remark || r.memo || ""),
+      date: s(r.date || r.created_at || r.createdAt || "")
+    });
+
+    // 状态字段（系统内部会使用；没有也不影响）
+    const last = out.orders[out.orders.length-1];
+    last.payStatus = s(r.payStatus || r.pay_status || "");
+    last.reviewStatus = s(r.reviewStatus || r.review_status || "");
+    last.payoutStatus = s(r.payoutStatus || r.payout_status || "");
+    last.fxOverride = (r.fxOverride==null && r.fx_override==null) ? "" : (r.fxOverride!=null ? r.fxOverride : r.fx_override);
+    last.remark = s(r.remark || r.note || "");
+    last.reviewDoneType = s(r.reviewDoneType || r.doneType || "");
+    last.reviewDoneDate = s(r.reviewDoneDate || r.doneDate || "");
+    last.reviewLink = s(r.reviewLink || r.link || "");
+  }
+
+  // 如果 JSON 没有 sellers，则从订单里补一份（至少让下拉可选）
+  if(out.sellers.length===0 && sellerNameSet.size){
+    for(const sid of sellerNameSet){
+      out.sellers.push({ id: sid, name: sid, contact:"", remark:"" });
     }
-    return x;
-  });
-  out.batches = Array.isArray(obj.batches) ? obj.batches : (Array.isArray(obj.batch)? obj.batch: []);
-  out.payoutBatches = Array.isArray(obj.payoutBatches) ? obj.payoutBatches : (Array.isArray(obj.payout_batches)? obj.payout_batches : []);
-  out.settings = (obj.settings && typeof obj.settings==="object") ? obj.settings : {};
-  out.settings.payoutFxDefault = out.settings.payoutFxDefault || {usd:0,eur:0,gbp:0,cad:0,jpy:0};
-  out.settings.payoutCommDefault = (out.settings.payoutCommDefault===0 || out.settings.payoutCommDefault) ? out.settings.payoutCommDefault : null;
-  out.settings.payoutCommByType = (out.settings.payoutCommByType && typeof out.settings.payoutCommByType==='object') ? out.settings.payoutCommByType : {};
-  out.settings.settleFxDefault = out.settings.settleFxDefault || {usd:0,eur:0,gbp:0,cad:0,jpy:0};
-  out.settings.settleCommByType = (out.settings.settleCommByType && typeof out.settings.settleCommByType==='object') ? out.settings.settleCommByType : {};
+  }
 
-  out.sellers = out.sellers.map(s=>{
-    const fx = s.fx || s.fxs || {};
-    const cm = s.commission || s.commissions || {};
-    const fx2 = {};
-    FX_MARKETS.forEach(m=> fx2[m] = U.num(fx[m]));
-    // EUR markets sync (DE as master)
-    if(fx2.DE){ fx2.FR=fx2.DE; fx2.IT=fx2.DE; fx2.ES=fx2.DE; }
-    const cm2 = {};
-    REVIEW_TYPES.forEach(t=> cm2[t.k] = U.num(cm[t.k] ?? cm[t.n] ?? cm[String(t.k)]));
-    return { id:String(s.id||"").trim(), name:String(s.name||s.sellerName||"").trim(), contact:s.contact||"", remark:s.remark||"", fx:fx2, commission:cm2 };
-  }).filter(s=>s.id && s.name);
-
-  out.products = out.products.map(p=>{
-    return {
-      id:String(p.id||"").trim() || ("P"+Math.random().toString(16).slice(2,6)),
-      name:String(p.name||p.productName||"").trim(),
-      asin:String(p.asin||p.ASIN||"").trim(),
-      market:String(p.market||p.Market||"").trim(),
-      sellerId:String(p.sellerId||p.seller_id||"").trim(),
-      reviewType:String(p.reviewType||p.review_type||"TEXT").trim(),
-      discount:U.num(p.discount ?? p.sellerDiscount ?? 0),
-      buyerCommission:U.num(p.buyerCommission ?? p.buyer_commission ?? 0),
-      remark:p.remark||""
-    };
-  }).filter(p=>p.name);
-
-  out.orders = out.orders.map(o=>{
-    const market = String(o.market||o.Market||"").trim();
-    const productId = (o.productId ?? o.product_id) ? String(o.productId ?? o.product_id).trim() : null;
-    const review = o.review || {};
-    const principal = o.principal || {};
-    const commission = o.commission || {};
-    return {
-      id:String(o.id||"").trim() || ("O"+Math.random().toString(16).slice(2,6)),
-      orderId:String(o.orderId||o.order_id||o.OrderID||"").trim().slice(0,19),
-      date:String(o.date||o.orderDate||o.order_date||"").slice(0,10) || U.today(),
-      sellerId:String(o.sellerId||o.seller_id||"").trim(),
-      productId:productId || null,
-      market:market || "US",
-      currency:String(o.currency||"").trim() || U.marketToCurrency(market||"US"),
-      amount:U.num(o.amount ?? o.orderAmount ?? o.price ?? 0),
-      discount:U.num(o.discount ?? o.sellerDiscount ?? 0),
-      buyerCommission:U.num(o.buyerCommission ?? o.buyer_commission ?? 0),
-      asin:String(o.asin||o.ASIN||"").trim(),
-      note:o.note||o.productName||"",
-      reviewReq:String(o.reviewReq||o.reviewType||o.review_type||"TEXT").trim(), // 订单要求（跟随产品）
-      fxOverride: (o.fxOverride==null || o.fxOverride==="") ? null : U.num(o.fxOverride),
-      review:{
-        status:String(review.status || o.reviewStatus || o.review_status || "PENDING").trim(),
-        date:String(review.date || o.reviewDate || o.review_date || "").slice(0,10),
-        link:review.link || o.reviewLink || "",
-        note:review.note || o.reviewNote || "",
-        doneType:String(review.doneType || o.reviewDoneType || "").trim() // 佣金用
-      },
-      principal:{
-        settled:!!(principal.settled ?? o.principalSettled ?? o.principal_settled ?? false),
-        batchId: principal.batchId || o.principalBatchId || "",
-        fx: U.num(principal.fx ?? o.fxRate ?? 0),
-        amountCny: U.num(principal.amountCny ?? o.principalCny ?? 0)
-      },
-      commission:{
-        settled:!!(commission.settled ?? o.commissionSettled ?? o.commission_settled ?? false),
-        batchId: commission.batchId || o.commissionBatchId || "",
-        amountCny: U.num(commission.amountCny ?? o.commissionCny ?? 0)
-      }
-    };
-  }).filter(o=>o.orderId && o.sellerId && o.market);
-
-  out.batches = out.batches.map(b=>{
-    const fx = b.fx || {};
-    return {
-      id:String(b.id||"").trim() || ("B"+Math.random().toString(16).slice(2,6)),
-      batchId:String(b.batchId||b.id||"").trim(),
-      type:String(b.type||"PRINCIPAL").trim(),
-      date:String(b.date||"").slice(0,10) || U.today(),
-      method:b.method||"",
-      note:b.note||"",
-      sellerLabel:b.sellerLabel || b.seller || "",
-      fx:{
-        usd:U.num(fx.usd ?? fx.USD ?? 0),
-        eur:U.num(fx.eur ?? fx.EUR ?? 0),
-        gbp:U.num(fx.gbp ?? fx.GBP ?? 0),
-        cad:U.num(fx.cad ?? fx.CAD ?? 0),
-        jpy:U.num(fx.jpy ?? fx.JPY ?? 0),
-      },
-      lines:Array.isArray(b.lines)? b.lines: [],
-      total:U.num(b.total ?? b.totalCny ?? 0)
-    };
-  }).filter(b=>b.batchId);
+  // ---------- batches ----------
+  const rawBatches = Array.isArray(obj && obj.batches) ? obj.batches
+                    : (Array.isArray(obj && obj.payoutBatches) ? obj.payoutBatches
+                    : (Array.isArray(obj && obj.payout_batches) ? obj.payout_batches : []));
+  for(const r of rawBatches){
+    if(!r) continue;
+    out.batches.push(r);
+  }
 
   return out;
 }
