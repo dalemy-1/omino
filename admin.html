@@ -13670,4 +13670,55 @@ async function cloudStatusFixed(){
   setInterval(bindAll, 1500);
 })();
 </script>
+<script>
+/** HARD FIX: force Cloud Status to use ops_orders_v2 and show patch version */
+(function(){
+  const TABLE = 'ops_orders_v2';
+  window.__V2_TABLE = TABLE;
+  window.__PATCH_V2_MASTER = 'v7.2-hot-status';
+
+  function pickSupabaseClient(){
+    // try find existing supabase client on page
+    return window.supabaseClient || window.sb || window._sb || window.client || window.SUPABASE || null;
+  }
+
+  async function showV2Status(){
+    const sb = pickSupabaseClient();
+    if(!sb || !sb.from){
+      alert("云端状态（强制v2）：未找到 supabase client（请先完成云端设置/刷新）");
+      return;
+    }
+    const app = (window.CLOUD && window.CLOUD.app_key) || window.__CLOUD_APPKEY || 'dalemy';
+    const { count, error } = await sb.from(TABLE).select('id', { count: 'exact', head: true }).eq('app_key', app);
+    if(error){
+      alert("云端状态（强制v2）失败：" + (error.message || JSON.stringify(error)));
+      return;
+    }
+    alert(
+      "云端订单归档状态（" + TABLE + "）\n" +
+      "PATCH_V2_MASTER=" + window.__PATCH_V2_MASTER + "\n" +
+      "app_key=" + app + "\n" +
+      "云端订单=" + (count ?? 0)
+    );
+  }
+
+  // Rebind Cloud Status button: remove old handlers (clone node) then bind ours
+  function bindOnce(){
+    const btns = Array.from(document.querySelectorAll('button, a')).filter(b=>{
+      const t = (b.textContent||'').trim();
+      return t === '云端状态' || t === 'Cloud Status';
+    });
+    if(!btns.length) return;
+
+    btns.forEach(b=>{
+      const clone = b.cloneNode(true);
+      b.parentNode.replaceChild(clone, b);
+      clone.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); showV2Status(); }, true);
+    });
+  }
+
+  bindOnce();
+  setInterval(bindOnce, 1500); // 防止旧代码反绑
+})();
+</script>
 </body></html>
