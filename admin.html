@@ -1095,7 +1095,7 @@ async function cloudPull(opts){
 
     // Apply into app state (this app uses S as the live state)
     if(typeof S !== "undefined"){
-      S = payload;
+      S = window.S = ensureState(payload);
       window.state = S;
     }else{
       window.state = payload;
@@ -2834,8 +2834,35 @@ function fmtMoney(v, d=2){
 
 /* ===================== Persistence ===================== */
 function blankState(){
-  return {sellers:[],products:[],orders:[],batches:[],payoutBatches:[],settings:{payoutFxDefault:{usd:0,eur:0,gbp:0,cad:0,jpy:0}, payoutCommDefault:null},seq:{seller:1,product:1,order:1,batch:1,payoutBatch:1}};
+  return {sellers:[],products:[],orders:[],batches:[],payoutBatches:[],payouts:[],drafts:[],ui:{tab:"dashboard",sellerSearch:"",productSearch:"",orderSearch:"",batchSearch:"",payoutSearch:"",settleSearch:"",sellerPage:1,productPage:1,orderPage:1,batchPage:1,payoutBatchPage:1,pageSize:50},cloud:{url:"",anon:"",app_key:"",last_push_at:null,last_pull_at:null},seq:{seller:1,product:1,order:1,batch:1,payoutBatch:1}};
 }
+
+/** 
+ * 防御性规范化：任何时候都不允许 S / window.S 变成 undefined。
+ * 只要缺字段就补齐默认，避免 render 期间出现 (undefined).map 之类的崩溃。
+ */
+function ensureState(x){
+  const base = blankState();
+  const o = (x && typeof x === "object") ? x : {};
+  // 兼容：部分来源会把主数据放在 .state 或 .payload
+  const core = (o.state && typeof o.state === "object") ? o.state
+            : (o.payload && typeof o.payload === "object") ? o.payload
+            : o;
+  const out = Object.assign({}, base, core);
+  out.sellers = Array.isArray(core.sellers) ? core.sellers : (Array.isArray(o.sellers) ? o.sellers : []);
+  out.products = Array.isArray(core.products) ? core.products : (Array.isArray(o.products) ? o.products : []);
+  out.orders = Array.isArray(core.orders) ? core.orders : (Array.isArray(o.orders) ? o.orders : []);
+  out.batches = Array.isArray(core.batches) ? core.batches : (Array.isArray(o.batches) ? o.batches : []);
+  out.ui = Object.assign({}, base.ui, (core.ui && typeof core.ui === "object") ? core.ui : {});
+  out.cloud = Object.assign({}, base.cloud, (core.cloud && typeof core.cloud === "object") ? core.cloud : {});
+  out.seq = Object.assign({}, base.seq, (core.seq && typeof core.seq === "object") ? core.seq : {});
+  // 可选模块：保持不丢（如果存在就沿用）
+  out.payoutBatches = Array.isArray(core.payoutBatches) ? core.payoutBatches : (Array.isArray(o.payoutBatches) ? o.payoutBatches : (base.payoutBatches||[]));
+  out.payouts = Array.isArray(core.payouts) ? core.payouts : (Array.isArray(o.payouts) ? o.payouts : (base.payouts||[]));
+  out.drafts = Array.isArray(core.drafts) ? core.drafts : (Array.isArray(o.drafts) ? o.drafts : (base.drafts||[]));
+  return out;
+}
+
 
 /* ===================== IndexedDB Main Store (Replace localStorage main state) ===================== */
 const MAIN_DB_NAME = "ops_v642_main";
@@ -9282,7 +9309,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
       try{ localStorage.setItem("OPS_LOCAL_BEFORE_CLOUD_PULL_"+Date.now(), JSON.stringify(window.S||{}, null, 0)); }catch(e){}
 
       // restore
-      window.S = data.payload;
+      S = window.S = ensureState((data && (data.payload || data.state || data)) || {});
       // persist + rerender using existing system hooks if available
       try{ if(window.saveNow) window.saveNow(); }catch(e){}
       try{ if(window.scheduleRender) window.scheduleRender(); }catch(e){}
