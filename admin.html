@@ -13988,4 +13988,294 @@ async function cloudStatusFixed(){
   window.__V2_TABLE = TABLE;
 })();
 </script>
+/* V7.7_THREE_TABLE_PATCH_V1 */
+<script>
+(function(){
+  const PATCH_TAG = "v7.7";
+  const T_SELLERS = "ops_sellers_v1";
+  const T_PRODUCTS = "ops_products_v1";
+  const T_ORDERS = "ops_orders_v2";
+
+  function _normStr(x){ return String(x==null?"":x).trim(); }
+  function _asinKey(p){
+    const asin = _normStr(p.asin || p.ASIN || p.asin_code);
+    if(asin) return asin;
+    const nm = _normStr(p.name || p.product_name || p.title);
+    return nm ? ("NAME:"+nm) : "";
+  }
+  function _sellerName(s){
+    return _normStr(s.seller_name || s.name || s.sellerName || s.title || s.id);
+  }
+
+  async function _getCloud(){
+    const cfg = (typeof getCloudCfgOrNull === "function") ? getCloudCfgOrNull() : null;
+    if(!cfg){ alert("未设置云端（请先点“云端设置”）。"); return null; }
+    if(typeof ensureSupabase === "function") await ensureSupabase(true);
+    const wrap = (typeof getCloudClient === "function") ? getCloudClient(cfg, true, false) : null;
+    if(!wrap || !wrap.client){ alert("Supabase SDK 未就绪，请稍后重试或刷新页面。"); return null; }
+    return wrap;
+  }
+
+  async function cloudStatusV77(){
+    const cloud = await _getCloud(); if(!cloud) return;
+    const sb = cloud.client;
+    const appKey = cloud.cfg.app_key;
+
+    async function cnt(table){
+      const { count, error } = await sb.from(table).select("id", { count:"exact", head:true }).eq("app_key", appKey);
+      if(error) throw error;
+      return count||0;
+    }
+
+    try{
+      const [cs, cp, co] = await Promise.all([cnt(T_SELLERS), cnt(T_PRODUCTS), cnt(T_ORDERS)]);
+      alert(
+        "云端主库状态（三表）\n" +
+        "PATCH_V2_MASTER="+PATCH_TAG+"\n" +
+        "app_key="+appKey+"\n\n" +
+        T_SELLERS+"="+cs+"\n" +
+        T_PRODUCTS+"="+cp+"\n" +
+        T_ORDERS+"="+co
+      );
+    }catch(e){
+      console.error(e);
+      alert("云端状态失败："+(e && (e.message||e.toString())));
+    }
+  }
+
+  async function cloudPushV77(){
+    const cloud = await _getCloud(); if(!cloud) return;
+    const sb = cloud.client;
+    const appKey = cloud.cfg.app_key;
+
+    // 读本地权威（优先 IDB）
+    let local;
+    try{
+      if(typeof getLocalSnapshotPreferIDB === "function") {
+        const r = await getLocalSnapshotPreferIDB();
+        local = r && (r.data||r.state||r) || {};
+      } else {
+        local = window.S || window.state || {};
+      }
+    }catch(e){
+      local = window.S || window.state || {};
+    }
+
+    const sellers = Array.isArray(local.sellers) ? local.sellers : [];
+    const products = Array.isArray(local.products) ? local.products : [];
+    const orders = Array.isArray(local.orders) ? local.orders : [];
+
+    // 1) upsert sellers
+    const sellerRows = [];
+    const sellerNameToLocalId = new Map();
+    for(const s of sellers){
+      const name = _sellerName(s);
+      if(!name) continue;
+      sellerRows.push({ app_key: appKey, seller_name: name, note: (s.note||s.remark||null) });
+      // 记录本地 sellerId 到 name 的映射（用于后续订单/产品关联）
+      if(s && (s.id!=null)) sellerNameToLocalId.set(String(s.id), name);
+    }
+
+    // dedupe sellers by seller_name
+    const seenSeller = new Set();
+    const sellerRows2 = [];
+    for(const r of sellerRows){
+      if(seenSeller.has(r.seller_name)) continue;
+      seenSeller.add(r.seller_name);
+      sellerRows2.push(r);
+    }
+
+    // 2) upsert products
+    const productRows = [];
+    for(const p of products){
+      const market = _normStr(p.market || p.Market || p.country);
+      const asin_key = _asinKey(p);
+      if(!market || !asin_key) continue;
+      const nm = _normStr(p.name || p.product_name || p.title);
+      const asin = _normStr(p.asin || p.ASIN || "");
+      const review_req = _normStr(p.reviewType || p.review_req || p.review || "");
+      const discount = (p.discount!=null && p.discount!=="") ? Number(p.discount) : null;
+      const buyer_commission_cny = (p.buyerCommission!=null && p.buyerCommission!=="") ? Number(p.buyerCommission) : (p.buyer_commission_cny!=null?Number(p.buyer_commission_cny):null);
+      // seller_id：如果本地产品有 sellerId，则先用 sellerNameToLocalId 找 name，稍后通过云端回填 id（这里先写 null，避免 FK 不存在）
+      productRows.push({
+        app_key: appKey,
+        market,
+        asin_key,
+        product_name: nm||null,
+        asin: asin||null,
+        review_req: review_req||null,
+        discount: (Number.isFinite(discount)?discount:null),
+        buyer_commission_cny: (Number.isFinite(buyer_commission_cny)?buyer_commission_cny:null),
+        seller_id: null,
+        remark: _normStr(p.remark||p.note||"")||null
+      });
+    }
+    // dedupe products by (market, asin_key)
+    const seenProd = new Set();
+    const productRows2 = [];
+    for(const r of productRows){
+      const k = r.market+"||"+r.asin_key;
+      if(seenProd.has(k)) continue;
+      seenProd.add(k);
+      productRows2.push(r);
+    }
+
+    const result = {
+      pushedSellers: 0,
+      pushedProducts: 0,
+      pushedOrders: 0,
+      skippedOrders: 0,
+      issues: []
+    };
+
+    try{
+      if(sellerRows2.length){
+        const { error } = await sb.from(T_SELLERS)
+          .upsert(sellerRows2, { onConflict: "app_key,seller_name" });
+        if(error) throw error;
+        result.pushedSellers = sellerRows2.length;
+      }
+
+      // 拉回 seller_id 映射（seller_name -> id）
+      const sellerIdByName = new Map();
+      {
+        const { data, error } = await sb.from(T_SELLERS)
+          .select("id,seller_name")
+          .eq("app_key", appKey);
+        if(error) throw error;
+        for(const r of (data||[])) sellerIdByName.set(r.seller_name, r.id);
+      }
+
+      // 填充产品 seller_id（如果本地产品能关联到卖家）
+      for(const p of products){
+        const market = _normStr(p.market || p.Market || p.country);
+        const asin_key = _asinKey(p);
+        if(!market || !asin_key) continue;
+        const localSellerId = (p.sellerId!=null) ? String(p.sellerId) : (p.seller_id!=null?String(p.seller_id):"");
+        const sellerName = localSellerId ? (sellerNameToLocalId.get(localSellerId) || "") : _normStr(p.seller_name||p.sellerName||"");
+        const sid = sellerName ? (sellerIdByName.get(sellerName) || null) : null;
+        // 在 productRows2 里找到并更新
+        const key = market+"||"+asin_key;
+        for(const r of productRows2){
+          if((r.market+"||"+r.asin_key)===key){
+            r.seller_id = sid;
+            break;
+          }
+        }
+      }
+
+      if(productRows2.length){
+        const { error } = await sb.from(T_PRODUCTS)
+          .upsert(productRows2, { onConflict: "app_key,market,asin_key" });
+        if(error) throw error;
+        result.pushedProducts = productRows2.length;
+      }
+
+      // product 映射（market||asin_key -> id）
+      const productIdByKey = new Map();
+      {
+        const { data, error } = await sb.from(T_PRODUCTS)
+          .select("id,market,asin_key")
+          .eq("app_key", appKey);
+        if(error) throw error;
+        for(const r of (data||[])) productIdByKey.set(r.market+"||"+r.asin_key, r.id);
+      }
+
+      // 3) upsert orders（如无订单，不应阻塞 sellers/products 推送）
+      const orderRows = [];
+      for(const o of orders){
+        const order_no = _normStr(o.orderNo || o.order_no || o.order || o.id2);
+        if(!order_no) continue;
+
+        // seller_id：优先本地 order.sellerId -> sellers[] 映射到 seller_name -> 云端 id
+        const localSid = (o.sellerId!=null) ? String(o.sellerId) : (o.seller_id!=null?String(o.seller_id):"");
+        const sellerName = localSid ? (sellerNameToLocalId.get(localSid) || "") : _normStr(o.seller_name||o.sellerName||"");
+        const seller_id = sellerName ? (sellerIdByName.get(sellerName) || null) : null;
+
+        const market = _normStr(o.market || o.Market || "");
+        const asin_key = _asinKey({ asin:o.asin, name:o.productName||o.product_name||o.name||"" }) || _normStr(o.asin_key||"");
+        const prodKey = (market && asin_key) ? (market+"||"+asin_key) : "";
+        const product_id = prodKey ? (productIdByKey.get(prodKey) || null) : null;
+
+        if(!seller_id || !product_id){
+          result.skippedOrders++;
+          if(result.issues.length < 50){
+            result.issues.push({
+              order_no,
+              reason: !seller_id ? "缺 seller_id" : "缺 product_id",
+              hint: !seller_id ? ("卖家未能匹配："+(sellerName||"(空)")) : ("产品未能匹配：market="+market+" asin_key="+asin_key)
+            });
+          }
+          continue;
+        }
+
+        orderRows.push({
+          app_key: appKey,
+          seller_id,
+          product_id,
+          order_no,
+          market: market||null,
+          currency: _normStr(o.currency||"")||null,
+          amount: (o.amount!=null && o.amount!=="") ? Number(o.amount) : (o.unit_price!=null?Number(o.unit_price):null),
+          fx_override: (o.fxOverride!=null && o.fxOverride!=="") ? Number(o.fxOverride) : (o.fx_override!=null?Number(o.fx_override):null),
+          review_status: _normStr(o.reviewStatus||o.review_status||"")||null,
+          payout_status: _normStr(o.payoutStatus||o.payout_status||"")||null,
+          pay_status: _normStr(o.payStatus||o.pay_status||"")||null,
+          comm_status: _normStr(o.commStatus||o.comm_status||"")||null,
+          remark: _normStr(o.remark||o.note||"")||null,
+          // 展示兜底字段（不参与匹配）
+          seller_name: sellerName||null,
+          product_name: _normStr(o.productName||o.product_name||"")||null,
+          asin_key: asin_key||null,
+          asin: _normStr(o.asin||"")||null
+        });
+      }
+
+      if(orderRows.length){
+        const { error } = await sb.from(T_ORDERS)
+          .upsert(orderRows, { onConflict: "app_key,seller_id,order_no,product_id" });
+        if(error) throw error;
+        result.pushedOrders = orderRows.length;
+      }
+
+      // 提示
+      let msg =
+        "云端推送完成（三表）\n" +
+        "PATCH_V2_MASTER="+PATCH_TAG+"\n" +
+        "app_key="+appKey+"\n\n" +
+        "卖家 upsert："+result.pushedSellers+"\n" +
+        "产品 upsert："+result.pushedProducts+"\n" +
+        "订单 upsert："+result.pushedOrders+"\n";
+      if(result.skippedOrders){
+        msg += "\n跳过订单："+result.skippedOrders+"（前 50 条原因见控制台）\n";
+        console.warn("[V7.7 PUSH] skipped issues:", result.issues);
+      }
+      alert(msg);
+    }catch(e){
+      console.error(e);
+      alert("云端推送失败："+(e && (e.message||e.toString())));
+    }
+  }
+
+  function _bind(){
+    try{
+      const bPush = document.getElementById("btnCloudPush");
+      const bStatus = document.getElementById("btnCloudStatus");
+      // pull 目前你这版已能正常拉取 orders_v2，这里先不改，只修复 status/push 的“落回 v1”问题
+      if(bStatus) bStatus.onclick = ()=> cloudStatusV77();
+      if(bPush) bPush.onclick = ()=> cloudPushV77();
+      // 同时覆盖全局，避免被旧逻辑调用
+      window.cloudStatus = cloudStatusV77;
+      window.cloudPush = cloudPushV77;
+      window.ordersCloudStatus = cloudStatusV77;
+      window.ordersCloudPush = cloudPushV77;
+      console.log("[V7.7] three-table patch bound:", PATCH_TAG);
+    }catch(e){ console.warn("[V7.7] bind failed", e); }
+  }
+
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", _bind);
+  else _bind();
+})();
+</script>
+
 </body></html>
