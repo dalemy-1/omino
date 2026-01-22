@@ -1248,21 +1248,27 @@ function _mapOrderToMainRow(cfg, o){
   };
 }
 
-async function mainOrdersStatus(){
+async function mainOrdersStatus(opts){
+  opts = opts || {};
+  const __silent = !!opts.silent;
+
   try{
     const cfg = getCloudCfg();
-    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ if(!__silent) alert("请先完成云端设置（Supabase）"); return; }
     const cnt = await restCountExact(cfg, MAIN_ORDERS_TABLE, `app_key=eq.${encodeURIComponent(cfg.app)}`);
-    showNotice("主表状态（订单）", `ops_orders_v1：orders=${cnt}`);
+    if(!__silent) showNotice("主表状态（订单）", `ops_orders_v1：orders=${cnt}`); return { ok:true, cnt };
   }catch(e){
-    alert("主表状态失败：\n" + (e && e.message ? e.message : String(e)));
+    if(!__silent) alert("主表状态失败：\n" + (e && e.message ? e.message : String(e))); else console.warn("主表状态失败", e); return { ok:false, error:(e && e.message ? e.message : String(e)) };
   }
 }
 
-async function mainOrdersPush(){
+async function mainOrdersPush(opts){
+  opts = opts || {};
+  const __silent = !!opts.silent;
+
   try{
     const cfg = getCloudCfg();
-    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ if(!__silent) alert("请先完成云端设置（Supabase）"); return; }
     const state = await getLocalSnapshotPreferIDB();
     const orders = (state && state.orders) ? state.orders : (S.orders||[]);
     if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return; }
@@ -1332,16 +1338,19 @@ async function mainOrdersPush(){
     const workers = Array.from({length: Math.min(limit, toPatch.length||0)}, ()=>worker());
     if(workers.length) await Promise.all(workers);
 
-    showNotice("主表推送（订单）", `完成：尝试写入=${sent}（重复自动跳过）；状态同步=${okN} 成功 / ${failN} 失败`);
+    if(!__silent) showNotice("主表推送（订单）", `完成：尝试写入=${sent}（重复自动跳过）；状态同步=${okN} 成功 / ${failN} 失败`); return { ok:true, sent, okN, failN };
   }catch(e){
-    alert("主表推送失败：\n" + (e && e.message ? e.message : String(e)));
+    if(!__silent) alert("主表推送失败：\n" + (e && e.message ? e.message : String(e))); else console.warn("主表推送失败", e); return { ok:false, error:(e && e.message ? e.message : String(e)) };
   }
 }
 
-async function mainOrdersPull(){
+async function mainOrdersPull(opts){
+  opts = opts || {};
+  const __silent = !!opts.silent;
+
   try{
     const cfg = getCloudCfg();
-    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ if(!__silent) alert("请先完成云端设置（Supabase）"); return; }
 
     let lastId = parseInt(localStorage.getItem(_lcKey(cfg.app)) || "0", 10);
     if(!isFinite(lastId) || lastId < 0) lastId = 0;
@@ -1349,7 +1358,10 @@ async function mainOrdersPull(){
     const base = cfg.url.replace(/\/+$/,'');
     const limit = 1000;
     let pulled = 0;
+    const __maxPages = (opts && opts.maxPages!=null) ? Number(opts.maxPages) : 3;
+    let __pages = 0;
     while(true){
+      __pages++; if(__pages > __maxPages) break;
       const url = `${base}/rest/v1/${MAIN_ORDERS_TABLE}?select=id,order_no,seller_name,market,asin,product_name,pay_status,review_status,payout_status,review_link,unit_price,fx_rate,review_req,created_at,updated_at&app_key=eq.${encodeURIComponent(cfg.app)}&id=gt.${lastId}&order=id.asc&limit=${limit}`;
       const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
       const text = await r.text();
@@ -1419,9 +1431,9 @@ async function mainOrdersPull(){
       if(arr.length < limit) break;
     }
 
-    showNotice("主表拉取（订单）", `完成：拉取并合并 ${pulled} 条（仅新增/更新状态字段）。lastId=${lastId}`);
+    if(!__silent) showNotice("主表拉取（订单）", `完成：拉取并合并 ${pulled} 条（仅新增/更新状态字段）。lastId=${lastId}`); return { ok:true, pulled, lastId };
   }catch(e){
-    alert("主表拉取失败：\n" + (e && e.message ? e.message : String(e)));
+    if(!__silent) alert("主表拉取失败：\n" + (e && e.message ? e.message : String(e))); else console.warn("主表拉取失败", e); return { ok:false, error:(e && e.message ? e.message : String(e)) };
   }
 }
 /* ===================== End Main Orders ===================== */
@@ -1444,6 +1456,114 @@ window.addEventListener("load", ()=>{
   if(bMainPull) bMainPull.onclick = ()=>mainOrdersPull();
   if(bMainStatus) bMainStatus.onclick = ()=>mainOrdersStatus();
 });
+
+/* ===================== Auto Sync (Main Orders) ===================== */
+const OPS_MAIN_AUTO_PUSH_KEY = "OPS_MAIN_AUTO_PUSH_V1";
+const OPS_MAIN_AUTO_PULL_KEY = "OPS_MAIN_AUTO_PULL_V1";
+const OPS_MAIN_AUTO_PULL_MS_KEY = "OPS_MAIN_AUTO_PULL_MS_V1";
+
+function _getBoolLS(k, dflt){
+  const v = localStorage.getItem(k);
+  if(v===null || v===undefined || v==="") return !!dflt;
+  return (v==="1" || v==="true");
+}
+function _setBoolLS(k, v){ localStorage.setItem(k, v ? "1":"0"); }
+
+let __autoPushTimer = null;
+let __autoPushBusy = false;
+let __autoPullTimer = null;
+let __autoPullBusy = false;
+
+function scheduleAutoPushMain(reason){
+  try{
+    const enabled = _getBoolLS(OPS_MAIN_AUTO_PUSH_KEY, true);
+    if(!enabled) return;
+    if(document.hidden) return;
+    clearTimeout(__autoPushTimer);
+    __autoPushTimer = setTimeout(async ()=>{
+      if(__autoPushBusy) return;
+      __autoPushBusy = true;
+      try{
+        await mainOrdersPush({ silent:true });
+      }catch(e){
+        console.warn("[AUTO-PUSH-MAIN] failed", e);
+      }finally{
+        __autoPushBusy = false;
+      }
+    }, 2000);
+  }catch(e){}
+}
+
+function startAutoPullMain(){
+  try{
+    const enabled = _getBoolLS(OPS_MAIN_AUTO_PULL_KEY, true);
+    const ms = Number(localStorage.getItem(OPS_MAIN_AUTO_PULL_MS_KEY) || "15000");
+    if(__autoPullTimer) clearInterval(__autoPullTimer);
+    if(!enabled) return;
+    __autoPullTimer = setInterval(async ()=>{
+      if(__autoPullBusy) return;
+      if(document.hidden) return;
+      __autoPullBusy = true;
+      try{
+        await mainOrdersPull({ silent:true, maxPages: 2 });
+      }catch(e){
+        console.warn("[AUTO-PULL-MAIN] failed", e);
+      }finally{
+        __autoPullBusy = false;
+      }
+    }, (isFinite(ms) && ms>=5000) ? ms : 15000);
+  }catch(e){}
+}
+
+// Hook into canonical snapshot writes + idbSet(main_state_v1)
+(function(){
+  try{
+    const __origWrite = (typeof _writeCanonicalSnapshot === "function") ? _writeCanonicalSnapshot : null;
+    if(__origWrite){
+      window._writeCanonicalSnapshot = function(obj){
+        const r = __origWrite(obj);
+        scheduleAutoPushMain("canonical");
+        return r;
+      };
+    }
+  }catch(e){}
+  try{
+    const __origIdbSet = (typeof idbSet === "function") ? idbSet : null;
+    if(__origIdbSet){
+      window.idbSet = async function(key, value){
+        const r = await __origIdbSet(key, value);
+        try{
+          if(String(key)==="main_state_v1") scheduleAutoPushMain("idb-main");
+        }catch(e){}
+        return r;
+      };
+    }
+  }catch(e){}
+})();
+
+window.addEventListener("load", ()=>{
+  // init toggles UI
+  const chkPush = document.getElementById("chkAutoPushMain");
+  const chkPull = document.getElementById("chkAutoPullMain");
+  const sel = document.getElementById("selAutoPullMain");
+  if(chkPush){
+    chkPush.checked = _getBoolLS(OPS_MAIN_AUTO_PUSH_KEY, true);
+    chkPush.onchange = ()=>{ _setBoolLS(OPS_MAIN_AUTO_PUSH_KEY, chkPush.checked); };
+  }
+  if(chkPull){
+    chkPull.checked = _getBoolLS(OPS_MAIN_AUTO_PULL_KEY, true);
+    chkPull.onchange = ()=>{ _setBoolLS(OPS_MAIN_AUTO_PULL_KEY, chkPull.checked); startAutoPullMain(); };
+  }
+  if(sel){
+    const cur = Number(localStorage.getItem(OPS_MAIN_AUTO_PULL_MS_KEY) || "15000");
+    sel.value = String(cur);
+    sel.onchange = ()=>{ localStorage.setItem(OPS_MAIN_AUTO_PULL_MS_KEY, String(sel.value)); startAutoPullMain(); };
+  }
+  // start pull loop
+  startAutoPullMain();
+});
+/* ===================== End Auto Sync ===================== */
+
 /* ===================== End Cloud Backup ===================== */
 
 </script>
@@ -1522,7 +1642,26 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnMainOrdersPull" title="从云端主表 ops_orders_v1 拉取新增订单并合并到本地">主表拉取(订单)</button>
       <button class="btn" id="btnMainOrdersStatus" title="查看云端主表 ops_orders_v1 的订单数量">主表状态(订单)</button>
 
-      <button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
+      
+      <span style="margin-left:10px; display:inline-flex; align-items:center; gap:10px; font-size:12px; color:var(--muted);">
+        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="checkbox" id="chkAutoPushMain" />
+          <span>自动推送主表</span>
+        </label>
+        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="checkbox" id="chkAutoPullMain" />
+          <span>自动拉取主表</span>
+        </label>
+        <label style="display:inline-flex; align-items:center; gap:6px;">
+          <span>间隔</span>
+          <select id="selAutoPullMain" style="padding:4px 6px; border:1px solid var(--border); border-radius:8px; background:#fff;">
+            <option value="15000">15s</option>
+            <option value="30000">30s</option>
+            <option value="60000">60s</option>
+          </select>
+        </label>
+      </span>
+<button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
       <button class="btn warn" id="btnCloudPushForce" title="强制推送：即使 hash 未变化也推送（仍会合并后推送）">强制推送</button>
       <button class="btn warn" id="btnCloudPullForce" title="强制拉取：从云端覆盖本地（会二次确认）">强制拉取</button>
       <div id="cloudMeta" class="help" style="margin-top:6px"></div>
