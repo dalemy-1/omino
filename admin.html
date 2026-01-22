@@ -1557,6 +1557,21 @@ const limit = 1000;
 }
 
 // --- PATCH: robust main orders pull (paged, merge-only, never clears sellers/products) ---
+
+// --- helper: wait for Supabase client ready (robust across patches) ---
+async function __waitSupabaseClient(maxMs=30000, intervalMs=300){
+  const t0 = Date.now();
+  while(Date.now()-t0 < maxMs){
+    try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
+    try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
+    try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
+    try{ if(typeof ensureSupabase==='function'){ const c = await ensureSupabase(); if(c && typeof c.from==='function') return c; } }catch(e){}
+    await new Promise(r=>setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+
 async function mainOrdersPullV2(opts){
   opts = opts||{};
   // Resolve Supabase client (different builds expose different globals)
@@ -1567,6 +1582,7 @@ async function mainOrdersPullV2(opts){
     try{ if(typeof ensureSupabase==='function'){ const c = await ensureSupabase(); if(c && typeof c.from==='function') return c; } }catch(e){}
     return null;
   })();
+  if(!sb){ sb = await __waitSupabaseClient(30000, 300); }
   if(!sb) throw new Error('supabase_client_not_ready');
 
   const LIMIT = 1000;
