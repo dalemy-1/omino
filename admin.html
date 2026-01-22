@@ -1654,7 +1654,7 @@ async function mainOrdersPullV2(opts){
     loops++;
     if(loops>50) break; // hard guard
     let q = sb.from('ops_orders_v1')
-      .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,unit_price,amount,discount,buyer_commission,fx_rate,review_req,pay_screenshot_url,review_screenshot_url,payout_screenshot_url,created_at,updated_at')
+      .select('id,app_key,seller_name,order_no,item_key,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,unit_price,amount,discount,buyer_commission,fx_rate,review_req,pay_screenshot_url,review_screenshot_url,payout_screenshot_url,created_at,updated_at')
       .eq('app_key', appKey)
       .order('updated_at', {ascending:true})
       .order('id', {ascending:true})
@@ -1679,16 +1679,23 @@ async function mainOrdersPullV2(opts){
     if(!data || data.length < LIMIT) break;
   }
 
-  // Merge pulled orders into local by business key (app_key|seller_name|order_no)
+  // Merge pulled orders into local by business key (app_key|seller_name|order_no|item_key)
   const norm = (s)=> (s==null?'':String(s)).trim();
-  const bizKey = (o)=> `${norm(o.app_key||appKey)}|${norm(o.seller_name)}|${norm(o.order_no)}`;
+  const deriveItemKey = (o)=> norm(o.item_key) || norm(o.asin) || norm(o.product_id) || norm(o.product_name);
+  const bizKey = (o)=>{
+    const a = norm(o.app_key||appKey);
+    const s = norm(o.seller_name);
+    const n = norm(o.order_no);
+    const ik = deriveItemKey(o);
+    if(!a || !s || !n || !ik) return '';
+    return `${a}|${s}|${n}|${ik}`;
+  };
 
   const map = new Map();
   for(const o of base.orders){
     const k = bizKey(o);
-    if(!k.endsWith('||')) map.set(k, o);
+    if(k) map.set(k, o);
   }
-
   const score = (o)=>{
     let s = 0;
     if(o.pay_status) s+=1;
@@ -1708,7 +1715,7 @@ async function mainOrdersPullV2(opts){
 
   for(const r of pulled){
     const k = bizKey(r);
-    if(!k.endsWith('||')){
+    if(k){
       const ex = map.get(k);
       if(!ex){
         map.set(k, r);
@@ -1736,6 +1743,10 @@ async function mainOrdersPullV2(opts){
     }
   }catch(e){ /* ignore */ }
 
+
+  // Ensure global state pointer is updated
+  try{ window.S = base; }catch(e){}
+  try{ S = base; }catch(e){}
   // Refresh UI safely
   try{
     if(typeof renderAll==='function') renderAll();
