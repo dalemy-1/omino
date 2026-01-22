@@ -1304,6 +1304,34 @@ async function mainOrdersStatus(opts){
   }
 }
 
+
+// ===== Main Orders Item Key (cloud upsert conflict key) =====
+function __normStr(v){ return (v==null?'':String(v)).trim(); }
+// FNV-1a 32-bit hash for stable keys (no crypto, just deterministic)
+function __fnv1a32(str){
+  str = __normStr(str);
+  let h = 0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return ('00000000' + h.toString(16)).slice(-8);
+}
+// Business rule: duplicate only when same app_key + seller_name + order_no + (product_id OR asin OR product_name)
+// - If product_id exists => use it (most reliable)
+// - Else if asin exists => use asin
+// - Else fallback to normalized product name hash
+function __mainOrderItemKey(o){
+  const pid = __normStr(o.product_id || o.productId || '');
+  if(pid) return 'PID:' + pid;
+  const asin = __normStr(o.asin || o.ASIN || '');
+  if(asin) return 'ASIN:' + asin;
+  const pn = __normStr(o.product_name || o.productName || o.product || o.productTitle || '');
+  if(pn) return 'PNH:' + __fnv1a32(pn) + ':' + pn.slice(0,60);
+  // last resort: keep row stable but allow inserts
+  return 'ROW:' + __fnv1a32(JSON.stringify(o||{}));
+}
+
 async function mainOrdersPush(opts){
   opts = opts || {};
   const __silent = !!opts.silent;
@@ -1324,8 +1352,8 @@ async function mainOrdersPush(opts){
     if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
 
     // DEDUPE: Postgres upsert cannot accept duplicate conflict keys within the same request.
-    // We dedupe by business key (app_key + seller_name + order_no) and keep the "best" row.
-    const _keyOf = (r)=> `${r.app_key||""}||${(r.seller_name||"").trim()}||${(r.order_no||"").trim()}`;
+    // We dedupe by business key (app_key + seller_name + order_no + item_key) and keep the "best" row.
+    const _keyOf = (r)=> ([__normStr(r.app_key), __normStr(r.seller_name), __normStr(r.order_no), __normStr(r.item_key)].join('||'));
     const _score = (r)=>{
       let s=0;
       for(const k of Object.keys(r)){
@@ -3257,7 +3285,7 @@ const U = {
     return ids;
   }
 
-  ,orderKey:(sellerId,orderId,asin)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}`
+  ,orderKey:(sellerId,orderId,itemKey)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}::${(itemKey||'').trim()}`
 };
 
 // money formatter helper used by payout UI (Fix6b)
