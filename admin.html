@@ -1575,7 +1575,7 @@ async function __waitSupabaseClient(maxMs=30000, intervalMs=300){
 async function mainOrdersPullV2(opts){
   opts = opts||{};
   // Resolve Supabase client (different builds expose different globals)
-  const sb = await (async ()=>{
+  let sb = await (async ()=>{
     try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
     try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
     try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
