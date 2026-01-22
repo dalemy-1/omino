@@ -1370,7 +1370,7 @@ async function mainOrdersPush(opts){
     }
     const rows2 = Array.from(byKey.values());
     // ensure item_key for DB unique line-item
-    for(const r of rows2){ if(!r.item_key){ const a=(r.asin||'').trim(); const p=(r.product_name||'').trim(); r.item_key = a||p||''; } }
+    for(const r of rows2){ if(!r.item_key){ const a=(r.asin||'').trim(); const p=(r.product_name||'').trim(); r.item_key = a ? ('ASIN:' + a) : (p ? ('PN:' + p) : ''); } }
 
 
     // Expose dedupe list for debugging and allow export
