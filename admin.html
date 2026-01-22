@@ -955,7 +955,7 @@ async function cloudStatus(){
   const { client } = sb;
   try{
     const { data, error } = await client.from("ops_cloud_snapshots_v1").select("app_key,hash,updated_at,created_at,payload").eq("app_key", cfg.appKey).maybeSingle();
-    if(error) throw error;
+    if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
     if(!data){
       alert("云端暂无快照（app_key=" + cfg.appKey + "）。");
       return;
@@ -1045,7 +1045,7 @@ async function cloudPush(opts){
     };
 
     const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict: "app_key" });
-    if(error) throw error;
+    if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
     console.log(`[PUSH] 推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}（hash=${mergedHash}，local_src=${local.source}）`);
     toast(`云端推送成功：卖家${mergedCounts.sc} 产品${mergedCounts.pc} 订单${mergedCounts.oc} 批次${mergedCounts.bc}`,"ok");
@@ -1083,7 +1083,7 @@ async function cloudPull(opts){
       .eq("app_key", cfg.appKey)
       .maybeSingle();
 
-    if(error) throw error;
+    if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
     if(!data || data.payload == null){
       alert("云端没有可用快照（app_key=" + cfg.appKey + "）。");
@@ -1560,7 +1560,7 @@ async function mainOrdersPullV2(opts){
     }
 
     const {data, error} = await q;
-    if(error) throw error;
+    if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
     if(Array.isArray(data) && data.length){
       pulled.push(...data);
@@ -9769,7 +9769,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
         .select("payload,hash,updated_at,created_at")
         .eq("app_key", cfg.appKey)
         .maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){ alert("云端暂无快照（app_key="+cfg.appKey+"）"); return; }
       const p = data.payload || {};
       const c = counts(p);
@@ -9803,7 +9803,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     const row = { app_key: cfg.appKey, payload, hash, updated_at: new Date().toISOString() };
     try{
       const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
       // history copy (best effort)
       try{
@@ -9829,7 +9829,7 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
         .select("payload,hash,updated_at,created_at")
         .eq("app_key", cfg.appKey)
         .maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data || !data.payload){ alert("云端暂无可用快照（app_key="+cfg.appKey+"）"); return; }
 
       // backup current local snapshot (best effort)
@@ -10189,7 +10189,7 @@ function syncMainStateFromDOM(){
     }
     try{
       const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){
         alert("云端暂无快照（app_key="+cfg.app_key+"）。");
         return;
@@ -10241,7 +10241,7 @@ function syncMainStateFromDOM(){
       const hash = String(Date.now());
       const row = { app_key: cfg.app_key, payload: payloadStr, hash };
       const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       toast(`云端推送成功：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${hash}）`);
     }catch(e){
       console.error(e);
@@ -10258,7 +10258,7 @@ function syncMainStateFromDOM(){
     }
     try{
       const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
       let p = null;
       try{ p = (typeof data.payload === "string") ? JSON.parse(data.payload) : data.payload; }catch(_e){ p = null; }
@@ -10418,7 +10418,7 @@ function syncMainStateFromDOM(){
     // Remote
     try{
       const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){
         alert(
           "云端快照状态（无快照）\n\n"+
@@ -10468,7 +10468,7 @@ function syncMainStateFromDOM(){
       const hash = String(Date.now());
       const row = { app_key: cfg.app_key, payload: JSON.stringify(pack.env), hash };
       const { error } = await client.from("ops_cloud_snapshots_v1").upsert(row, { onConflict:"app_key" });
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
       toast(`云端推送成功：卖家${sc} 产品${pc} 订单${oc} 批次${bc}（hash=${hash}）`);
     }catch(e){
@@ -10484,7 +10484,7 @@ function syncMainStateFromDOM(){
 
     try{
       const { data, error } = await client.from("ops_cloud_snapshots_v1").select("*").eq("app_key", cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){ alert("云端暂无快照（app_key="+cfg.app_key+"）。"); return; }
 
       const obj = await _decodePayload(data.payload);
@@ -11069,7 +11069,7 @@ async function cloudStatusFixed(){
         .select("app_key,hash,updated_at,created_at,payload")
         .eq("app_key", cfg.appKey)
         .maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data){
         alert("云端快照状态：未找到快照（app_key="+cfg.appKey+"）");
         return;
@@ -11117,7 +11117,7 @@ async function cloudStatusFixed(){
       const hash = String(Date.now());
       const row = { app_key: cfg.appKey, hash, payload: local.payload, payload_str: JSON.stringify(local.payload) };
       const { error } = await client.from("ops_cloud_snapshots").upsert(row, { onConflict:"app_key" });
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
 
       const msg = "云端推送成功：卖家"+cnt.sc+" 产品"+cnt.pc+" 订单"+cnt.oc+" 批次"+cnt.bc+"（hash="+hash+"）";
       if(typeof window.toast==="function") window.toast(msg); else alert(msg);
@@ -11233,7 +11233,7 @@ async function cloudStatusFixed(){
     const { client: sb, cfg } = cloud;
     try{
       const { data, error } = await sb.from('ops_cloud_snapshots_v1').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data) return alert('云端无快照（该 app_key 尚未推送过）。');
       const payload = data.payload || {};
       const state = _normalizeState(payload.state || payload) || {};
@@ -11275,7 +11275,7 @@ async function cloudStatusFixed(){
         { app_key: cfg.app_key, hash, payload },
         { onConflict:'app_key' }
       );
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(typeof toast === 'function'){
         toast('云端推送成功：卖家'+c.sellers+' 产品'+c.products+' 订单'+c.orders+' 批次'+c.batches+'（hash='+hash+'）');
       }else{
@@ -11296,7 +11296,7 @@ async function cloudStatusFixed(){
 
     try{
       const { data, error } = await sb.from('ops_cloud_snapshots_v1').select('app_key,hash,updated_at,created_at,payload').eq('app_key', cfg.app_key).maybeSingle();
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       if(!data) return alert('云端无快照（该 app_key 尚未推送过）。');
       const payload = data.payload || {};
       const state = _normalizeState(payload.state || payload);
@@ -12514,7 +12514,7 @@ async function cloudStatusFixed(){
 
   async function _fetchCloudRow(sb, app_key){
     const { data, error } = await sb.from(TABLE).select('app_key,hash,updated_at,created_at,payload').eq('app_key', app_key).maybeSingle();
-    if(error) throw error;
+    if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
     return data||null;
   }
 
@@ -12650,7 +12650,7 @@ async function cloudStatusFixed(){
         { app_key: cfg.app_key, hash, payload: payloadObj },
         { onConflict:'app_key', returning:'minimal' }
       );
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       const msg = '云端推送成功：卖家'+lc.sellers+' 产品'+lc.products+' 订单'+lc.orders+' 批次'+lc.batches+'（hash='+hash+'）';
       if(!quiet){
         if(typeof window.toast==='function') window.toast(msg); else alert(msg);
@@ -12904,7 +12904,7 @@ async function cloudStatusFixed(){
       const { count, error } = await sb.from(ORDER_TABLE)
         .select('id', { count:'exact', head:true })
 	        .eq('app_key', appKey);
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       alert('云端订单归档状态（ops_orders_v1）\n\n' +
         '本地订单：' + localOrders + '\n' +
         '云端订单：' + (count||0) + '\n' +
@@ -12936,7 +12936,7 @@ async function cloudStatusFixed(){
           .order('id', { ascending:true });
         if(lastId) q = q.gt('id', lastId);
         const { data, error } = await q.range(0, pageSize - 1);
-        if(error) throw error;
+        if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
         const rows = data || [];
         if(!rows.length) break;
         for(const r of rows){
@@ -13801,7 +13801,7 @@ async function cloudStatusFixed(){
         .order('updated_at', { ascending: false })
         .range(from, to);
       const { data, error } = await q;
-      if(error) throw error;
+      if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
       const rows = Array.isArray(data) ? data : [];
       all = all.concat(rows);
       log('[MASTER_V2] pull page', {from, to, rows: rows.length});
@@ -14578,7 +14578,7 @@ async function cloudStatusFixed(){
         const { data, error } = await sb.from("ops_sellers_v1")
           .upsert(sellerRowsDedup, { onConflict: "app_key,seller_name" })
           .select("id,seller_name");
-        if(error) throw error;
+        if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
         sellerUpserted = Array.isArray(data) ? data.length : 0;
       }
       // fetch all sellers for mapping
@@ -14629,7 +14629,7 @@ async function cloudStatusFixed(){
         const { data, error } = await sb.from("ops_products_v1")
           .upsert(productRowsDedup, { onConflict: "app_key,market,asin_key" })
           .select("id,market,asin_key");
-        if(error) throw error;
+        if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
         productUpserted = Array.isArray(data) ? data.length : 0;
       }
       const { data: pAll, error: pErr } = await sb.from("ops_products_v1").select("id,market,asin_key").eq("app_key", appKey);
@@ -14686,7 +14686,7 @@ async function cloudStatusFixed(){
         const { data, error } = await sb.from("ops_orders_v2")
           .upsert(orderRows, { onConflict: "app_key,seller_id,order_no,product_id" })
           .select("id");
-        if(error) throw error;
+        if(error){ try{ if(__before) window.S = __before; }catch(e){} throw error; }
         orderUpserted = Array.isArray(data) ? data.length : 0;
       }
     }catch(e){
