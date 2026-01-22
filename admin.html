@@ -1578,8 +1578,9 @@ async function ensureOpsSupabaseClient(){
               : null;
     if(!sdk) return null;
 
-    // Resolve config
-    const cfg = window.CLOUD_CFG || {};
+    // Resolve config (prefer existing getCloudCfg which reads localStorage)
+    const cfg = (typeof getCloudCfg==='function') ? (getCloudCfg()||{}) : (window.CLOUD_CFG||{});
+    try{ window.CLOUD_CFG = cfg; }catch(e){}
     const url  = cfg.url  || cfg.supabaseUrl  || cfg.supabase_url  || cfg.supabaseURL;
     const anon = cfg.anon || cfg.anonKey      || cfg.supabaseAnonKey || cfg.supabase_anon || cfg.supabaseAnon;
     if(!url || !anon) return null;
@@ -1624,10 +1625,14 @@ async function mainOrdersPullV2(opts){
     return null;
   })();
   if(!sb){ sb = await __waitSupabaseClient(30000, 300); }
-  if(!sb) throw new Error('supabase_client_not_ready');
+  if(!sb){
+    try{ alert('主表拉取失败：Supabase 客户端未就绪。\n\n请先点击“云端设置”保存 Supabase URL/Anon Key，然后刷新页面重试。'); }catch(e){}
+    return {ok:false, error:'supabase_client_not_ready'};
+  }
 
   const LIMIT = 1000;
-  const appKey = (window.CLOUD_CFG && CLOUD_CFG.app_key) ? CLOUD_CFG.app_key : (window.S && S.app_key) ? S.app_key : 'dalemy';
+  const __cfg = (typeof getCloudCfg==='function') ? (getCloudCfg()||{}) : (window.CLOUD_CFG||{});
+  const appKey = (__cfg.app_key || __cfg.appKey || (window.S && S.app_key) || localStorage.getItem('OPS_CLOUD_APPKEY') || 'dalemy');
   if(!window.S) window.S = {app_key: appKey, sellers:[], products:[], orders:[], batches:[]};
 
   // Keep a stable base state; never replace whole state with partial orders pull
