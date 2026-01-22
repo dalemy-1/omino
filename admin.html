@@ -1353,7 +1353,7 @@ function __dedupMainRows(arr){
     }
 
     // IMPORTANT: business unique key
-    const onConflict = "app_key,seller_name,order_no";
+    const onConflict = "app_key,seller_name,order_no,item_key";
 
     const rows2 = __dedupMainRows(rows);
 
