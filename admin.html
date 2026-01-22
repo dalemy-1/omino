@@ -16067,5 +16067,120 @@ return out;
 })();
 </script>
 
+<script>
+/* === PATCH V12.2.9 PERSIST_GUARD + FIELD_MAP === */
+(function(){
+  function safeJsonParse(s){ try{return JSON.parse(s);}catch(e){return null;} }
+  function getCfg(){ try{ return (typeof getCloudCfg==='function') ? getCloudCfg() : null; }catch(e){ return null; } }
+  function getAppKey(){
+    const c=getCfg();
+    return (c && (c.app||c.app_key)) ? (c.app||c.app_key) : (localStorage.getItem('OPS_APP_KEY_V1')||'dalemy');
+  }
+  function goodKey(){ return 'OPS_LAST_GOOD_MAIN_STATE_V1__' + getAppKey(); }
+
+  function ensureOrderFields(o){
+    if(!o || typeof o!=='object') return o;
+    if(o.seller_name==null && o.sellerName!=null) o.seller_name=o.sellerName;
+    if(o.sellerName==null && o.seller_name!=null) o.sellerName=o.seller_name;
+    if(o.order_no==null && o.orderNo!=null) o.order_no=o.orderNo;
+    if(o.orderNo==null && o.order_no!=null) o.orderNo=o.order_no;
+    if(o.item_key==null && o.itemKey!=null) o.item_key=o.itemKey;
+    if(o.itemKey==null && o.item_key!=null) o.itemKey=o.item_key;
+    if(o.product_name==null && o.productName!=null) o.product_name=o.productName;
+    if(o.productName==null && o.product_name!=null) o.productName=o.product_name;
+    if(o.asin==null && o.ASIN!=null) o.asin=o.ASIN;
+    if(o.market==null && o.Market!=null) o.market=o.Market;
+    if(o.review_status==null && o.reviewStatus!=null) o.review_status=o.reviewStatus;
+    if(o.reviewStatus==null && o.review_status!=null) o.reviewStatus=o.review_status;
+    if(o.pay_status==null && o.payStatus!=null) o.pay_status=o.payStatus;
+    if(o.payStatus==null && o.pay_status!=null) o.payStatus=o.pay_status;
+    if(o.payout_status==null && o.payoutStatus!=null) o.payout_status=o.payoutStatus;
+    if(o.payoutStatus==null && o.payout_status!=null) o.payoutStatus=o.payout_status;
+    return o;
+  }
+
+  function normalizeState(st){
+    if(!st || typeof st!=='object') st={};
+    st.sellers = Array.isArray(st.sellers)? st.sellers : [];
+    st.products = Array.isArray(st.products)? st.products : [];
+    st.orders = Array.isArray(st.orders)? st.orders : [];
+    st.batches = Array.isArray(st.batches)? st.batches : [];
+    try{ st.orders = st.orders.map(ensureOrderFields); }catch(e){}
+    return st;
+  }
+
+  function saveGoodState(st){
+    try{
+      const n=normalizeState(st);
+      localStorage.setItem(goodKey(), JSON.stringify({ts:Date.now(), state:n}));
+    }catch(e){}
+  }
+  function loadGoodState(){
+    const obj=safeJsonParse(localStorage.getItem(goodKey()));
+    return (obj && obj.state) ? normalizeState(obj.state) : null;
+  }
+
+  function wrapSaver(){
+    const fn = window.__saveLocalMainStateSafe || window.saveLocalMainState;
+    if(typeof fn!=='function') return;
+    if(fn.__persistGuardWrapped) return;
+    const wrapped = async function(st){
+      const res = await fn(st);
+      try{
+        const cur = (st && typeof st==='object') ? st : (window.S||window.state||null);
+        if(cur && cur.orders) saveGoodState(cur);
+      }catch(e){}
+      return res;
+    };
+    wrapped.__persistGuardWrapped = true;
+    try{ window.__saveLocalMainStateSafe = wrapped; }catch(e){}
+    try{ window.saveLocalMainState = wrapped; }catch(e){}
+  }
+
+  function bootRestore(){
+    setTimeout(function(){
+      try{
+        const cur = window.S || window.state || {};
+        const curOrders = (cur && Array.isArray(cur.orders)) ? cur.orders.length : 0;
+        if(curOrders===0){
+          const backup = loadGoodState();
+          if(backup && backup.orders && backup.orders.length>0){
+            window.S = backup; window.state = backup;
+            try{ S = backup; }catch(e){}
+            try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
+            try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(e){}
+            console.warn('[PERSIST_GUARD] restored state from last-good shadow:', backup.orders.length);
+          }
+        }
+      }catch(e){}
+    }, 1200);
+  }
+
+  function wrapShowNotice(){
+    const orig = window.showNotice;
+    if(typeof orig!=='function' || orig.__persistGuardWrapped) return;
+    const wrapped = function(title, msg){
+      const r = orig.apply(this, arguments);
+      try{
+        if(String(title||'').indexOf('主表拉取')>=0 || String(title||'').indexOf('主表推送')>=0){
+          const cur = window.S || window.state;
+          if(cur && cur.orders) saveGoodState(cur);
+        }
+      }catch(e){}
+      return r;
+    };
+    wrapped.__persistGuardWrapped = true;
+    window.showNotice = wrapped;
+  }
+
+  wrapSaver(); wrapShowNotice(); bootRestore();
+  let tries=0;
+  const it=setInterval(function(){
+    wrapSaver(); wrapShowNotice();
+    tries++; if(tries>30) clearInterval(it);
+  }, 500);
+})();
+</script>
+
 </body>
 </html>
