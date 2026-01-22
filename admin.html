@@ -15726,6 +15726,139 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
   console.log(TAG,'installed. main tables=', {T_SELLERS,T_PRODUCTS,T_ORDERS});
 })();
 </script>
+<script>
+/**
+ * SAFE DISPLAY PATCH (no-HTML injection)
+ * Goals:
+ * 1) Prevent "Invalid or unexpected token" caused by injecting raw JSON/text into JS/HTML.
+ * 2) Clean literal "\n" and real newlines in UI text nodes (sellers/products lists).
+ * 3) Keep existing snapshot REST push/pull working (do not touch your sync logic).
+ */
+(function(){
+  'use strict';
+
+  // ---------- 0) Helpers ----------
+  function toStr(v){ return (v === null || v === undefined) ? '' : String(v); }
+
+  // Clean both real newlines and the two-character sequence "\n"
+  function cleanNL(s){
+    s = toStr(s);
+    // Replace literal backslash-n
+    s = s.replace(/\\n+/g, ' ');
+    // Replace real newline characters
+    s = s.replace(/\r?\n+/g, ' ');
+    // Collapse whitespace
+    s = s.replace(/\s{2,}/g, ' ').trim();
+    return s;
+  }
+
+  // Safe text setter (never innerHTML)
+  function setText(el, v){
+    if(!el) return;
+    el.textContent = cleanNL(v);
+  }
+
+  // ---------- 1) Global UI text cleanup (MutationObserver) ----------
+  // This fixes sellers/products pages showing "\n" in cells.
+  function scrubNodeText(root){
+    if(!root) return;
+    // Only touch text nodes inside common containers to reduce cost
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node){
+          const t = node.nodeValue;
+          if(!t) return NodeFilter.FILTER_REJECT;
+          if(t.indexOf('\\n') >= 0 || t.indexOf('\n') >= 0 || t.indexOf('\r') >= 0) {
+            return NodeFilter.FILTER_ACCEPT;
+          }
+          return NodeFilter.FILTER_REJECT;
+        }
+      }
+    );
+    const touched = [];
+    while(walker.nextNode()){
+      touched.push(walker.currentNode);
+    }
+    for(const n of touched){
+      n.nodeValue = cleanNL(n.nodeValue);
+    }
+  }
+
+  // Run once at start (after DOM ready)
+  function initScrubber(){
+    try { scrubNodeText(document.body); } catch(e) {}
+    const obs = new MutationObserver((muts)=>{
+      for(const m of muts){
+        if(m.type === 'characterData'){
+          try { m.target.nodeValue = cleanNL(m.target.nodeValue); } catch(e) {}
+        } else if(m.addedNodes && m.addedNodes.length){
+          for(const n of m.addedNodes){
+            try { scrubNodeText(n); } catch(e) {}
+          }
+        }
+      }
+    });
+    obs.observe(document.body, {subtree:true, childList:true, characterData:true});
+  }
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initScrubber);
+  } else {
+    initScrubber();
+  }
+
+  // ---------- 2) Harden "cloud view" / "payload view" if exists ----------
+  // If previous code exposes window.cloudView / window.viewCloudPayload etc, we wrap it to avoid innerHTML usage.
+  // We do NOT parse or render huge JSON. Only show counts safely.
+  function safeShowPayloadSummary(payload){
+    try{
+      const sellers = Array.isArray(payload && payload.sellers) ? payload.sellers.length : 0;
+      const products = Array.isArray(payload && payload.products) ? payload.products.length : 0;
+      const orders = Array.isArray(payload && payload.orders) ? payload.orders.length : 0;
+      const batches = Array.isArray(payload && payload.batches) ? payload.batches.length : 0;
+
+      const msg =
+        '云端快照摘要（安全显示，不渲染原文）\\n' +
+        'sellers=' + sellers + ' products=' + products + ' orders=' + orders + ' batches=' + batches;
+
+      alert(msg);
+    }catch(e){
+      alert('云端快照摘要：读取失败（请看控制台）');
+      console.error('[SAFE_PATCH] safeShowPayloadSummary failed', e);
+    }
+  }
+
+  // If you have a function that returns payload, you can call window.safeShowPayloadSummary(payload)
+  window.safeShowPayloadSummary = safeShowPayloadSummary;
+
+  // ---------- 3) Guard against accidental HTML injection helpers ----------
+  // If some code uses a global "html()" or "setHTML()", block it by redefining to safe behavior.
+  // (Only if such functions exist; we won't break other code.)
+  try{
+    if(typeof window.setHTML === 'function'){
+      const old = window.setHTML;
+      window.setHTML = function(el, html){
+        // fallback to textContent to avoid parsing HTML with untrusted content
+        try { setText(el, html); } catch(e) {}
+        console.warn('[SAFE_PATCH] setHTML was overridden to safe textContent');
+        // keep old reference accessible if needed
+        window.__old_setHTML = old;
+      };
+    }
+  }catch(e){}
+
+  // ---------- 4) Optional: expose a quick checker ----------
+  window.__SAFE_PATCH_CHECK__ = function(){
+    const sample = 'a\\\\n\\\\n b\\n c';
+    console.log('[SAFE_PATCH] cleanNL sample =>', cleanNL(sample));
+    return true;
+  };
+
+  console.log('[SAFE_PATCH] installed: newline scrubber + safe payload summary');
+})();
+</script>
 
 </body>
 </html>
