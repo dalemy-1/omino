@@ -1496,6 +1496,130 @@ const limit = 1000;
     if(!__silent) alert("主表拉取失败：\n" + (e && e.message ? e.message : String(e))); else console.warn("主表拉取失败", e); return { ok:false, error:(e && e.message ? e.message : String(e)) };
   }
 }
+
+// --- PATCH: robust main orders pull (paged, merge-only, never clears sellers/products) ---
+async function mainOrdersPullV2(opts){
+  opts = opts||{};
+  const LIMIT = 1000;
+  const appKey = (window.CLOUD_CFG && CLOUD_CFG.app_key) ? CLOUD_CFG.app_key : (window.S && S.app_key) ? S.app_key : 'dalemy';
+  if(!window.S) window.S = {app_key: appKey, sellers:[], products:[], orders:[], batches:[]};
+
+  // Keep a stable base state; never replace whole state with partial orders pull
+  const base = window.S;
+  if(!Array.isArray(base.sellers)) base.sellers = [];
+  if(!Array.isArray(base.products)) base.products = [];
+  if(!Array.isArray(base.batches)) base.batches = [];
+  if(!Array.isArray(base.orders)) base.orders = [];
+
+  // Cursor: use stored cursor if exists
+  let cur = (base.__cloud_orders_cursor && typeof base.__cloud_orders_cursor === 'object') ? base.__cloud_orders_cursor : null;
+  let afterUpdatedAt = cur && cur.updated_at ? cur.updated_at : null;
+  let afterId = cur && cur.id ? cur.id : null;
+
+  const pulled = [];
+  let loops = 0;
+
+  while(true){
+    loops++;
+    if(loops>50) break; // hard guard
+    let q = supabase.from('ops_orders_v1')
+      .select('id,app_key,seller_name,order_no,market,asin,product_name,pay_status,review_status,payout_status,review_link,note,unit_price,amount,discount,buyer_commission,fx_rate,review_req,pay_screenshot_url,review_screenshot_url,payout_screenshot_url,created_at,updated_at')
+      .eq('app_key', appKey)
+      .order('updated_at', {ascending:true})
+      .order('id', {ascending:true})
+      .limit(LIMIT);
+
+    // Apply cursor if available
+    if(afterUpdatedAt && afterId){
+      // (updated_at, id) > (cursor.updated_at, cursor.id)
+      q = q.or(`updated_at.gt.${afterUpdatedAt},and(updated_at.eq.${afterUpdatedAt},id.gt.${afterId})`);
+    }
+
+    const {data, error} = await q;
+    if(error) throw error;
+
+    if(Array.isArray(data) && data.length){
+      pulled.push(...data);
+      const last = data[data.length-1];
+      afterUpdatedAt = last.updated_at;
+      afterId = last.id;
+    }
+
+    if(!data || data.length < LIMIT) break;
+  }
+
+  // Merge pulled orders into local by business key (app_key|seller_name|order_no)
+  const norm = (s)=> (s==null?'':String(s)).trim();
+  const bizKey = (o)=> `${norm(o.app_key||appKey)}|${norm(o.seller_name)}|${norm(o.order_no)}`;
+
+  const map = new Map();
+  for(const o of base.orders){
+    const k = bizKey(o);
+    if(!k.endsWith('||')) map.set(k, o);
+  }
+
+  const score = (o)=>{
+    let s = 0;
+    if(o.pay_status) s+=1;
+    if(o.review_status) s+=1;
+    if(o.payout_status) s+=1;
+    if(o.review_link) s+=1;
+    if(o.asin) s+=1;
+    if(o.product_name) s+=1;
+    return s;
+  };
+  const newer = (a,b)=>{
+    const ta = a && a.updated_at ? Date.parse(a.updated_at) : 0;
+    const tb = b && b.updated_at ? Date.parse(b.updated_at) : 0;
+    if(tb!==ta) return tb>ta;
+    return score(b)>=score(a);
+  };
+
+  for(const r of pulled){
+    const k = bizKey(r);
+    if(!k.endsWith('||')){
+      const ex = map.get(k);
+      if(!ex){
+        map.set(k, r);
+      }else if(newer(ex,r)){
+        // merge fields (cloud wins when newer or more complete)
+        map.set(k, Object.assign({}, ex, r));
+      }
+    }
+  }
+
+  base.orders = Array.from(map.values());
+
+  // Save cursor so next pull is incremental
+  if(afterUpdatedAt && afterId){
+    base.__cloud_orders_cursor = {updated_at: afterUpdatedAt, id: afterId};
+  }
+
+  // Persist local state via safe saver
+  try{
+    if(typeof __saveLocalMainStateSafe==='function'){
+      await __saveLocalMainStateSafe(base);
+    }else{
+      // fallback: do not crash
+      try{ window.S = base; }catch(e){}
+    }
+  }catch(e){ /* ignore */ }
+
+  // Refresh UI safely
+  try{
+    if(typeof renderAll==='function') renderAll();
+    else if(typeof window.renderAll==='function') window.renderAll();
+  }catch(e){}
+
+  // Notify
+  try{
+    toast && toast('主表拉取完成：已合并 '+pulled.length+' 条（分页拉取，不会清空卖家/产品）','ok');
+  }catch(e){}
+  return {pulled: pulled.length, total: base.orders.length};
+}
+// --- end patch ---
+
+
 /* ===================== End Main Orders ===================== */
 
 // bind buttons after load
@@ -1513,7 +1637,7 @@ window.addEventListener("load", ()=>{
   if(bPull) bPull.onclick = ()=>cloudPull();
   if(bStatus) bStatus.onclick = ()=>cloudStatusFixed();
   if(bMainPush) bMainPush.onclick = ()=>mainOrdersPush();
-  if(bMainPull) bMainPull.onclick = ()=>mainOrdersPull();
+  if(bMainPull) bMainPull.onclick = ()=>mainOrdersPullV2();
   if(bMainStatus) bMainStatus.onclick = ()=>mainOrdersStatus();
 });
 
@@ -1565,7 +1689,7 @@ function startAutoPullMain(){
       if(document.hidden) return;
       __autoPullBusy = true;
       try{
-        await mainOrdersPull({ silent:true, maxPages: 2 });
+        await mainOrdersPullV2({ silent:true, maxPages: 2 });
       }catch(e){
         console.warn("[AUTO-PULL-MAIN] failed", e);
       }finally{
