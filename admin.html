@@ -14071,7 +14071,12 @@ async function pullOrdersMaster(){
   let from = 0;
   let all = [];
 
-  const lastPullAt = getOpsOrdersLastPullAt(appKey);
+  let lastPullAt = getOpsOrdersLastPullAt(appKey);
+  // If local orders are empty (e.g., after local reset), force a full pull.
+  try{
+    const _lc = (window.S && Array.isArray(S.orders)) ? S.orders.length : null;
+    if(_lc === 0){ lastPullAt = ''; try{ clearOpsOrdersLastPullAt(appKey); }catch(e){} }
+  }catch(e){}
   const overlapSec = 180; // overlap window to avoid edge misses
   let mode = 'full';
   let since = '';
