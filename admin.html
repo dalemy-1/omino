@@ -13797,32 +13797,104 @@ async function cloudStatusFixed(){
   }
 
   // Pull all orders (paged) from ops_orders_v1 and merge into local S
-  async function pullOrdersMaster(){
-    const sb = getSb();
-    if(!sb || !sb.from) throw new Error('supabase_client_missing');
-    const appKey = getAppKey();
-    if(!appKey) throw new Error('app_key_missing');
+  const OPS_ORDERS_LAST_PULL_AT_KEY = (appKey)=>`ops_orders_v1_last_pull_at::${appKey||''}`;
 
-    const pageSize = 1000;
-    let from = 0;
-    let all = [];
-    for(;;){
-      const to = from + pageSize - 1;
-      const q = sb.from('ops_orders_v1')
-        .select('id,app_key,seller_name,order_no,market,product_name,asin,pay_status,review_status,payout_status,review_req,unit_price,fx_rate,note,review_link,created_at,updated_at')
-        .eq('app_key', appKey)
-        .order('updated_at', { ascending: false })
-        .range(from, to);
-      const { data, error } = await q;
-      if(error) throw error;
-      const rows = Array.isArray(data) ? data : [];
-      all = all.concat(rows);
-      log('[MASTER_V2] pull page', {from, to, rows: rows.length});
-      if(rows.length < pageSize) break;
-      from += pageSize;
+function getOpsOrdersLastPullAt(appKey){
+  try{
+    const v = localStorage.getItem(OPS_ORDERS_LAST_PULL_AT_KEY(appKey));
+    return v && typeof v === 'string' ? v : '';
+  }catch(e){ return ''; }
+}
+
+function setOpsOrdersLastPullAt(appKey, iso){
+  try{
+    if(!appKey || !iso) return;
+    localStorage.setItem(OPS_ORDERS_LAST_PULL_AT_KEY(appKey), iso);
+  }catch(e){}
+}
+
+function clearOpsOrdersLastPullAt(appKey){
+  try{ localStorage.removeItem(OPS_ORDERS_LAST_PULL_AT_KEY(appKey)); }catch(e){}
+}
+
+// Expose a manual reset (optional) for emergency recovery
+window.resetOpsOrdersPullCursor = function(){
+  const ak = getAppKey();
+  clearOpsOrdersLastPullAt(ak);
+  ui('已重置增量拉取游标（下次拉取将从更早开始）');
+  return true;
+};
+
+// Pull ops_orders_v1 from cloud.
+// - First pull (no cursor): full pull (descending updated_at)
+// - Subsequent pulls: incremental pull by updated_at with a small overlap window
+async function pullOrdersMaster(){
+  const sb = getSb();
+  if(!sb || !sb.from) throw new Error('supabase_client_missing');
+  const appKey = getAppKey();
+  if(!appKey) throw new Error('app_key_missing');
+
+  const pageSize = 1000;
+  let from = 0;
+  let all = [];
+
+  const lastPullAt = getOpsOrdersLastPullAt(appKey);
+  const overlapSec = 180; // overlap window to avoid edge misses
+  let mode = 'full';
+  let since = '';
+
+  if(lastPullAt){
+    mode = 'inc';
+    const t = Date.parse(lastPullAt);
+    if(!isNaN(t)){
+      const t2 = Math.max(0, t - overlapSec*1000);
+      since = new Date(t2).toISOString();
+    }else{
+      // corrupted cursor -> fallback to full
+      mode = 'full';
+      since = '';
     }
-    return { appKey, orders: all };
   }
+
+  for(;;){
+    const to = from + pageSize - 1;
+    let q = sb.from('ops_orders_v1')
+      .select('*')
+      .eq('app_key', appKey);
+
+    if(mode === 'inc' && since){
+      q = q.gte('updated_at', since);
+    }
+
+    // ordering: incremental needs ascending to move cursor forward; full pull can be descending for speed
+    if(mode === 'inc'){
+      q = q.order('updated_at', { ascending: true }).order('id', { ascending: true });
+    }else{
+      q = q.order('updated_at', { ascending: false }).order('id', { ascending: false });
+    }
+
+    q = q.range(from, to);
+
+    const { data, error } = await q;
+    if(error) throw error;
+    const rows = Array.isArray(data) ? data : [];
+    all = all.concat(rows);
+    log('[MASTER_V2] pull page', {mode, since, from, to, rows: rows.length});
+    if(rows.length < pageSize) break;
+    from += pageSize;
+    // safety cap to avoid runaway
+    if(from > 2000000) break;
+  }
+
+  // compute new cursor
+  let maxUpdatedAt = '';
+  for(const r of all){
+    const u = r && r.updated_at ? String(r.updated_at) : '';
+    if(u && (!maxUpdatedAt || u > maxUpdatedAt)) maxUpdatedAt = u;
+  }
+
+  return { appKey, orders: all, mode, since, lastPullAt, maxUpdatedAt };
+}
 
   // Apply cloud rows into local S (minimal mapping)
   function applyRows(rows){
@@ -13917,15 +13989,25 @@ async function cloudStatusFixed(){
     return { added, updated };
   }
 
-  async function cloudPull(){
-    ui('云端拉取：开始（订单主表 ops_orders_v1）');
-    const res = await pullOrdersMaster();
-    const stats = applyRows(res.orders);
-    ui('云端拉取：完成，写入本地 '+res.orders.length+' 条订单（新增 '+stats.added+' / 更新 '+stats.updated+'）');
-    return { ok:true, count: res.orders.length };
+  
+async function cloudPull(){
+  ui('云端拉取：开始（订单主表 ops_orders_v1）');
+  const res = await pullOrdersMaster();
+  const stats = applyRows(res.orders);
+
+  // advance cursor only when we actually received rows
+  if(res && res.maxUpdatedAt){
+    setOpsOrdersLastPullAt(res.appKey, res.maxUpdatedAt);
   }
 
-  function bind(){
+  const modeText = (res && res.mode === 'inc') ? '增量' : '全量';
+  const sinceText = (res && res.mode === 'inc' && res.since) ? (' since ' + res.since) : '';
+  const cursorText = (res && res.maxUpdatedAt) ? (' cursor=' + res.maxUpdatedAt) : '';
+  ui('云端拉取：完成（'+modeText+sinceText+'），写入本地 '+res.orders.length+' 条订单（新增 '+stats.added+' / 更新 '+stats.updated+'）'+cursorText);
+  return { ok:true, count: res.orders.length, mode: res.mode, since: res.since, cursor: res.maxUpdatedAt };
+}
+
+function bind(){
     const bPull = document.getElementById('btnCloudPull');
     const bPush = document.getElementById('btnCloudPush');
     const bStatus = document.getElementById('btnCloudStatus');
