@@ -14800,335 +14800,15 @@ async function cloudStatusFixed(){
 
 <script>
 /**
- * SNAPSHOT REST FINAL OVERRIDE (v7.6-snapshot-final)
- * Hard-lock cloud actions to ops_cloud_snapshots_v1 via REST.
- * This override runs at the very end, in capture phase, and blocks legacy handlers.
- */
-(function(){
-  'use strict';
-  const TAG='[SNAPSHOT_FINAL]';
-  const TABLE='ops_cloud_snapshots_v1';
-
-  function log(){ try{ console.log(TAG, ...arguments); }catch(e){} }
-
-  function toast(msg){ try{ alert(String(msg)); }catch(e){ log('toast failed', e); } }
-
-  function safeJsonParse(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
-
-  function loadCloudCfg(){
-    const v1 = safeJsonParse(localStorage.getItem('OPS_CLOUD_CFG_V1')||'');
-    const v0 = safeJsonParse(localStorage.getItem('OPS_CLOUD_CFG')||'');
-    const app = localStorage.getItem('OPS_CLOUD_APPKEY') || (v1&&v1.app) || (v0&&v0.app) || '';
-    const url = (v1&&v1.url) || (v0&&v0.url) || '';
-    const anon = (v1&&v1.anon) || (v0&&v0.anon) || '';
-    return { url, anon, app };
-  }
-
-  function normalizeUrl(u){
-    if(!u) return '';
-    return String(u).trim().replace(/\/+$/,'');
-  }
-
-  async function restFetch(cfg, path, opt){
-    const url = normalizeUrl(cfg.url);
-    if(!url || !cfg.anon) throw new Error('cloud_cfg_missing');
-    const full = url + path;
-    const headers = Object.assign({
-      'apikey': cfg.anon,
-      'Authorization': 'Bearer ' + cfg.anon,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=representation'
-    }, (opt && opt.headers) || {});
-    const res = await fetch(full, Object.assign({}, opt||{}, { headers }));
-    const text = await res.text();
-    let data = null;
-    try{ data = text ? JSON.parse(text) : null; }catch(e){ data = text; }
-    if(!res.ok){
-      const err = new Error('rest_error_'+res.status);
-      err.status = res.status;
-      err.body = data;
-      throw err;
-    }
-    return data;
-  }
-
-  function openDB(dbName, version){
-    return new Promise((resolve, reject)=>{
-      const req = indexedDB.open(dbName, version);
-      req.onupgradeneeded = ()=>{ /* no-op */ };
-      req.onsuccess = ()=>resolve(req.result);
-      req.onerror = ()=>reject(req.error);
-    });
-  }
-
-  async function idbGet(dbName, version, storeName, key){
-    const db = await openDB(dbName, version);
-    return await new Promise((resolve, reject)=>{
-      const tx = db.transaction([storeName],'readonly');
-      const st = tx.objectStore(storeName);
-      const req = st.get(key);
-      req.onsuccess = ()=>resolve(req.result);
-      req.onerror = ()=>reject(req.error);
-    });
-  }
-
-  async function idbPut(dbName, version, storeName, value, key){
-    const db = await openDB(dbName, version);
-    return await new Promise((resolve, reject)=>{
-      const tx = db.transaction([storeName],'readwrite');
-      const st = tx.objectStore(storeName);
-      const req = (key===undefined) ? st.put(value) : st.put(value, key);
-      req.onsuccess = ()=>resolve(req.result);
-      req.onerror = ()=>reject(req.error);
-    });
-  }
-
-  async function readMainState(){
-    // 1) window.S
-    try{
-      if(window.S && typeof window.S==='object'){
-        const s = window.S;
-        if(Array.isArray(s.orders) || Array.isArray(s.sellers) || Array.isArray(s.products) || Array.isArray(s.batches)){
-          return s;
-        }
-      }
-    }catch(e){}
-    // 2) localStorage canonical
-    const ls = safeJsonParse(localStorage.getItem('ops_rebuild_v6_4_2_state')||'');
-    if(ls && typeof ls==='object') return ls;
-    const ls2 = safeJsonParse(localStorage.getItem('OPS_MAIN_STATE_V1')||'');
-    if(ls2 && typeof ls2==='object') return ls2;
-
-    // 3) IndexedDB main_state_v1 (known db/store for v6.4.2 baseline)
-    try{
-      const rec = await idbGet('ops_v642_main', 1, 'kv', 'main_state_v1');
-      if(rec && typeof rec==='object'){
-        if(rec.value && typeof rec.value==='object') return rec.value;
-        return rec;
-      }
-    }catch(e){
-      log('readMainState idb failed', e);
-    }
-    return { sellers:[], products:[], orders:[], batches:[] };
-  }
-
-  async function writeMainState(state){
-    // write localStorage mirrors
-    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(state)); }catch(e){}
-    try{ localStorage.setItem('OPS_MAIN_STATE_V1', JSON.stringify(state)); }catch(e){}
-    // write IndexedDB (best-effort)
-    try{
-      await idbPut('ops_v642_main', 1, 'kv', { key:'main_state_v1', value: state }, 'main_state_v1');
-    }catch(e){
-      try{
-        // some builds store raw value under key
-        await idbPut('ops_v642_main', 1, 'kv', state, 'main_state_v1');
-      }catch(e2){
-        log('writeMainState idb failed', e2);
-      }
-    }
-    // update in-memory
-    try{ window.S = state; }catch(e){}
-  }
-
-  function countsOf(s){
-    const sellers = Array.isArray(s.sellers)? s.sellers.length:0;
-    const products = Array.isArray(s.products)? s.products.length:0;
-    const orders = Array.isArray(s.orders)? s.orders.length:0;
-    const batches = Array.isArray(s.batches)? s.batches.length:0;
-    return { sellers, products, orders, batches };
-  }
-
-  function isAllEmpty(c){ return (c.sellers+c.products+c.orders+c.batches)===0; }
-
-  async function snapshotSelect(cfg){
-    const q = encodeURIComponent('app_key=eq.'+cfg.app);
-    // select only needed columns
-    return await restFetch(cfg, '/rest/v1/'+TABLE+'?select=app_key,updated_at,hash,payload&'+q+'&limit=1', { method:'GET' });
-  }
-
-  async function snapshotUpsert(cfg, payload){
-    const body = [{
-      app_key: cfg.app,
-      payload: payload,
-      updated_at: new Date().toISOString()
-    }];
-    // use upsert on app_key
-    return await restFetch(cfg, '/rest/v1/'+TABLE+'?on_conflict=app_key', {
-      method:'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
-      body: JSON.stringify(body)
-    });
-  }
-
-  async function snapshotStatus(){
-    const cfg = loadCloudCfg();
-    if(!cfg.app) return toast('未设置 app_key（请先在云端设置里保存）');
-    try{
-      const rows = await snapshotSelect(cfg);
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-      const local = await readMainState();
-      const lc = countsOf(local);
-      if(!row){
-        toast('云端快照状态（'+TABLE+'）\\napp_key='+cfg.app+'\\n云端：空\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
-        return;
-      }
-      const rp = row.payload || {};
-      const rc = countsOf(rp);
-      toast('云端快照状态（'+TABLE+'）\\napp_key='+cfg.app+'\\n云端：sellers='+rc.sellers+' products='+rc.products+' orders='+rc.orders+' batches='+rc.batches+'\\nupdated_at='+(row.updated_at||'')+'\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
-    }catch(e){
-      log('status failed', e);
-      toast('云端状态失败：'+(e && e.message ? e.message : e));
-    }
-  }
-
-  async function snapshotPush(opts){
-    const force = !!(opts && opts.force);
-    const cfg = loadCloudCfg();
-    if(!cfg.app) return toast('请先在云端设置里保存 app_key / url / anon');
-    const local = await readMainState();
-    const lc = countsOf(local);
-
-    // safety: if local all empty but cloud not empty, block unless force
-    if(isAllEmpty(lc) && !force){
-      try{
-        const rows = await snapshotSelect(cfg);
-        const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-        const rc = row && row.payload ? countsOf(row.payload) : {sellers:0,products:0,orders:0,batches:0};
-        if(!isAllEmpty(rc)){
-          return toast('已阻止推送：本地全为空，云端非空。\\n为避免误清空云端，请先导入数据或点“强制推送”。');
-        }
-      }catch(e){
-        // if cannot read cloud, do not block
-        log('precheck cloud read failed, continue', e);
-      }
-    }
-
-    try{
-      await snapshotUpsert(cfg, local);
-      toast('云端推送成功（快照 REST）\\n'+TABLE+'\\napp_key='+cfg.app+'\\n本地：sellers='+lc.sellers+' products='+lc.products+' orders='+lc.orders+' batches='+lc.batches);
-    }catch(e){
-      log('push failed', e);
-      toast('云端推送失败：'+(e && e.message ? e.message : e));
-    }
-  }
-
-  async function snapshotPull(){
-  const cfg = needCfg(pickCfg());
-  const row = await restSelect(cfg);
-  if(!row || !row.payload){
-    alert(`云端拉取：云端无快照（${SNAP_TABLE}）`);
-    return;
-  }
-  const p = row.payload || {};
-  const payload = {
-    sellers: Array.isArray(p.sellers) ? p.sellers : [],
-    products: Array.isArray(p.products) ? p.products : [],
-    orders: Array.isArray(p.orders) ? p.orders : [],
-    batches: Array.isArray(p.batches) ? p.batches : []
-  };
-
-  // 1) 写镜像（便于排查）
-  writeLocalMirror(payload);
-
-  // 2) 写回 IndexedDB 主库（权威）
-  //    目标：ops_v642_main / kv / main_state_v1  （与你推送来源一致）
-  const DB_NAME = 'ops_v642_main';
-  const STORE = 'kv';
-  const KEY = 'main_state_v1';
-
-  function openDBExact(name){
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(name);
-      req.onupgradeneeded = () => {
-        // 不允许在这里创建结构，避免误伤
-        reject(new Error('IndexedDB 结构不匹配或库不存在：' + name));
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('open_failed'));
-    });
-  }
-
-  function idbPut(db, storeName, key, value){
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readwrite');
-      const st = tx.objectStore(storeName);
-      // 兼容你现有的 kv 结构：多数版本存 { key, value }
-      const obj = { key, value };
-      const req = st.put(obj);
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error || new Error('put_failed'));
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => reject(tx.error || new Error('tx_failed'));
-    });
-  }
-
-  let wrote = false;
-  try{
-    const db = await openDBExact(DB_NAME);
-    await idbPut(db, STORE, KEY, payload);
-    try{ db.close(); }catch(e){}
-    wrote = true;
-  }catch(e){
-    alert('拉取成功，但写回本地主库失败：' + e.message + '\n请把这条提示截图发我，我会做兼容写回。');
-    return;
-  }
-
-  // 3) 尝试触发系统刷新（如果原系统有对应方法）
-  try{
-    if(typeof window.loadState === 'function') await window.loadState();
-    if(typeof window.render === 'function') window.render();
-  }catch(e){}
-
-  alert(
-    `拉取成功：已写回本地主库（IndexedDB）+ 镜像\n` +
-    `sellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n` +
-    (wrote ? '已写入：ops_v642_main/kv/main_state_v1\n' : '') +
-    `如页面未自动刷新，请手动刷新一次。`
-  );
-}
-
-  // hard override globals used by buttons
-  window.cloudStatus = snapshotStatus;
-  window.cloudPush = function(){ return snapshotPush({force:false}); };
-  window.cloudPull = snapshotPull;
-  window.cloudPushForce = function(){ return snapshotPush({force:true}); };
-
-  // capture-phase bind & block any legacy handlers for these buttons
-  function bindByText(text, fn){
-    const btns = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"]'));
-    const hits = btns.filter(b=>{
-      const t = (b.innerText || b.value || '').trim();
-      return t === text || t.includes(text);
-    });
-    hits.forEach(b=>{
-      b.addEventListener('click', function(ev){
-        try{ ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation(); }catch(e){}
-        fn();
-      }, true); // capture
-    });
-    return hits.length;
-  }
-
-  // bind common labels (兼容不同版本按钮文案)
-  const n1 = bindByText('云端状态', snapshotStatus);
-  const n2 = bindByText('云端推送', ()=>snapshotPush({force:false}));
-  const n3 = bindByText('强制推送', ()=>snapshotPush({force:true}));
-  const n4 = bindByText('云端拉取', snapshotPull);
-
-  log('override ready. bound:', {status:n1,push:n2,force:n3,pull:n4, table:TABLE});
-})();
-</script>
-<script>
-/**
- * SNAPSHOT FORCE (IndexedDB-aware)
- * 目标：云端按钮永远只走 ops_cloud_snapshots_v1，并且本地数据优先从 IndexedDB 读 main_state_v1（不依赖 window.S / localStorage）
+ * SNAPSHOT FORCE (IDB writeback + hard reload)
+ * - Cloud table: ops_cloud_snapshots_v1
+ * - Local authority: IndexedDB ops_v642_main / kv / main_state_v1
+ * - Push reads IDB, Pull writes IDB, then hard reload to refresh UI.
  */
 (function(){
   const SNAP_TABLE = 'ops_cloud_snapshots_v1';
   const TAG = '[SNAPSHOT_FORCE_IDB]';
 
-  // ---------- Supabase cfg ----------
   function pickCfg(){
     const ls = window.localStorage || {};
     const cfg = {
@@ -15141,7 +14821,6 @@ async function cloudStatusFixed(){
     if((!cfg.app || cfg.app==='dalemy') && window.__CLOUD_CFG__?.app) cfg.app = window.__CLOUD_CFG__.app;
     return cfg;
   }
-
   function needCfg(cfg){
     if(!cfg.url) cfg.url = prompt('请输入 Supabase URL（形如 https://xxx.supabase.co ）') || '';
     if(!cfg.anon) cfg.anon = prompt('请输入 Supabase anon key') || '';
@@ -15153,7 +14832,6 @@ async function cloudStatusFixed(){
     }catch(e){}
     return cfg;
   }
-
   function hdr(cfg){
     return {
       'apikey': cfg.anon,
@@ -15162,7 +14840,6 @@ async function cloudStatusFixed(){
       'Prefer': 'resolution=merge-duplicates'
     };
   }
-
   async function restSelect(cfg){
     const url = cfg.url.replace(/\/$/, '') + '/rest/v1/' + SNAP_TABLE
       + '?select=*&app_key=eq.' + encodeURIComponent(cfg.app)
@@ -15173,7 +14850,6 @@ async function cloudStatusFixed(){
     const arr = JSON.parse(t || '[]');
     return arr[0] || null;
   }
-
   async function restUpsert(cfg, row){
     const url = cfg.url.replace(/\/$/, '') + '/rest/v1/' + SNAP_TABLE;
     const r = await fetch(url, {
@@ -15186,40 +14862,8 @@ async function cloudStatusFixed(){
     return t ? JSON.parse(t) : [];
   }
 
-  // ---------- IndexedDB helpers ----------
-  function openExistingDB(name){
-    return new Promise((resolve, reject) => {
-      let created = false;
-      const req = indexedDB.open(name);
-      req.onupgradeneeded = () => { created = true; }; // 表示原本不存在，会触发升级（我们不想创建空库）
-      req.onsuccess = () => {
-        const db = req.result;
-        if(created){
-          // 关闭并拒绝，避免意外创建新 DB
-          try{ db.close(); }catch(e){}
-          reject(new Error('db_not_exist:' + name));
-          return;
-        }
-        resolve(db);
-      };
-      req.onerror = () => reject(req.error || new Error('open_failed:' + name));
-    });
-  }
-
-  function idbGet(db, storeName, key){
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName, 'readonly');
-      const st = tx.objectStore(storeName);
-      const req = st.get(key);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('get_failed'));
-    });
-  }
-
-  function normalizeState(v){
-    // 兼容多种存储结构：{key,value:{...}} / {value:{...}} / 直接 {...}
-    const obj = v?.value ? v.value : v;
-    const S = obj && typeof obj === 'object' ? obj : {};
+  function normalizeState(obj){
+    const S = (obj && typeof obj === 'object') ? obj : {};
     return {
       sellers: Array.isArray(S.sellers) ? S.sellers : [],
       products: Array.isArray(S.products) ? S.products : [],
@@ -15227,75 +14871,7 @@ async function cloudStatusFixed(){
       batches: Array.isArray(S.batches) ? S.batches : []
     };
   }
-
-  async function readLocalStateFromIDB(){
-    // 按你项目常见命名做多候选探测（命中一个即可）
-    const dbCandidates = [
-      'ops_v642_main',
-      'ops_v6_4_2_main',
-      'ops_rebuild_v6_4_2',
-      'ops_main',
-      'ops_v642',
-      'ops'
-    ];
-    const keyCandidates = [
-      'main_state_v1',
-      'ops_rebuild_v6_4_2_state',
-      'state',
-      'MAIN_STATE'
-    ];
-
-    for(const dbName of dbCandidates){
-      let db;
-      try{
-        db = await openExistingDB(dbName);
-      }catch(e){
-        continue;
-      }
-      try{
-        const stores = Array.from(db.objectStoreNames || []);
-        const storeCandidates = [];
-        if(stores.includes('kv')) storeCandidates.push('kv');
-        if(stores.includes('store')) storeCandidates.push('store');
-        if(stores.includes('state')) storeCandidates.push('state');
-        // 兜底：用第一个 store
-        if(storeCandidates.length === 0 && stores.length > 0) storeCandidates.push(stores[0]);
-
-        for(const stName of storeCandidates){
-          for(const k of keyCandidates){
-            try{
-              const v = await idbGet(db, stName, k);
-              if(v && (v.value || v.sellers || v.orders || v.products || v.batches)){
-                const S = normalizeState(v);
-                try{ db.close(); }catch(e){}
-                return { source:`idb:${dbName}/${stName}/${k}`, state:S };
-              }
-            }catch(e){}
-          }
-        }
-      } finally {
-        try{ db.close(); }catch(e){}
-      }
-    }
-    return null;
-  }
-
-  function readLocalStateFallback(){
-    // 兜底：如果某些版本确实有 window.S 或 localStorage 镜像
-    let S = null;
-    if(window.S && typeof window.S === 'object') S = normalizeState(window.S);
-    if(!S){
-      const raw = localStorage.getItem('ops_rebuild_v6_4_2_state') || localStorage.getItem('main_state_v1') || '';
-      if(raw){
-        try{ S = normalizeState(JSON.parse(raw)); }catch(e){}
-      }
-    }
-    S = S || { sellers:[], products:[], orders:[], batches:[] };
-    return { source:'fallback', state:S };
-  }
-
-  function writeLocalMirror(payload){
-    // 给后续同步/排错一个镜像（可选但强烈建议）
+  function writeMirror(payload){
     try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(payload)); }catch(e){}
     try{
       if(!window.S) window.S = {};
@@ -15306,28 +14882,63 @@ async function cloudStatusFixed(){
     }catch(e){}
   }
 
-  async function getLocalState(){
-    const hit = await readLocalStateFromIDB();
-    if(hit){
-      console.log(TAG, 'local state loaded from', hit.source, {
-        sellers: hit.state.sellers.length,
-        products: hit.state.products.length,
-        orders: hit.state.orders.length,
-        batches: hit.state.batches.length
-      });
-      // 写镜像，便于你后续用 S.orders.length 检查
-      writeLocalMirror(hit.state);
-      return hit;
-    }
-    const fb = readLocalStateFallback();
-    console.log(TAG, 'local state fallback', fb.source, {
-      sellers: fb.state.sellers.length,
-      products: fb.state.products.length,
-      orders: fb.state.orders.length,
-      batches: fb.state.batches.length
+  // ---------- IDB read/write ----------
+  const DB_NAME = 'ops_v642_main';
+  const STORE_NAME = 'kv';
+  const KEY_NAME = 'main_state_v1';
+
+  function openDB(name){
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name);
+      req.onupgradeneeded = () => { /* do nothing */ };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('open_failed'));
     });
-    writeLocalMirror(fb.state);
-    return fb;
+  }
+  function idbGet(db, storeName, key){
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const st = tx.objectStore(storeName);
+      const req = st.get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('get_failed'));
+    });
+  }
+  function idbPutSmart(db, storeName, key, value){
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const st = tx.objectStore(storeName);
+      // 尝试两种写法：
+      // 1) keyPath='key' 的 KV：put({key, value})
+      // 2) 无 keyPath 的 KV：put(value, key)
+      const keyPath = st.keyPath;
+      let req;
+      try{
+        if(keyPath === 'key'){
+          req = st.put({ key, value });
+        }else if(!keyPath || (Array.isArray(keyPath) && keyPath.length===0)){
+          req = st.put(value, key);
+        }else{
+          // 不同结构：尽力写入常见形态
+          req = st.put({ [keyPath]: key, value });
+        }
+      }catch(e){
+        reject(e);
+        return;
+      }
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error || new Error('put_failed'));
+      tx.onerror = () => reject(tx.error || new Error('tx_failed'));
+    });
+  }
+
+  async function readLocalFromIDB(){
+    const db = await openDB(DB_NAME);
+    let rec = await idbGet(db, STORE_NAME, KEY_NAME);
+    try{ db.close(); }catch(e){}
+    if(rec && rec.value && typeof rec.value === 'object') return { source:`idb:${DB_NAME}/${STORE_NAME}/${KEY_NAME}`, state: normalizeState(rec.value) };
+    if(rec && typeof rec === 'object' && (rec.orders || rec.sellers || rec.products || rec.batches)) return { source:`idb:${DB_NAME}/${STORE_NAME}/${KEY_NAME}`, state: normalizeState(rec) };
+    return { source:`idb:${DB_NAME}/${STORE_NAME}/${KEY_NAME}`, state: { sellers:[], products:[], orders:[], batches:[] } };
   }
 
   // ---------- Actions ----------
@@ -15343,43 +14954,25 @@ async function cloudStatusFixed(){
     const pr = Array.isArray(p.products) ? p.products.length : 0;
     const o = Array.isArray(p.orders) ? p.orders.length : 0;
     const b = Array.isArray(p.batches) ? p.batches.length : 0;
-    alert(
-      `云端快照状态（${SNAP_TABLE}）\napp_key=${cfg.app}\n` +
-      `云端：sellers=${s} products=${pr} orders=${o} batches=${b}\n` +
-      `updated_at=${row.updated_at || '(no updated_at)'}`
-    );
+    alert(`云端快照状态（${SNAP_TABLE}）\napp_key=${cfg.app}\n云端：sellers=${s} products=${pr} orders=${o} batches=${b}\nupdated_at=${row.updated_at || '(no updated_at)'}`);
   }
 
   async function snapshotPush(force){
     const cfg = needCfg(pickCfg());
-    const localHit = await getLocalState();
-    const local = localHit.state;
+    const hit = await readLocalFromIDB();
+    const local = hit.state;
+
+    writeMirror(local);
 
     const total = local.sellers.length + local.products.length + local.orders.length + local.batches.length;
     const cloud = await restSelect(cfg);
-
     if(!force && total === 0 && cloud && cloud.payload){
       alert('已阻止推送：本地数据全为空，云端已有数据。若确认要覆盖为空，请点【强制推送】。');
       return;
     }
-
-    const row = {
-      app_key: cfg.app,
-      payload: {
-        sellers: local.sellers,
-        products: local.products,
-        orders: local.orders,
-        batches: local.batches
-      },
-      updated_at: new Date().toISOString()
-    };
-
+    const row = { app_key: cfg.app, payload: local, updated_at: new Date().toISOString() };
     await restUpsert(cfg, row);
-    alert(
-      `推送成功：已写入快照表 ${SNAP_TABLE}\napp_key=${cfg.app}\n` +
-      `来源：${localHit.source}\n` +
-      `本地：sellers=${local.sellers.length} products=${local.products.length} orders=${local.orders.length} batches=${local.batches.length}`
-    );
+    alert(`推送成功：已写入快照表 ${SNAP_TABLE}\napp_key=${cfg.app}\n来源：${hit.source}\n本地：sellers=${local.sellers.length} products=${local.products.length} orders=${local.orders.length} batches=${local.batches.length}`);
   }
 
   async function snapshotPull(){
@@ -15397,23 +14990,31 @@ async function cloudStatusFixed(){
       batches: Array.isArray(p.batches) ? p.batches : []
     };
 
-    // 写回本地镜像（你当前页面内部 IDB 写回逻辑较复杂，这里先保证“可验证”）
-    writeLocalMirror(payload);
+    // 写镜像（可见性）
+    writeMirror(payload);
 
-    alert(
-      `拉取成功：已写回本地镜像（window.S + localStorage）\n` +
-      `sellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n` +
-      `（如列表未刷新，请手动刷新页面）`
-    );
+    // 写回 IDB 权威库
+    try{
+      const db = await openDB(DB_NAME);
+      await idbPutSmart(db, STORE_NAME, KEY_NAME, payload);
+      try{ db.close(); }catch(e){}
+    }catch(e){
+      alert('拉取成功，但写回本地主库失败：' + (e && e.message ? e.message : String(e)));
+      return;
+    }
+
+    // 强制重载，确保 UI 重新从 IDB 读
+    alert(`拉取成功：已写回本地主库（IndexedDB）\n${DB_NAME}/${STORE_NAME}/${KEY_NAME}\n本地：sellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n点击确定后将自动刷新页面。`);
+    setTimeout(() => { try{ location.reload(); }catch(e){} }, 50);
   }
 
-  // 1) 强制覆盖全局入口
+  // Global entry overrides
   window.cloudStatus = snapshotStatus;
   window.cloudPull = snapshotPull;
   window.cloudPush = function(){ return snapshotPush(false); };
   window.cloudPushForce = function(){ return snapshotPush(true); };
 
-  // 2) 捕获阶段接管按钮点击，阻断其它补丁
+  // Capture click takeover
   function matchBtn(t){
     t = (t || '').replace(/\s+/g,'');
     if(!t) return null;
@@ -15423,7 +15024,6 @@ async function cloudStatusFixed(){
     if(t.includes('云端推送')) return 'push';
     return null;
   }
-
   document.addEventListener('click', function(ev){
     const el = ev.target && (ev.target.closest ? ev.target.closest('button,a,input[type="button"]') : ev.target);
     if(!el) return;
@@ -15442,10 +15042,9 @@ async function cloudStatusFixed(){
     if(key==='push') return snapshotPush(false).catch(e=>alert('云端推送失败：'+e.message));
   }, true);
 
-  console.log(TAG, 'installed. table=', SNAP_TABLE);
+  console.log(TAG, 'installed. table=', SNAP_TABLE, 'local=', DB_NAME + '/' + STORE_NAME + '/' + KEY_NAME);
 })();
 </script>
-
 
 </body>
 </html>
