@@ -1559,9 +1559,48 @@ const limit = 1000;
 // --- PATCH: robust main orders pull (paged, merge-only, never clears sellers/products) ---
 
 // --- helper: wait for Supabase client ready (robust across patches) ---
+
+// --- Ensure an actual Supabase client instance exists (not just the SDK global) ---
+async function ensureOpsSupabaseClient(){
+  try{
+    // Return cached client if exists
+    if(window.__ops_sb_client && typeof window.__ops_sb_client.from==='function') return window.__ops_sb_client;
+
+    // Make sure SDK is available
+    if(typeof ensureSupabaseSDK === 'function'){
+      const ok = await ensureSupabaseSDK();
+      if(!ok) {/* continue; we'll still try */}
+    }
+
+    // Resolve SDK global (UMD)
+    const sdk = (window.supabase && window.supabase.createClient) ? window.supabase
+              : (window.SUPABASE && window.SUPABASE.createClient) ? window.SUPABASE
+              : null;
+    if(!sdk) return null;
+
+    // Resolve config
+    const cfg = window.CLOUD_CFG || {};
+    const url  = cfg.url  || cfg.supabaseUrl  || cfg.supabase_url  || cfg.supabaseURL;
+    const anon = cfg.anon || cfg.anonKey      || cfg.supabaseAnonKey || cfg.supabase_anon || cfg.supabaseAnon;
+    if(!url || !anon) return null;
+
+    // Create a lightweight client for admin tool usage (no session persistence needed)
+    const client = sdk.createClient(url, anon, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+
+    window.__ops_sb_client = client;
+    return client;
+  }catch(e){
+    return null;
+  }
+}
+
 async function __waitSupabaseClient(maxMs=30000, intervalMs=300){
   const t0 = Date.now();
   while(Date.now()-t0 < maxMs){
+    try{ if(window.__ops_sb_client && typeof window.__ops_sb_client.from==='function') return window.__ops_sb_client; }catch(e){}
+    try{ const c0 = await ensureOpsSupabaseClient(); if(c0 && typeof c0.from==='function') return c0; }catch(e){}
     try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
     try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
     try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
@@ -1576,6 +1615,8 @@ async function mainOrdersPullV2(opts){
   opts = opts||{};
   // Resolve Supabase client (different builds expose different globals)
   let sb = await (async ()=>{
+    try{ if(window.__ops_sb_client && typeof window.__ops_sb_client.from==='function') return window.__ops_sb_client; }catch(e){}
+    try{ const c0 = await ensureOpsSupabaseClient(); if(c0 && typeof c0.from==='function') return c0; }catch(e){}
     try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
     try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
     try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
