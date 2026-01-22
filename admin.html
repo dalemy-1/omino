@@ -1409,7 +1409,7 @@ function __dedupMainRows(arr){
 
 
 async function __saveLocalMainStateSafe(st){
-  try{ if(typeof saveLocalMainState==='function') return await __saveLocalMainStateSafe(st); }catch(e){}
+  try{ if(typeof saveLocalMainState==='function') return await saveLocalMainState(st); }catch(e){}
   try{ if(typeof window.saveLocalMainState==='function') return await window.saveLocalMainState(st); }catch(e){}
   // Fallback: bind and use existing save() / persist() if present
   try{ window.S = st; window.state = st; }catch(e){}
