@@ -1891,6 +1891,13 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnExport">导出 JSON</button>
       <button class="btn" id="btnImport">导入 JSON</button>
       <button class="btn" id="btnCloudCfg" title="配置 Supabase 云端备份">云端设置</button>
+
+      <span class="tag" id="tagAppKey" title="当前数据集 app_key（用于云端主库分隔存档）" style="cursor:default;">
+        数据集：<span class="mono" id="curAppKey">-</span>
+      </span>
+      <button class="btn" id="btnSwitchDataset" title="切换到已有 app_key（不会删除云端历史）">切换数据集</button>
+      <button class="btn" id="btnNewDataset" title="创建新的 app_key 并切换（会清空本地，云端保留历史）">新建数据集</button>
+
       <button class="btn" id="btnCloudPush" title="把当前数据备份到云端">云端推送</button>
       <button class="btn" id="btnCloudPull" title="从云端恢复并覆盖本地">云端拉取</button>
       <button class="btn" id="btnCloudStatus" title="查看云端快照状态">云端状态</button>
@@ -9978,6 +9985,103 @@ window.addEventListener('resize', ()=>{ try{ applyTopbarOffset(); }catch(e){} })
     }
 
     if(cfgBtn) cfgBtn.onclick = ()=>{ cloudPromptAndSave(); __renderCloudMeta(); };
+
+    // ===== Dataset (app_key) manager: archive-first, never delete cloud =====
+    const curAppKeyEl = document.getElementById("curAppKey");
+    const btnSwitchDataset = document.getElementById("btnSwitchDataset");
+    const btnNewDataset = document.getElementById("btnNewDataset");
+
+    function _getCfgAppKey(){
+      try{
+        const c = getCloudCfg() || {};
+        return String(c.appKey || c.app_key || c.app || "").trim();
+      }catch(_e){ return ""; }
+    }
+    function _setCfgAppKey(newKey){
+      const c = getCloudCfg() || {};
+      const ak = String(newKey||"").trim();
+      c.appKey = ak; c.app_key = ak; c.app = ak;
+      setCloudCfg(c);
+      return ak;
+    }
+    function _updateAppKeyBadge(){
+      if(!curAppKeyEl) return;
+      const ak = _getCfgAppKey();
+      curAppKeyEl.textContent = ak || "-";
+    }
+    async function _switchDatasetTo(ak, opts){
+      opts = opts || {};
+      const cfg = getCloudCfg() || {};
+      const urlOk = cfg && cfg.url && String(cfg.url).trim();
+      const anonOk = cfg && cfg.anon && String(cfg.anon).trim();
+      if(!urlOk || !anonOk){
+        if(typeof toast==="function") toast("请先设置云端（Supabase）再切换数据集");
+        else alert("请先设置云端（Supabase）再切换数据集");
+        return;
+      }
+      const oldAk = _getCfgAppKey();
+      const newAk = _setCfgAppKey(ak);
+      _updateAppKeyBadge();
+
+      // reset incremental pull cursor for both old/new to avoid confusion
+      try{ if(typeof clearOpsOrdersLastPullAt==="function"){ clearOpsOrdersLastPullAt(oldAk); clearOpsOrdersLastPullAt(newAk); } }catch(_e){}
+
+      // Safety: clear local state to avoid pushing old data into a new dataset
+      try{
+        if(typeof toast==="function") toast("已切换数据集，将清空本地数据以避免误推送…");
+      }catch(_e){}
+      try{
+        await (typeof clearMainState==="function" ? clearMainState() : Promise.resolve());
+      }catch(_e){}
+      try{
+        if(typeof blankState==="function") S = blankState();
+        if(typeof save==="function") save();
+        if(window.UI && UI.selected && typeof UI.selected.clear==="function") UI.selected.clear();
+        if(window.UI) UI.page = 1;
+        if(window.Actions){
+          try{ Actions.cancelSellerEdit&&Actions.cancelSellerEdit(); }catch(_e){}
+          try{ Actions.cancelProductEdit&&Actions.cancelProductEdit(); }catch(_e){}
+          try{ Actions.cancelOrderEdit&&Actions.cancelOrderEdit(); }catch(_e){}
+        }
+        if(typeof renderAll==="function") renderAll();
+      }catch(_e){}
+      try{
+        const msg = "数据集已切换为："+newAk+"\n\n说明：\n- 云端历史订单不会删除（存档保留）\n- 本地已清空，请重新导入后再推送到新数据集";
+        if(typeof toast==="function") toast("数据集已切换："+newAk);
+        else alert(msg);
+      }catch(_e){}
+    }
+
+    function _makeNewDatasetKey(){
+      const base = (_getCfgAppKey() || "dalemy").split("|")[0].trim();
+      const d = new Date();
+      const pad = (n)=>String(n).padStart(2,"0");
+      const key = base + "_" + d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+      return key;
+    }
+
+    if(btnSwitchDataset){
+      btnSwitchDataset.onclick = async ()=>{
+        const cur = _getCfgAppKey() || "dalemy";
+        const ak = prompt("请输入要切换到的 app_key（云端存档数据集标识）", cur);
+        if(ak===null) return;
+        const next = String(ak||"").trim();
+        if(!next){ alert("app_key 不能为空"); return; }
+        if(!confirm("确认切换数据集为：\n"+next+"\n\n注意：将清空本地数据，以避免把旧数据误推送到新数据集。\n云端历史数据不会删除（存档保留）。")) return;
+        await _switchDatasetTo(next);
+      };
+    }
+    if(btnNewDataset){
+      btnNewDataset.onclick = async ()=>{
+        const next = _makeNewDatasetKey();
+        if(!confirm("将创建并切换到新的数据集：\n"+next+"\n\n注意：将清空本地数据，以避免把旧数据误推送到新数据集。\n云端历史数据不会删除（存档保留）。\n\n继续？")) return;
+        await _switchDatasetTo(next);
+      };
+    }
+
+    _updateAppKeyBadge();
+    // ===== End dataset manager =====
+
 
     const _doPush = async (force)=>{
       __setCloudMeta({ lastError: null, lastPushAt: new Date() });
