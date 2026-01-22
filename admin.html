@@ -1501,14 +1501,28 @@ const limit = 1000;
 async function mainOrdersPullV2(opts){
   opts = opts||{};
   // Resolve Supabase client (different builds expose different globals)
-  const sb = await (async ()=>{
+  let sb = await (async ()=>{
     try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
     try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
     try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
     try{ if(typeof ensureSupabase==='function'){ const c = await ensureSupabase(); if(c && typeof c.from==='function') return c; } }catch(e){}
     return null;
   })();
-  if(!sb) throw new Error('supabase_client_not_ready');
+  if(!sb){
+    try{
+      // Try to initialize client if available
+      if(typeof ensureSupabase==='function'){ await ensureSupabase(); }
+    }catch(e){}
+    let sb2=null;
+    try{ if(window.supabase && typeof window.supabase.from==='function') sb2=window.supabase; }catch(e){}
+    try{ if(!sb2 && typeof getClient==='function'){ const c=getClient(); if(c && typeof c.from==='function') sb2=c; } }catch(e){}
+    if(!sb2){
+      try{ alert('主表拉取失败：请先完成【云端设置】并点击一次【云端测试/云端状态】确保 Supabase 已连接。\n\n（当前未检测到 Supabase client 实例）'); }catch(e){}
+      return {error:'supabase_client_not_ready'};
+    }
+    sb = sb2;
+  }
+
 
   const LIMIT = 1000;
   const appKey = (window.CLOUD_CFG && CLOUD_CFG.app_key) ? CLOUD_CFG.app_key : (window.S && S.app_key) ? S.app_key : 'dalemy';
