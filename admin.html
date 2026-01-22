@@ -1290,12 +1290,37 @@ async function mainOrdersPush(opts){
     const orders = (state && state.orders) ? state.orders : (S.orders||[]);
     if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return { ok:true, skipped:true }; }
 
-    const rows = [];
+    let rows = [];
     for(const o of orders){
       const row = _mapOrderToMainRow(cfg, o);
       if(row) rows.push(row);
     }
     if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
+
+    // De-duplicate rows by business key to avoid PostgREST 21000
+    // ("ON CONFLICT DO UPDATE command cannot affect row a second time") when a single batch
+    // contains duplicate constrained values.
+    try{
+      const m = new Map();
+      const score = (r)=>(
+        (r.pay_status?1:0) + (r.review_status?1:0) + (r.payout_status?1:0) +
+        (r.review_link?1:0) +
+        (r.pay_screenshot_url?1:0) + (r.review_screenshot_url?1:0) + (r.payout_screenshot_url?1:0) +
+        (r.asin?1:0) + (r.product_name?1:0)
+      );
+      for(const r of rows){
+        const k = String(r.app_key||"") + "|" + String(r.seller_name||"") + "|" + String(r.order_no||"");
+        const ex = m.get(k);
+        if(!ex){ m.set(k,r); continue; }
+        // keep the more complete row; tie-breaker: prefer the later one (r)
+        if(score(r) >= score(ex)) m.set(k,r);
+      }
+      const before = rows.length;
+      rows = Array.from(m.values());
+      const dropped = before - rows.length;
+      if(dropped>0) console.warn(`[MAIN_ORDERS_PUSH] dropped duplicates in payload: ${dropped}`);
+    }catch(e){ console.warn("[MAIN_ORDERS_PUSH] dedupe failed", e); }
+
 
     // IMPORTANT: business unique key
     const onConflict = "app_key,seller_name,order_no";
