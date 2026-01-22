@@ -1500,14 +1500,18 @@ const limit = 1000;
 // --- PATCH: robust main orders pull (paged, merge-only, never clears sellers/products) ---
 async function mainOrdersPullV2(opts){
   opts = opts||{};
-  // Resolve Supabase client (different builds expose different globals)
-  /*resolver_removed*/ await (async ()=>{
-    try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
-    try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
-    try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
-    try{ if(typeof ensureSupabase==='function'){ const c = await ensureSupabase(); if(c && typeof c.from==='function') return c; } }catch(e){}
-    return null;
-  })();
+  // Resolve Supabase client for this build
+  let sb = null;
+  try{ if(typeof ensureSupabaseSDK === 'function'){ await ensureSupabaseSDK(); } }catch(e){}
+  try{
+    if(typeof getCloudClientOrNull === 'function'){
+      const wrap = getCloudClientOrNull({quiet:false});
+      if(wrap && wrap.client && typeof wrap.client.from === 'function') sb = wrap.client;
+    }
+  }catch(e){}
+  try{ if(!sb && window.supabase && typeof window.supabase.from==='function') sb = window.supabase; }catch(e){}
+  try{ if(!sb && typeof getClient==='function'){ const c=getClient(); if(c && typeof c.from==='function') sb=c; } }catch(e){}
+  try{ if(!sb && typeof ensureSupabase==='function'){ const c=await ensureSupabase(); if(c && typeof c.from==='function') sb=c; } }catch(e){}
   if(!sb){
     try{
       // Try to initialize client if available
