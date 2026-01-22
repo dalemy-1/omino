@@ -1369,6 +1369,9 @@ async function mainOrdersPush(opts){
       });
     }
     const rows2 = Array.from(byKey.values());
+    // ensure item_key for DB unique line-item
+    for(const r of rows2){ if(!r.item_key){ const a=(r.asin||'').trim(); const p=(r.product_name||'').trim(); r.item_key = a||p||''; } }
+
 
     // Expose dedupe list for debugging and allow export
     try{ window.__main_dedupe_list = dupList; }catch(e){}
@@ -3209,8 +3212,8 @@ const U = {
     if(m==="JP") return "jpy";
     return "eur"; // DE/FR/IT/ES
   },
-  sellerById(id){ return S.sellers.find(x=>x.id===id) || null; },
-  productById(id){ return S.products.find(x=>x.id===id) || null; },
+  sellerById(id){ return (S.sellers||[]).find(x=>x.id===id) || null; },
+  productById(id){ return (S.products||[]).find(x=>x.id===id) || null; },
   sellerName(id){ return (U.sellerById(id)||{}).name || ""; },
   productName(id){ return (U.productById(id)||{}).name || ""; },
   reviewName(k){ return (REVIEW_TYPES.find(x=>x.k===k)||{}).n || k; },
@@ -4419,7 +4422,7 @@ const Actions = {
     updateSelectionUI();
   },
   editOrder(id){
-    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    const o = (S.orders||[]).find(x=>x.id===id); if(!o) return;
     UI.orderEditId = id;
     $("orderProduct").value = o.productId || "";
     $("orderDate").value = o.date || U.today();
@@ -4536,7 +4539,7 @@ const Actions = {
   },
   // NOTE: 云端订单不可删除。此处将“删除”改为“作废/归档”（仅更新字段）。
   voidOrder(id){
-    const o = S.orders.find(x=>x.id===id);
+    const o = (S.orders||[]).find(x=>x.id===id);
     if(!o) return;
     const ok = confirm('作废后：订单不会删除，只会标记为作废并从默认列表隐藏（可通过筛选查看）。继续？');
     if(!ok) return;
@@ -4559,7 +4562,7 @@ const Actions = {
 
   /* ---- Review ---- */
   openReview(id){
-    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    const o = (S.orders||[]).find(x=>x.id===id); if(!o) return;
     UI.reviewOrderId = id;
     $("rv_order").value = o.orderId;
     const curRvStatus = o.review.status || "PENDING";
@@ -4577,7 +4580,7 @@ const Actions = {
   closeReview(){ $("reviewModal").style.display="none"; UI.reviewOrderId=null; },
   saveReview(){
     const id = UI.reviewOrderId; if(!id) return;
-    const o = S.orders.find(x=>x.id===id); if(!o) return;
+    const o = (S.orders||[]).find(x=>x.id===id); if(!o) return;
     o.review.status = $("rv_status").value;
     o.review.date = $("rv_date").value || "";
     o.review.link = $("rv_link").value || "";
@@ -4603,7 +4606,7 @@ const Actions = {
     if(!confirm("删除批次会回滚订单结算状态，确定？")) return;
 
     (b.lines||[]).forEach(line=>{
-      const o = S.orders.find(x=>x.orderId===line.orderId);
+      const o = (S.orders||[]).find(x=>x.orderId===line.orderId);
       if(!o) return;
       if(b.type==="PRINCIPAL" || b.type==="BOTH"){
         o.principal.settled=false; o.principal.batchId=""; o.principal.amountCny=0; o.principal.fx=0;
@@ -5046,7 +5049,7 @@ function batchMarkReviewDone(){
   if(!ids.length){ $("pasteLinkHint").textContent="未识别到订单号"; return; }
 
   const rows = ids.map(oid=>{
-    const o = S.orders.find(x=>x.orderId===oid);
+    const o = (S.orders||[]).find(x=>x.orderId===oid);
     let st = "未找到";
     if(o){
       st = (o.review && o.review.status==="DONE") ? "已是DONE" : "可标记";
@@ -5071,7 +5074,7 @@ function batchMarkReviewDone(){
       finalRows.forEach(r=>{
         const oid = String(r.orderId||"").trim();
         if(!oid) return;
-        const o = S.orders.find(x=>x.orderId===oid);
+        const o = (S.orders||[]).find(x=>x.orderId===oid);
         if(!o){ missing++; badLines.push("未找到："+oid); return; }
         if(o.review && o.review.status==="DONE"){
           skipped++; dupLines.push(fmt(o)); return;
@@ -5102,12 +5105,12 @@ function openSettle(mode){
   const batchId = `${batchIdPrefix}${U.today().replaceAll("-","")}-${String(Math.floor(Math.random()*900)+100)}`;
 
   // prefill fx from first seller (if single), else zeros
-  const sellerIds = Array.from(new Set(ids.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+  const sellerIds = Array.from(new Set(ids.map(oid=>(S.orders||[]).find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
   if(sellerIds.length>1){
     // 给出具体冲突订单，方便你快速取消勾选
     const groups = {};
     ids.forEach(oid=>{
-      const o = S.orders.find(x=>x.orderId===oid);
+      const o = (S.orders||[]).find(x=>x.orderId===oid);
       const sid = o?.sellerId || '';
       if(!groups[sid]) groups[sid] = [];
       groups[sid].push(oid);
@@ -5184,7 +5187,7 @@ function renderSettleRows(){
   const productById = new Map((S.products||[]).map(p=>[p.id,p]));
 
   const rows = UI.settle.orderIds.map(oid=>{
-    const o = S.orders.find(x=>x.orderId===oid);
+    const o = (S.orders||[]).find(x=>x.orderId===oid);
     if(!o) return "";
     const p = productById.get(o.productId);
     const pName = (p && p.name) ? p.name : (o.productName || o.product || "-");
@@ -5255,7 +5258,7 @@ function applySettleAmountEditsToOrders(showMsg=true){
   let changedAmt = 0, changedDisc = 0, changedBC = 0;
 
   UI.settle.orderIds.forEach(oid=>{
-    const o = S.orders.find(x=>x.orderId===oid);
+    const o = (S.orders||[]).find(x=>x.orderId===oid);
     if(!o) return;
     const ed = UI.settle.edits?.[oid];
     if(!ed) return;
@@ -5323,14 +5326,14 @@ function buildCurrentBatchObject(applyToOrders){
     jpy: U.num($("fx_jpy").value),
   };
 
-  const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+  const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>(S.orders||[]).find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
   const sellerLabel = sellerIds.length===1 ? U.sellerName(sellerIds[0]) : "（多卖家）";
 
   const lines = [];
   let total = 0;
 
   UI.settle.orderIds.forEach(oid=>{
-    const o = S.orders.find(x=>x.orderId===oid);
+    const o = (S.orders||[]).find(x=>x.orderId===oid);
     if(!o) return;
 
     const fxUsed = effectiveFx(o, fx);
@@ -5822,7 +5825,7 @@ function renderSettleCommBar(){
   if(!el) return;
   const sums = {};
   UI.settle.orderIds.forEach(orderId=>{
-    const o = S.orders.find(x=>x.orderId===orderId);
+    const o = (S.orders||[]).find(x=>x.orderId===orderId);
     if(!o) return;
     const k = __reviewTypeFromAny(o.reviewType);
     const cShould = commFromSettleMap(o);
@@ -8671,7 +8674,7 @@ const SettleDrafts = (()=> {
   async function saveCurrentSettleAsDraft(){
     if(!UI.settle){ alert("请先打开结算窗口，再保存草稿。"); return; }
     // enforce single seller already (openSettle does) but draft could be saved after
-    const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>S.orders.find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
+    const sellerIds = Array.from(new Set(UI.settle.orderIds.map(oid=>(S.orders||[]).find(o=>o.orderId===oid)?.sellerId).filter(Boolean)));
     if(sellerIds.length>1){ alert("不同卖家的订单不能保存为同一份收款草稿。"); return; }
     const sellerId = sellerIds[0] || "";
     const seller = sellerId ? U.sellerById(sellerId) : null;
