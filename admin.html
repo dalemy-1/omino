@@ -1241,15 +1241,23 @@ async function restUpsertMerge(cfg, table, onConflict, rows){
 
   // --- helper: build business key
   const norm = (v)=> (v==null?'':String(v)).trim();
+  const itemKeyOf = (o)=>{
+    const asin = norm(o.asin || o.ASIN || '');
+    const prod = norm(o.product_name || o.product || o.name || '');
+    const raw = norm(o.item_key || o.itemKey || '');
+    if(raw) return raw;
+    if(asin) return 'ASIN:' + asin;
+    if(prod) return 'PROD:' + prod;
+    return 'NOITEM';
+  };
   const kOf = (o)=>{
     const app = norm(o.app_key || cfg.app_key || cfg.app || 'app');
     const seller = norm(o.seller_name || o.seller || '');
     const order = norm(o.order_no || o.orderNo || o.order || '');
-    const asin = norm(o.asin || o.ASIN || '');
-    const prod = norm(o.product_name || o.product || o.name || '');
-    // 允许：同单号同卖家不同ASIN / 不同产品
-    // 判重：同单号同卖家同ASIN同产品
-    return [app, seller, order, asin, prod].join('|');
+    const itemKey = itemKeyOf(o);
+    // 允许：同单号同卖家不同ASIN/不同产品
+    // 判重：同单号同卖家同 itemKey（itemKey=ASIN优先，否则用产品名兜底）
+    return [app, seller, order, itemKey].join('|');
   };
 
   // --- 1) local de-dup (keep first)
@@ -1280,7 +1288,7 @@ async function restUpsertMerge(cfg, table, onConflict, rows){
   }catch(_e){ /* ignore */ }
 
   // --- 3) load existing keys from cloud (paged)
-  const wantCols = ['app_key','seller_name','order_no','asin','product_name'].filter(Boolean);
+  const wantCols = ['app_key','seller_name','order_no','item_key','asin','product_name'].filter(Boolean);
   const existing = new Set();
   let offset = 0;
   const page = 1000;
@@ -1310,6 +1318,7 @@ async function restUpsertMerge(cfg, table, onConflict, rows){
     if(existing.has(k)){
       skippedKeys.push(k);
     }else{
+      if(o && o.item_key==null) o.item_key = itemKeyOf(o);
       toInsertRaw.push(o);
     }
   }
@@ -1320,8 +1329,9 @@ async function restUpsertMerge(cfg, table, onConflict, rows){
     for(const [kk,vv] of Object.entries(o)){
       if(colSet.has(kk)) out[kk]=vv;
     }
+    if(colSet.has('item_key') && out.item_key==null){ out.item_key = itemKeyOf(o); }
     // always include key fields if present in cloud
-    for(const kk of ['app_key','seller_name','order_no','asin','product_name']){
+    for(const kk of ['app_key','seller_name','order_no','item_key','asin','product_name']){
       if(colSet.has(kk) && o[kk]!=null) out[kk]=o[kk];
     }
     return out;
@@ -1332,10 +1342,10 @@ async function restUpsertMerge(cfg, table, onConflict, rows){
   const chunk = 500;
   for(let i=0;i<toInsert.length;i+=chunk){
     const part = toInsert.slice(i, i+chunk);
-    const u = `${base}/rest/v1/${table}`;
+    const u = `${base}/rest/v1/${table}?on_conflict=${encodeURIComponent('app_key,seller_name,order_no,item_key')}`;
     const rr = await fetch(u, {
       method:'POST',
-      headers: { ...restHeaders(cfg.anon), 'Prefer':'return=minimal' },
+      headers: { ...restHeaders(cfg.anon), 'Prefer':'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(part)
     });
     if(!rr.ok){
@@ -1363,7 +1373,7 @@ async function restPatchOne(cfg, table, whereQuery, patchBody){
   const url = `${base}/rest/v1/${table}?${whereQuery}`;
   const r = await fetch(url, {
     method:'PATCH',
-    headers: { ...restHeaders(cfg.anon), 'Prefer': 'return=minimal' },
+    headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
     body: JSON.stringify(patchBody)
   });
   const text = await r.text();
