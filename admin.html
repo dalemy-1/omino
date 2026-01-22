@@ -1293,18 +1293,47 @@ async function mainOrdersPush(opts){
     }
     if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
 
+    // DEDUPE: Postgres upsert cannot accept duplicate conflict keys within the same request.
+    // We dedupe by business key (app_key + seller_name + order_no) and keep the "best" row.
+    const _keyOf = (r)=> `${r.app_key||""}||${(r.seller_name||"").trim()}||${(r.order_no||"").trim()}`;
+    const _score = (r)=>{
+      let s=0;
+      for(const k of Object.keys(r)){
+        const v=r[k];
+        if(v!==null && v!==undefined && String(v).trim()!=="") s+=1;
+      }
+      return s;
+    };
+    const byKey = new Map();
+    let dropped = 0;
+    for(const r of rows){
+      const k = _keyOf(r);
+      const prev = byKey.get(k);
+      if(!prev){ byKey.set(k, r); continue; }
+      // Prefer newer updated_at, else prefer higher completeness score.
+      const pa = prev.updated_at ? Date.parse(prev.updated_at) : NaN;
+      const ra = r.updated_at ? Date.parse(r.updated_at) : NaN;
+      if(!Number.isNaN(ra) && (Number.isNaN(pa) || ra>pa)){ byKey.set(k, r); dropped++; continue; }
+      if(_score(r) > _score(prev)){ byKey.set(k, r); dropped++; continue; }
+      dropped++;
+    }
+    const rows2 = Array.from(byKey.values());
+    if(!rows2.length){ showNotice("主表推送（订单）","去重后无可推送订单，已跳过。"); return { ok:true, skipped:true }; }
+
+
+
     // IMPORTANT: business unique key
     const onConflict = "app_key,seller_name,order_no";
 
     const batch = 500;
     let sent = 0;
-    for(let i=0;i<rows.length;i+=batch){
-      const chunk = rows.slice(i, i+batch);
+    for(let i=0;i<rows2.length;i+=batch){
+      const chunk = rows2.slice(i, i+batch);
       await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
       sent += chunk.length;
     }
 
-    showNotice("主表推送（订单）", `推送完成：尝试写入=${sent}（按业务键合并，不会产生重复）`);
+    showNotice("主表推送（订单）", `推送完成：尝试写入=${sent}（按业务键合并，不会产生重复）${dropped?`；本地去重丢弃=${dropped}`:""}`);
     return { ok:true, sent };
   }catch(e){
     const msg = (e && e.message ? e.message : String(e));
