@@ -1290,37 +1290,12 @@ async function mainOrdersPush(opts){
     const orders = (state && state.orders) ? state.orders : (S.orders||[]);
     if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return { ok:true, skipped:true }; }
 
-    let rows = [];
+    const rows = [];
     for(const o of orders){
       const row = _mapOrderToMainRow(cfg, o);
       if(row) rows.push(row);
     }
     if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
-
-    // De-duplicate rows by business key to avoid PostgREST 21000
-    // ("ON CONFLICT DO UPDATE command cannot affect row a second time") when a single batch
-    // contains duplicate constrained values.
-    try{
-      const m = new Map();
-      const score = (r)=>(
-        (r.pay_status?1:0) + (r.review_status?1:0) + (r.payout_status?1:0) +
-        (r.review_link?1:0) +
-        (r.pay_screenshot_url?1:0) + (r.review_screenshot_url?1:0) + (r.payout_screenshot_url?1:0) +
-        (r.asin?1:0) + (r.product_name?1:0)
-      );
-      for(const r of rows){
-        const k = String(r.app_key||"") + "|" + String(r.seller_name||"") + "|" + String(r.order_no||"");
-        const ex = m.get(k);
-        if(!ex){ m.set(k,r); continue; }
-        // keep the more complete row; tie-breaker: prefer the later one (r)
-        if(score(r) >= score(ex)) m.set(k,r);
-      }
-      const before = rows.length;
-      rows = Array.from(m.values());
-      const dropped = before - rows.length;
-      if(dropped>0) console.warn(`[MAIN_ORDERS_PUSH] dropped duplicates in payload: ${dropped}`);
-    }catch(e){ console.warn("[MAIN_ORDERS_PUSH] dedupe failed", e); }
-
 
     // IMPORTANT: business unique key
     const onConflict = "app_key,seller_name,order_no";
@@ -1340,6 +1315,17 @@ async function mainOrdersPush(opts){
     if(!__silent) alert("主表推送失败：\n" + msg);
     return { ok:false, error: msg };
   }
+}
+
+
+async function __saveLocalMainStateSafe(st){
+  try{ if(typeof saveLocalMainState==='function') return await __saveLocalMainStateSafe(st); }catch(e){}
+  try{ if(typeof window.saveLocalMainState==='function') return await window.saveLocalMainState(st); }catch(e){}
+  // Fallback: bind and use existing save() / persist() if present
+  try{ window.S = st; window.state = st; }catch(e){}
+  try{ if(typeof save==='function'){ save(); return true; } }catch(e){}
+  try{ if(typeof persist==='function'){ persist(); return true; } }catch(e){}
+  return false;
 }
 
 async function mainOrdersPull(opts){
@@ -1442,7 +1428,7 @@ const limit = 1000;
         }
       }
 
-      await saveLocalMainState(st);
+      await saveLocalState(st, "main_orders_pull");
       S = st;
       render();
 
@@ -12770,6 +12756,7 @@ async function cloudStatusFixed(){
         // also assign bare globals if they exist in this single-file scope
         try{ state = st; }catch(_e){}
         try{ S = st; }catch(_e){}
+      try{ window.saveLocalMainState = saveLocalMainState; }catch(_e){}
       }catch(e){}
 
       // persist first, then render
@@ -14292,6 +14279,7 @@ async function cloudStatusFixed(){
     try{
       window.S = st; window.state = st;
       try{ S = st; }catch(_e){}
+      try{ window.saveLocalMainState = saveLocalMainState; }catch(_e){}
       try{ state = st; }catch(_e){}
     }catch(e){}
   }
@@ -14596,7 +14584,7 @@ async function cloudStatusFixed(){
     next.orders = ordersLocal;
     next._cloud_meta = { pulled_at: _now(), app_key: appKey, v: V77 };
 
-    await saveLocalMainState(next);
+    await __saveLocalMainStateSafe(next);
 
     try{ if(typeof window.render === "function") window.render(); }catch(e){}
     _alert("云端拉取完成（三表主库）\nV7.7="+V77+"\napp_key="+appKey+"\n卖家="+sellersLocal.length+" 产品="+productsLocal.length+" 订单="+ordersLocal.length+"\n已写入 IndexedDB 作为本地缓存。");
