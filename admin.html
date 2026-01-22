@@ -1199,15 +1199,45 @@ async function restInsertIgnore(cfg, table, onConflict, rows){
 async function restUpsertMerge(cfg, table, onConflict, rows){
   const base = cfg.url.replace(/\/+$/,'');
   const url = `${base}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`;
-  const r = await fetch(url, {
-    method:'POST',
-    headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-    body: JSON.stringify(rows)
-  });
-  const text = await r.text();
-  if(!r.ok) throw new Error(`rest_upsert_merge_failed ${r.status} ${text.slice(0,200)}`);
-  return { ok:true };
+
+  // Retry on transient failures (e.g. statement timeout 57014) with exponential backoff.
+  const maxTry = 4;
+  let lastText = "";
+  for(let attempt=1; attempt<=maxTry; attempt++){
+    const r = await fetch(url, {
+      method:'POST',
+      headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows)
+    });
+    const text = await r.text();
+    lastText = text;
+
+    if(r.ok) return { ok:true };
+
+    let shouldRetry = false;
+    try{
+      const j = JSON.parse(text);
+      if(j && (j.code === "57014" || /statement timeout/i.test(j.message||""))){
+        shouldRetry = true;
+      }
+    }catch(_e){
+      if(/statement timeout/i.test(text)) shouldRetry = true;
+    }
+    if([408, 429, 500, 502, 503, 504].includes(r.status) && /statement timeout|timeout|temporarily|rate/i.test(text||"")){
+      shouldRetry = true;
+    }
+
+    if(!shouldRetry || attempt===maxTry){
+      throw new Error(`rest_upsert_merge_failed ${r.status} ${String(text).slice(0,200)}`);
+    }
+
+    const backoff = Math.min(8000, 700 * Math.pow(2, attempt-1));
+    console.warn(`[REST_UPSERT] retry ${attempt}/${maxTry} after ${backoff}ms`, { status:r.status, text: String(text).slice(0,120) });
+    await new Promise(res=>setTimeout(res, backoff));
+  }
+  throw new Error(`rest_upsert_merge_failed unknown ${String(lastText).slice(0,200)}`);
 }
+
 
 
 async function restPatchOne(cfg, table, whereQuery, patchBody){
@@ -1358,12 +1388,14 @@ function __dedupMainRows(arr){
     const rows2 = __dedupMainRows(rows);
 
 
-    const batch = 500;
+    const batch = 120; // smaller batches reduce statement timeout risk
     let sent = 0;
     for(let i=0;i<rows2.length;i+=batch){
       const chunk = rows2.slice(i, i+batch);
       await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
       sent += chunk.length;
+      // small pacing to reduce server-side statement timeout on large datasets
+      await new Promise(r=>setTimeout(r, 120));
     }
 
     showNotice("主表推送（订单）", `推送完成：尝试写入=${sent}（按业务键合并，不会产生重复）`);
@@ -1771,8 +1803,7 @@ function startAutoPullMain(){
   }catch(e){}
 }
 
-// Hook into canonical snapshot writes + idbSet(main_state_v1)
- + idbSet(main_state_v1)
+// Hook into canonical snapshot writes 
 (function(){
   try{
     const __origWrite = (typeof _writeCanonicalSnapshot === "function") ? _writeCanonicalSnapshot : null;
