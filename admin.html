@@ -1227,16 +1227,134 @@ async function restInsertIgnore(cfg, table, onConflict, rows){
 
 
 async function restUpsertMerge(cfg, table, onConflict, rows){
+  // NOTE: Supabase PostgREST upsert requires a UNIQUE/EXCLUSION constraint matching `on_conflict`.
+  // In many of your environments the cloud table does NOT yet have that constraint, which causes:
+  //  - 42P10: there is no unique or exclusion constraint matching the ON CONFLICT specification
+  // Therefore we implement a safe "insert-if-not-exists" strategy:
+  // 1) pull existing keys from cloud
+  // 2) local 去重（允许：同卖家+同单号+不同ASIN/产品；禁止：同卖家+同单号+同ASIN+同产品）
+  // 3) 仅插入云端不存在的记录（不更新已有记录）
   const base = cfg.url.replace(/\/+$/,'');
-  const url = `${base}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`;
-  const r = await fetch(url, {
-    method:'POST',
-    headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-    body: JSON.stringify(rows)
-  });
-  const text = await r.text();
-  if(!r.ok) throw new Error(`rest_upsert_merge_failed ${r.status} ${text.slice(0,200)}`);
-  return { ok:true };
+  if(!Array.isArray(rows) || rows.length===0){
+    return { inserted:0, skipped:0, skippedKeys:[], note:'no_rows' };
+  }
+
+  // --- helper: build business key
+  const norm = (v)=> (v==null?'':String(v)).trim();
+  const kOf = (o)=>{
+    const app = norm(o.app_key || cfg.app_key || cfg.app || 'app');
+    const seller = norm(o.seller_name || o.seller || '');
+    const order = norm(o.order_no || o.orderNo || o.order || '');
+    const asin = norm(o.asin || o.ASIN || '');
+    const prod = norm(o.product_name || o.product || o.name || '');
+    // 允许：同单号同卖家不同ASIN / 不同产品
+    // 判重：同单号同卖家同ASIN同产品
+    return [app, seller, order, asin, prod].join('|');
+  };
+
+  // --- 1) local de-dup (keep first)
+  const seenLocal = new Set();
+  const rowsUniq = [];
+  const localDupKeys = [];
+  for(const o of rows){
+    const k = kOf(o);
+    if(seenLocal.has(k)){
+      localDupKeys.push(k);
+      continue;
+    }
+    seenLocal.add(k);
+    rowsUniq.push(o);
+  }
+
+  // --- 2) discover columns by sampling one row from cloud (to avoid "unknown column" on insert)
+  let colSet = null;
+  try{
+    const u = `${base}/rest/v1/${table}?select=*&limit=1`;
+    const rr = await fetch(u, { headers: { ...restHeaders(cfg.anon) } });
+    if(rr.ok){
+      const js = await rr.json();
+      if(Array.isArray(js) && js[0] && typeof js[0]==='object'){
+        colSet = new Set(Object.keys(js[0]));
+      }
+    }
+  }catch(_e){ /* ignore */ }
+
+  // --- 3) load existing keys from cloud (paged)
+  const wantCols = ['app_key','seller_name','order_no','asin','product_name'].filter(Boolean);
+  const existing = new Set();
+  let offset = 0;
+  const page = 1000;
+  while(true){
+    const sel = encodeURIComponent(wantCols.join(','));
+    const url = `${base}/rest/v1/${table}?select=${sel}&limit=${page}&offset=${offset}`;
+    const r = await fetch(url, { headers: { ...restHeaders(cfg.anon) } });
+    if(!r.ok){
+      // If cloud schema differs (missing product_name/asin), degrade gracefully by stopping key-scan.
+      break;
+    }
+    const arr = await r.json();
+    if(!Array.isArray(arr) || arr.length===0) break;
+    for(const it of arr){
+      existing.add(kOf(it));
+    }
+    if(arr.length < page) break;
+    offset += page;
+    if(offset > 500000) break; // safety cap
+  }
+
+  // --- 4) filter rows not yet in cloud
+  const toInsertRaw = [];
+  const skippedKeys = [];
+  for(const o of rowsUniq){
+    const k = kOf(o);
+    if(existing.has(k)){
+      skippedKeys.push(k);
+    }else{
+      toInsertRaw.push(o);
+    }
+  }
+
+  // --- 5) project to cloud columns if we discovered them
+  const toInsert = (colSet ? toInsertRaw.map(o=>{
+    const out = {};
+    for(const [kk,vv] of Object.entries(o)){
+      if(colSet.has(kk)) out[kk]=vv;
+    }
+    // always include key fields if present in cloud
+    for(const kk of ['app_key','seller_name','order_no','asin','product_name']){
+      if(colSet.has(kk) && o[kk]!=null) out[kk]=o[kk];
+    }
+    return out;
+  }) : toInsertRaw);
+
+  // --- 6) insert in chunks
+  let inserted = 0;
+  const chunk = 500;
+  for(let i=0;i<toInsert.length;i+=chunk){
+    const part = toInsert.slice(i, i+chunk);
+    const u = `${base}/rest/v1/${table}`;
+    const rr = await fetch(u, {
+      method:'POST',
+      headers: { ...restHeaders(cfg.anon), 'Prefer':'return=minimal' },
+      body: JSON.stringify(part)
+    });
+    if(!rr.ok){
+      const t = await rr.text().catch(()=> '');
+      const e = new Error('rest_insert_failed');
+      e.details = t;
+      e.status = rr.status;
+      throw e;
+    }
+    inserted += part.length;
+  }
+
+  return {
+    inserted,
+    skipped: skippedKeys.length,
+    skippedKeys,
+    localDedupDropped: localDupKeys.length,
+    note: colSet ? 'insert_ignore_existing_with_column_projection' : 'insert_ignore_existing'
+  };
 }
 
 
@@ -1353,7 +1471,7 @@ async function mainOrdersPush(opts){
 
     // DEDUPE: Postgres upsert cannot accept duplicate conflict keys within the same request.
     // We dedupe by business key (app_key + seller_name + order_no + item_key) and keep the "best" row.
-    const _keyOf = (r)=> ([__normStr(r.app_key), __normStr(r.seller_name), __normStr(r.order_no), __normStr(r.item_key)].join('||'));
+    const _keyOf = (r)=> ([__normStr(r.app_key), __normStr(r.seller_name), __normStr(r.order_no), __normStr(r.asin||''), __normStr(r.product_name||r.product||r.name||'')].join('||'));
     const _score = (r)=>{
       let s=0;
       for(const k of Object.keys(r)){
@@ -1391,6 +1509,9 @@ async function mainOrdersPush(opts){
         app_key: (drop.app_key||""),
         seller_name: (drop.seller_name||""),
         order_no: (drop.order_no||""),
+        asin: (drop.asin||""),
+        product_name: (drop.product_name||drop.product||drop.name||""),
+        reason: "local_duplicate",
         drop_reason: why,
         kept_updated_at: (keep.updated_at||""),
         dropped_updated_at: (drop.updated_at||"")
@@ -1407,7 +1528,7 @@ async function mainOrdersPush(opts){
       window.downloadMainDedupeCsv = function(){
         const ts = new Date().toISOString().replace(/[:.]/g,'-');
         __downloadCsv(`main_orders_dedupe_${ts}.csv`, (window.__main_dedupe_list||[]),
-          ["app_key","seller_name","order_no","drop_reason","kept_updated_at","dropped_updated_at"]);
+          ["app_key","seller_name","order_no","asin","product_name","reason","drop_reason","kept_updated_at","dropped_updated_at"]);
       };
     }catch(e){}
     if(!rows2.length){ showNotice("主表推送（订单）","去重后无可推送订单，已跳过。"); return { ok:true, skipped:true }; }
@@ -1415,19 +1536,37 @@ async function mainOrdersPush(opts){
 
 
     // IMPORTANT: business unique key
-    const onConflict = "app_key,seller_name,order_no";
+    const onConflict = "app_key,seller_name,order_no,asin,product_name";
 
     const batch = 500;
-    let sent = 0;
+    let attempted = 0;
+    let inserted = 0;
+    let skippedCloud = 0;
+    const skippedKeysAll = [];
     for(let i=0;i<rows2.length;i+=batch){
       const chunk = rows2.slice(i, i+batch);
-      await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
-      sent += chunk.length;
+      const r = await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
+      attempted += chunk.length;
+      if(r && typeof r.inserted==='number') inserted += r.inserted;
+      if(r && typeof r.skipped==='number') skippedCloud += r.skipped;
+      if(r && Array.isArray(r.skippedKeys) && r.skippedKeys.length){
+        // avoid过大内存：最多保留 20000 条 key（足够定位问题）
+        for(const k of r.skippedKeys){
+          skippedKeysAll.push(k);
+          if(skippedKeysAll.length>=20000) break;
+        }
+      }
     }
 
-    showNotice("主表推送（订单）", `推送完成：尝试写入=${sent}（按业务键合并，不会产生重复）${dropped?`；本地去重丢弃=${dropped}`:""}${dropped?`；已导出去重清单CSV（含订单号，可搜索）`:""}`);
+    // 合并：本地去重丢弃（local dup） + 云端已存在（cloud exists）
+    const cloudDups = skippedKeysAll.map(k=>{
+      const [app_key,seller_name,order_no,asin,product_name] = String(k).split('|');
+      return {app_key,seller_name,order_no,asin,product_name, reason:'cloud_exists'};
+    });
+    window.__main_dedupe_list = (window.__main_dedupe_list||[]).concat(cloudDups);
+showNotice("主表推送（订单）", `推送完成：本地待推送=${attempted}；实际新增写入=${inserted}；云端已存在跳过=${skippedCloud}${dropped?`；本地重复丢弃=${dropped}`:""}${(dropped||skippedCloud)?`；已导出去重清单CSV（含订单号/卖家/ASIN/产品，可搜索）`:""}`);
     if(dropped){ try{ window.downloadMainDedupeCsv && window.downloadMainDedupeCsv(); }catch(e){} }
-return { ok:true, sent };
+return { ok:true, attempted, inserted, skippedCloud, dropped };
   }catch(e){
     const msg = (e && e.message ? e.message : String(e));
     if(!__silent) alert("主表推送失败：\n" + msg);
