@@ -417,10 +417,9 @@ function __safeRenderAfterMainPull(){
   try{ if(typeof window.renderAll==='function'){ window.renderAll(); return; } }catch(e){}
   try{ if(typeof render==='function'){ render(); return; } }catch(e){}
   try{ if(typeof window.render==='function'){ window.render(); return; } }catch(e){}
-  try{ if(typeof setTab==='function'){ const t=(window.__tab||'orders'); setTab(t); return; } }catch(e){}
 }
-try{ window.__safeRenderAfterMainPull = __safeRenderAfterMainPull; }catch(e){}
 // --- end patch ---
+
 </script>
 <script>
 /* ===================== Cloud Backup (方案A) ===================== */
@@ -1650,9 +1649,7 @@ async function mainOrdersPullV2(opts){
         window.S = __before;
       }
     }catch(e){}
-    try{ alert('主表拉取保护：检测到合并结果为 0（可能是 app_key 不匹配/拉取条件错误）。已回滚本地数据，未执行清空。
-
-请检查：云端设置中的 app_key 是否为 dalemy，并重试。'); }catch(e){}
+    try{ alert('主表拉取保护：检测到合并结果为 0（可能是 app_key 不匹配/拉取条件错误）。已回滚本地数据，未执行清空。\n\n请检查：云端设置中的 app_key 是否为 dalemy，并重试。'); }catch(e){}
     return {error:'merge_would_wipe_local'};
   }
   base.orders = __newOrders;
