@@ -1442,7 +1442,7 @@ const limit = 1000;
         }
       }
 
-      await saveLocalState(st, "main_orders_pull");
+      await saveLocalMainState(st);
       S = st;
       render();
 
