@@ -1164,6 +1164,14 @@ window.addEventListener("load", ()=>{
 
 </head>
 <body>
+
+<script>
+/* [B1-B4_LOCK] Lock to SNAPSHOT REST only (disable table-mode & old delta auto-push) */
+window.__DISABLE_TABLE_SYNC__ = true;
+window.__DISABLE_ORDERS_MASTER_SYNC__ = true;
+window.__AUTO_PUSH_DISABLED = true; // disable legacy orders-delta auto push
+</script>
+
 <script>
 // DOM helpers (no jQuery)
 window.$ = window.$ || function(sel, root){ return (root||document).querySelector(sel); };
@@ -13112,6 +13120,7 @@ async function cloudStatusFixed(){
    - Writes to IndexedDB ops_v642_main/kv/main_state_v1 via saveNow()
 ================================================================================== */
 (function(){
+  try{ if(window.__DISABLE_ORDERS_MASTER_SYNC__){ console.warn('[ORDERS_MASTER_SYNC_V2] disabled'); return; } }catch(_e){}
   function ui(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg);}catch(e){ try{alert(msg);}catch(_){ } } }
   function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
 
@@ -14336,11 +14345,44 @@ async function cloudStatusFixed(){
       };
 
       var row = buildRow(cfg.app_key, snap);
+      var localHash = String(row.hash||"");
+      // diff: no changes -> skip
+      try{
+        var lastPushHash = localStorage.getItem(LS_LAST_PUSH_HASH) || "";
+        if(!opts.force && localHash && lastPushHash && localHash === lastPushHash){
+          alertMsg("无需推送：本地数据未变化（hash="+localHash+"）。");
+          return;
+        }
+      }catch(_e){}
+      // conflict protection: cloud changed since last pull
+      try{
+        if(!opts.force){
+          var head = await restHeadMeta(cfg);
+          var lastPullHash = localStorage.getItem(LS_LAST_PULL_HASH) || "";
+          var lastPullAt = localStorage.getItem(LS_LAST_PULL_AT) || "";
+          if(head && head.hash && lastPullHash && head.hash !== lastPullHash){
+            // if cloud newer than our last pull, block
+            if(!lastPullAt || (head.updated_at && new Date(head.updated_at).getTime() > new Date(lastPullAt).getTime())){
+              alertMsg("已阻止推送：云端存在更新且你尚未拉取。
+
+云端hash="+head.hash+"
+本地上次拉取hash="+lastPullHash+"
+
+请先点“云端拉取”同步后再推送；如确认要覆盖云端，请点“强制推送”。");
+              return;
+            }
+          }
+        }
+      }catch(e){ log("conflict check skipped", e); }
       var url = base + "/rest/v1/ops_cloud_snapshots_v1?on_conflict=app_key";
       log("push start", {src:snap.src, sellers:sellers, products:products, orders:orders, batches:batches});
       try{
         var data = await restFetch(url, { method:"POST", headers: headers, body: JSON.stringify([row]) });
-        alertMsg("云端推送成功。\n卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"\n来源="+snap.src);
+        alertMsg("云端推送成功。
+卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"
+来源="+snap.src+"
+hash="+(row.hash||""));
+        try{ localStorage.setItem(LS_LAST_PUSH_HASH, String(row.hash||"")); localStorage.setItem(LS_LAST_PUSH_AT, new Date().toISOString()); }catch(_e){}
         log("push ok", data);
       }catch(e){
         alertMsg("云端推送失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14397,7 +14439,11 @@ async function cloudStatusFixed(){
         var orders = Array.isArray(payload.orders)? payload.orders.length : 0;
         var batches = Array.isArray(payload.batches)? payload.batches.length : 0;
 
-        alertMsg("云端拉取成功。\n卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"\nupdated_at="+(r0.updated_at||""));
+        alertMsg("云端拉取成功。
+卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"
+updated_at="+(r0.updated_at||"")+"
+hash="+(r0.hash||""));
+        try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.setItem(LS_LAST_PULL_AT, String(r0.updated_at||new Date().toISOString())); }catch(_e){}
         log("pull ok", {sellers:sellers, products:products, orders:orders, batches:batches, updated_at:r0.updated_at});
       }catch(e){
         alertMsg("云端拉取失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14485,6 +14531,11 @@ async function cloudStatusFixed(){
   const TABLE = "ops_cloud_snapshots_v1";
   const LS_STATE_KEY = "ops_rebuild_v6_4_2_state";
   const IDB_KEY = "main_state_v1";
+  const LS_LAST_PUSH_HASH = "OPS_SNAP_LAST_PUSH_HASH_V1";
+  const LS_LAST_PUSH_AT = "OPS_SNAP_LAST_PUSH_AT_V1";
+  const LS_LAST_PULL_HASH = "OPS_SNAP_LAST_PULL_HASH_V1";
+  const LS_LAST_PULL_AT = "OPS_SNAP_LAST_PULL_AT_V1";
+  const LS_AUTOPUSH = "OPS_SNAP_AUTOPUSH_V1";
 
   function log(){ try{ console.log.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
   function warn(){ try{ console.warn.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
@@ -14538,6 +14589,38 @@ async function cloudStatusFixed(){
       "Prefer": "resolution=merge-duplicates,return=representation"
     };
   }
+  }
+
+
+  function getAutoPushEnabled(){
+    try{
+      const v = localStorage.getItem(LS_AUTOPUSH);
+      if(v===null || v===undefined || v==='') return true; // default ON
+      return v === '1' || v === 'true';
+    }catch(_e){}
+    return true;
+  }
+  function setAutoPushEnabled(on){
+    try{ localStorage.setItem(LS_AUTOPUSH, on ? '1':'0'); }catch(_e){}
+    try{
+      if(window.UI) window.UI.autoPush = !!on;
+    }catch(_e){}
+    try{
+      const b = document.getElementById('btnAutoPushToggle');
+      if(b) b.textContent = '自动推送：' + (on?'开':'关');
+    }catch(_e){}
+  }
+
+  async function restHeadMeta(cfg){
+    const base = restUrl(cfg.url, 'rest/v1/'+TABLE);
+    const u = base + '?select=app_key,updated_at,hash&app_key=eq.' + encodeURIComponent(cfg.app_key) + '&order=updated_at.desc&limit=1';
+    const r = await fetch(u, { method:'GET', headers: hdr(cfg.anon) });
+    const t = await r.text();
+    if(!r.ok) throw new Error('head_meta_failed '+r.status+': '+t);
+    const arr = JSON.parse(t||'[]');
+    return (arr && arr[0]) ? arr[0] : null;
+  }
+
 
   async function restSelect(cfg){
     const u = restUrl(cfg.url, "rest/v1/" + TABLE + "?select=*&app_key=eq." + encodeURIComponent(cfg.app_key));
@@ -14792,6 +14875,64 @@ async function cloudStatusFixed(){
   }else{
     bindAll();
   }
+
+
+  // AutoPush toggle bind + polling-based change detection (stable for single-file system)
+  function bindAutoPush(){
+    const b = document.getElementById('btnAutoPushToggle');
+    if(!b) return;
+    // init label
+    setAutoPushEnabled(getAutoPushEnabled());
+    bindOne(b, ()=>{
+      const next = !getAutoPushEnabled();
+      setAutoPushEnabled(next);
+      uiAlert('自动推送已' + (next?'开启':'关闭') + '。');
+    });
+  }
+
+  // Poll local snapshot hash; if changed and autopush enabled, push snapshot (safe + debounced)
+  let __lastObservedHash = null;
+  let __pollTimer = null;
+  let __debounce = null;
+  async function pollAndMaybePush(){
+    try{
+      if(!getAutoPushEnabled()) return;
+      const cfg = getCfg();
+      if(!cfg.url || !cfg.anon || !cfg.app_key) return;
+      const snap = await getLocalSnapshot();
+      const row = buildRow(cfg.app_key, snap);
+      const h = String(row.hash||'');
+      if(!h) return;
+      if(__lastObservedHash === null){
+        __lastObservedHash = h;
+        return;
+      }
+      if(h !== __lastObservedHash){
+        __lastObservedHash = h;
+        if(__debounce) return;
+        __debounce = setTimeout(async ()=>{
+          __debounce = null;
+          try{
+            await cloudPushREST({force:false, reason:'auto'});
+            log('autopush ok');
+          }catch(e){
+            warn('autopush failed', e);
+          }
+        }, 1500);
+      }
+    }catch(e){ /* ignore */ }
+  }
+  function startAutoPushPoll(){
+    try{
+      if(__pollTimer) clearInterval(__pollTimer);
+      __pollTimer = setInterval(pollAndMaybePush, 5000);
+      // kick once
+      setTimeout(pollAndMaybePush, 800);
+    }catch(_e){}
+  }
+
+  bindAutoPush();
+  startAutoPushPoll();
 
   log("installed. Table="+TABLE);
 })();
@@ -15059,6 +15200,8 @@ async function cloudStatusFixed(){
  */
 (function(){
   const TAG='[TABLE_SYNC_V1]';
+  try{ if(window.__DISABLE_TABLE_SYNC__){ console.warn(TAG,'disabled'); return; } }catch(_e){}
+
   const T_SELLERS='ops_sellers_v1';
   const T_PRODUCTS='ops_products_v1';
   const T_ORDERS='ops_orders_v1';
