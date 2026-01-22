@@ -1135,6 +1135,285 @@ async function cloudPull(opts){
   }
 }
 
+
+/* ===================== Main Orders (ops_orders_v1 · Archive Mode) ===================== */
+const MAIN_ORDERS_TABLE = "ops_orders_v1";
+const MAIN_LAST_ID_KEY_PREFIX = "OPS_MAIN_ORDERS_LAST_ID__";
+
+function _lcKey(app){ return MAIN_LAST_ID_KEY_PREFIX + String(app||""); }
+
+function _normKey(s){
+  return String(s||"").trim().toLowerCase();
+}
+
+function _statusSig(o){
+  const pay = (o && o.principal && o.principal.settled) ? "1" : "0";
+  const payU = (o && (o.pay_screenshot_url || o.payScreenshotUrl)) ? "1":"0";
+  const rv = (o && o.review && o.review.status) ? String(o.review.status) : "PENDING";
+  const rvL = (o && o.review && o.review.link) ? String(o.review.link) : "";
+  const rvU = (o && (o.review_screenshot_url || o.reviewScreenshotUrl)) ? "1":"0";
+  const po = (o && o.commission && o.commission.settled) ? "1" : "0";
+  const poU = (o && (o.payout_screenshot_url || o.payoutScreenshotUrl)) ? "1":"0";
+  return [pay,payU,rv,rvL,rvU,po,poU].join("|");
+}
+
+async function restCountExact(cfg, table, whereQuery){
+  const base = cfg.url.replace(/\/+$/,'');
+  const url = `${base}/rest/v1/${table}?select=id&${whereQuery}&limit=1`;
+  const r = await fetch(url, { method:'GET', headers: { ...restHeaders(cfg.anon), 'Prefer':'count=exact' } });
+  const text = await r.text();
+  if(!r.ok) throw new Error(`rest_count_failed ${r.status} ${text.slice(0,200)}`);
+  const cr = r.headers.get('content-range') || "";
+  const m = cr.match(/\/(\d+)$/);
+  if(m) return parseInt(m[1],10);
+  // fallback
+  try{ const arr = JSON.parse(text||"[]"); return Array.isArray(arr)?arr.length:0; }catch(_e){ return 0; }
+}
+
+async function restInsertIgnore(cfg, table, onConflict, rows){
+  const base = cfg.url.replace(/\/+$/,'');
+  const url = `${base}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`;
+  const r = await fetch(url, {
+    method:'POST',
+    headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+    body: JSON.stringify(rows)
+  });
+  const text = await r.text();
+  if(!r.ok) throw new Error(`rest_insert_ignore_failed ${r.status} ${text.slice(0,200)}`);
+  return true;
+}
+
+async function restPatchOne(cfg, table, whereQuery, patchBody){
+  const base = cfg.url.replace(/\/+$/,'');
+  const url = `${base}/rest/v1/${table}?${whereQuery}`;
+  const r = await fetch(url, {
+    method:'PATCH',
+    headers: { ...restHeaders(cfg.anon), 'Prefer': 'return=minimal' },
+    body: JSON.stringify(patchBody)
+  });
+  const text = await r.text();
+  if(!r.ok) throw new Error(`rest_patch_failed ${r.status} ${text.slice(0,200)}`);
+  return true;
+}
+
+function _mapOrderToMainRow(cfg, o){
+  const sellerId = String(o.sellerId||"").trim();
+  const orderId = String(o.orderId||"").trim();
+  const asin = String(o.asin||"").trim();
+  const seller_key = _normKey(sellerId);
+  const order_key = _normKey(orderId);
+  const asin_key = _normKey(asin);
+  const review_status = (o.review && o.review.status) ? String(o.review.status) : "PENDING";
+  const review_link = (o.review && o.review.link) ? String(o.review.link) : null;
+  const pay_status = (o.principal && o.principal.settled) ? "已收款" : "未收款";
+  const payout_status = (o.commission && o.commission.settled) ? "已返佣" : "未返佣";
+  return {
+    app_key: cfg.app,
+    order_no: orderId,
+    seller_name: sellerId,
+    market: String(o.market||"").trim() || null,
+    asin: asin || null,
+    product_name: (function(){
+      // 优先：产品库名称；否则用标题/备注；再否则用 asin
+      const pid = o.productId || null;
+      const p = pid ? (S.products||[]).find(x=>String(x.id)===String(pid)) : null;
+      return (p && (p.name||p.title)) ? String(p.name||p.title) :
+             (o.title ? String(o.title) : (o.note ? String(o.note) : (asin||null)));
+    })(),
+    pay_status,
+    review_status,
+    payout_status,
+    review_link,
+    // 归档表允许字段以外的更新会被拦截，但插入时写入是允许的：尽量完整写入
+    note: (o.note ? String(o.note) : (o.title ? String(o.title) : "")) || null,
+    unit_price: (typeof o.amount==='number' ? o.amount : U.toNum(o.amount)),
+    fx_rate: (o.fxOverride!=null ? U.toNum(o.fxOverride) : (o.principal && o.principal.fx!=null ? U.toNum(o.principal.fx) : null)),
+    review_req: o.reviewReq ? String(o.reviewReq) : null,
+    order_key,
+    seller_key,
+    product_key: (o.productId ? String(o.productId) : null),
+    asin_key: asin_key || ""
+  };
+}
+
+async function mainOrdersStatus(){
+  try{
+    const cfg = getCloudCfg();
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+    const cnt = await restCountExact(cfg, MAIN_ORDERS_TABLE, `app_key=eq.${encodeURIComponent(cfg.app)}`);
+    showNotice("主表状态（订单）", `ops_orders_v1：orders=${cnt}`);
+  }catch(e){
+    alert("主表状态失败：\n" + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function mainOrdersPush(){
+  try{
+    const cfg = getCloudCfg();
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+    const state = await getLocalSnapshotPreferIDB();
+    const orders = (state && state.orders) ? state.orders : (S.orders||[]);
+    if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return; }
+
+    const rows = [];
+    for(const o of orders){
+      if(!o) continue;
+      const sellerId = String(o.sellerId||"").trim();
+      const orderId = String(o.orderId||"").trim();
+      if(!sellerId || !orderId) continue;
+      rows.push(_mapOrderToMainRow(cfg, o));
+    }
+
+    const onConflict = "app_key,seller_key,order_key,asin_key";
+    const batch = 500;
+    let sent = 0;
+    for(let i=0;i<rows.length;i+=batch){
+      const chunk = rows.slice(i, i+batch);
+      await restInsertIgnore(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
+      sent += chunk.length;
+    }
+
+    // 同步“允许更新”的状态/凭证字段：仅对状态非默认的订单做 PATCH（避免大量请求）
+    const toPatch = [];
+    for(const o of orders){
+      if(!o) continue;
+      const sellerId = String(o.sellerId||"").trim();
+      const orderId = String(o.orderId||"").trim();
+      if(!sellerId || !orderId) continue;
+      const sig = _statusSig(o);
+      const key = `OPS_MAIN_STATUS_SIG__${cfg.app}__${_normKey(sellerId)}__${_normKey(orderId)}__${_normKey(o.asin||"")}`;
+      const prev = localStorage.getItem(key);
+      const hasSignal = (sig !== "0|0|PENDING||0|0|0");
+      if(hasSignal && sig !== prev){
+        toPatch.push({ o, key, sig });
+      }
+    }
+
+    const limit = 6;
+    let idx = 0, okN = 0, failN = 0;
+    async function worker(){
+      while(idx < toPatch.length){
+        const cur = toPatch[idx++]; 
+        const o = cur.o;
+        const seller_key = _normKey(o.sellerId);
+        const order_key = _normKey(o.orderId);
+        const asin_key = _normKey(o.asin||"") || "";
+        const whereQ = `app_key=eq.${encodeURIComponent(cfg.app)}&seller_key=eq.${encodeURIComponent(seller_key)}&order_key=eq.${encodeURIComponent(order_key)}&asin_key=eq.${encodeURIComponent(asin_key)}`;
+        const patchBody = {
+          pay_status: (o.principal && o.principal.settled) ? "已收款" : "未收款",
+          review_status: (o.review && o.review.status) ? String(o.review.status) : "PENDING",
+          payout_status: (o.commission && o.commission.settled) ? "已返佣" : "未返佣",
+          review_link: (o.review && o.review.link) ? String(o.review.link) : null,
+          pay_screenshot_url: o.pay_screenshot_url || o.payScreenshotUrl || null,
+          review_screenshot_url: o.review_screenshot_url || o.reviewScreenshotUrl || null,
+          payout_screenshot_url: o.payout_screenshot_url || o.payoutScreenshotUrl || null
+        };
+        try{
+          await restPatchOne(cfg, MAIN_ORDERS_TABLE, whereQ, patchBody);
+          localStorage.setItem(cur.key, cur.sig);
+          okN++;
+        }catch(e){
+          failN++;
+        }
+      }
+    }
+    const workers = Array.from({length: Math.min(limit, toPatch.length||0)}, ()=>worker());
+    if(workers.length) await Promise.all(workers);
+
+    showNotice("主表推送（订单）", `完成：尝试写入=${sent}（重复自动跳过）；状态同步=${okN} 成功 / ${failN} 失败`);
+  }catch(e){
+    alert("主表推送失败：\n" + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function mainOrdersPull(){
+  try{
+    const cfg = getCloudCfg();
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ alert("请先完成云端设置（Supabase）"); return; }
+
+    let lastId = parseInt(localStorage.getItem(_lcKey(cfg.app)) || "0", 10);
+    if(!isFinite(lastId) || lastId < 0) lastId = 0;
+
+    const base = cfg.url.replace(/\/+$/,'');
+    const limit = 1000;
+    let pulled = 0;
+    while(true){
+      const url = `${base}/rest/v1/${MAIN_ORDERS_TABLE}?select=id,order_no,seller_name,market,asin,product_name,pay_status,review_status,payout_status,review_link,unit_price,fx_rate,review_req,created_at,updated_at&app_key=eq.${encodeURIComponent(cfg.app)}&id=gt.${lastId}&order=id.asc&limit=${limit}`;
+      const r = await fetch(url, { method:'GET', headers: restHeaders(cfg.anon) });
+      const text = await r.text();
+      if(!r.ok) throw new Error(`rest_pull_failed ${r.status} ${text.slice(0,200)}`);
+      const arr = JSON.parse(text || "[]");
+      if(!arr.length) break;
+
+      // 合并到本地
+      const state = await getLocalSnapshotPreferIDB();
+      const st = state || { sellers: S.sellers||[], products: S.products||[], orders: S.orders||[], batches: S.batches||[] };
+      st.orders = Array.isArray(st.orders) ? st.orders.slice() : [];
+      const byKey = new Map(st.orders.map(x=>[x.key, x]));
+      for(const row of arr){
+        const orderId = String(row.order_no||"").trim();
+        const sellerId = String(row.seller_name||"").trim();
+        const asin = String(row.asin||"").trim();
+        const key = U.orderKey(sellerId, orderId, asin);
+        const existed = byKey.get(key);
+        const next = existed ? { ...existed } : {
+          id: existed ? existed.id : ("L" + String(row.id)),
+          orderId,
+          key,
+          sellerId,
+          productId: null,
+          market: String(row.market||"").trim(),
+          currency: "",
+          amount: row.unit_price!=null ? Number(row.unit_price) : 0,
+          discount: 0,
+          buyerCommission: 0,
+          asin,
+          title: String(row.product_name||"").trim(),
+          fx: row.fx_rate!=null ? Number(row.fx_rate) : 0,
+          reviewReq: String(row.review_req||"").trim() || "auto",
+          note: "",
+          date: (row.created_at ? String(row.created_at).slice(0,10) : U.today()),
+          review: { status: String(row.review_status||"PENDING"), link: String(row.review_link||""), date:"", note:"", doneType:"" },
+          principal: { settled: String(row.pay_status||"") === "已收款", batchId:"", fx: row.fx_rate!=null ? Number(row.fx_rate) : 0, amountCny:0 },
+          commission: { settled: String(row.payout_status||"") === "已返佣", batchId:"", amountCny:0 }
+        };
+
+        // 只更新状态/凭证相关字段，避免覆盖本地更详细信息
+        next.review = next.review || { status:"PENDING", link:"", date:"", note:"", doneType:"" };
+        next.review.status = String(row.review_status||next.review.status||"PENDING");
+        next.review.link = String(row.review_link||next.review.link||"");
+        next.principal = next.principal || { settled:false, batchId:"", fx:0, amountCny:0 };
+        next.principal.settled = String(row.pay_status||"") === "已收款";
+        next.commission = next.commission || { settled:false, batchId:"", amountCny:0 };
+        next.commission.settled = String(row.payout_status||"") === "已返佣";
+
+        // 新增时补齐基础字段
+        if(!existed){
+          byKey.set(key, next);
+          st.orders.push(next);
+        }else{
+          Object.assign(existed, next);
+        }
+
+        lastId = Math.max(lastId, parseInt(row.id,10) || lastId);
+      }
+
+      await saveLocalState(st, "main_orders_pull");
+      S = st;
+      render();
+      localStorage.setItem(_lcKey(cfg.app), String(lastId));
+      pulled += arr.length;
+
+      if(arr.length < limit) break;
+    }
+
+    showNotice("主表拉取（订单）", `完成：拉取并合并 ${pulled} 条（仅新增/更新状态字段）。lastId=${lastId}`);
+  }catch(e){
+    alert("主表拉取失败：\n" + (e && e.message ? e.message : String(e)));
+  }
+}
+/* ===================== End Main Orders ===================== */
+
 // bind buttons after load
 window.addEventListener("load", ()=>{
   const byId = (id)=>document.getElementById(id);
@@ -1142,12 +1421,16 @@ window.addEventListener("load", ()=>{
   const bPush = byId("btnCloudPush");
   const bPull = byId("btnCloudPull");
   const bStatus = byId("btnCloudStatus");
-  const bView = byId("btnCloudView");
+  const bMainPush = byId("btnMainOrdersPush");
+  const bMainPull = byId("btnMainOrdersPull");
+  const bMainStatus = byId("btnMainOrdersStatus");
   if(bCfg) bCfg.onclick = ()=>cloudPromptAndSave();
   if(bPush) bPush.onclick = ()=>cloudPushFixed();
   if(bPull) bPull.onclick = ()=>cloudPull();
   if(bStatus) bStatus.onclick = ()=>cloudStatusFixed();
-  if(bView) bView.onclick = ()=>cloudViewLatest();
+  if(bMainPush) bMainPush.onclick = ()=>mainOrdersPush();
+  if(bMainPull) bMainPull.onclick = ()=>mainOrdersPull();
+  if(bMainStatus) bMainStatus.onclick = ()=>mainOrdersStatus();
 });
 /* ===================== End Cloud Backup ===================== */
 
@@ -1166,14 +1449,6 @@ window.addEventListener("load", ()=>{
 
 </head>
 <body>
-
-<script>
-/* [B1-B4_LOCK] Lock to SNAPSHOT REST only (disable table-mode & old delta auto-push) */
-window.__DISABLE_TABLE_SYNC__ = true;
-window.__DISABLE_ORDERS_MASTER_SYNC__ = true;
-window.__AUTO_PUSH_DISABLED = true; // disable legacy orders-delta auto push
-</script>
-
 <script>
 // DOM helpers (no jQuery)
 window.$ = window.$ || function(sel, root){ return (root||document).querySelector(sel); };
@@ -1230,7 +1505,11 @@ window.$$$ = window.$$$ || function(sel, root){
       <button class="btn" id="btnCloudPush" title="把当前数据备份到云端">云端推送</button>
       <button class="btn" id="btnCloudPull" title="从云端恢复并覆盖本地">云端拉取</button>
       <button class="btn" id="btnCloudStatus" title="查看云端快照状态">云端状态</button>
-      <button class="btn" id="btnCloudView" title="查看云端快照 payload（本地弹窗，不改数据）">云端查看</button>
+
+      <button class="btn" id="btnMainOrdersPush" title="写入云端主表 ops_orders_v1（仅新增，重复跳过；状态字段会尝试同步）">主表推送(订单)</button>
+      <button class="btn" id="btnMainOrdersPull" title="从云端主表 ops_orders_v1 拉取新增订单并合并到本地">主表拉取(订单)</button>
+      <button class="btn" id="btnMainOrdersStatus" title="查看云端主表 ops_orders_v1 的订单数量">主表状态(订单)</button>
+
       <button class="btn" id="btnAutoPushToggle" title="自动推送开关（开启：后台可能定时/触发合并推送；关闭：仅手动推送）">自动推送：开</button>
       <button class="btn warn" id="btnCloudPushForce" title="强制推送：即使 hash 未变化也推送（仍会合并后推送）">强制推送</button>
       <button class="btn warn" id="btnCloudPullForce" title="强制拉取：从云端覆盖本地（会二次确认）">强制拉取</button>
@@ -2684,53 +2963,6 @@ const U = {
   money(v){ return U.num(v).toFixed(2); },
   esc(v){ const s=String(v??''); return s.replace(/[&<>"']/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); },
   escAttr(v){ return U.esc(v); },
-  cleanText(v){
-    if(v==null) return '';
-    let s=String(v);
-    // remove literal \\n and real newlines
-    s=s.replace(/\\n/g,' ').replace(/\r?\n/g,' ');
-    s=s.replace(/\s+/g,' ').trim();
-    return s;
-  },
-  extractAsin(v){
-    const s = U.cleanText(v||"");
-    const m = s.match(/\bB0[A-Z0-9]{8}\b/i);
-    return m ? m[0].toUpperCase() : "";
-  },
-  extractPrice(v){
-    const s = U.cleanText(v||"");
-    // pick last decimal/number like 13.99 / 15 / 1,299.00 (normalize commas)
-    const ms = s.match(/(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)(?!.*\d)/);
-    if(!ms) return null;
-    const num = Number(String(ms[1]).replace(/,/g,''));
-    return Number.isFinite(num) ? num : null;
-  },
-  guessProductNameFromAsinField(v){
-    // some legacy imports put "产品名/价格" into asin field
-    const s = U.cleanText(v||"");
-    if(!s) return "";
-    const asin = U.extractAsin(s);
-    let t = s;
-    if(asin) t = t.replace(new RegExp(asin,'ig'), ' ');
-    // remove trailing price-like token
-    t = t.replace(/(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s*$/,' ');
-    t = t.replace(/[\/|]+/g,' ').replace(/\s+/g,' ').trim();
-    // avoid returning pure numbers
-    if(!t || /^\d/.test(t)) return "";
-    return t;
-  },
-  orderDisplay(o, sellerMap, productMap){
-    const sm = sellerMap || new Map((S.sellers||[]).map(s=>[s.id, s]));
-    const pm = productMap || new Map((S.products||[]).map(p=>[p.id, p]));
-    const sellerName = U.cleanText((sm.get(o.sellerId)||{}).name || o.sellerId || "");
-    const pObj = pm.get(o.productId);
-    const asinField = U.cleanText(o.asin||"");
-    const asin = U.extractAsin(asinField) || "";
-    const guessName = U.guessProductNameFromAsinField(asinField);
-    const productName = U.cleanText((pObj && pObj.name) ? pObj.name : (o.title||guessName||""));
-    return { sellerName, productName, asinField, asin, guessName };
-  },
-
   marketToCurrency(m){ return (MARKETS.find(x=>x.m===m)||{}).c || ""; },
   marketToFxKey(m){
     if(m==="US") return "usd";
@@ -2741,8 +2973,8 @@ const U = {
   },
   sellerById(id){ return S.sellers.find(x=>x.id===id) || null; },
   productById(id){ return S.products.find(x=>x.id===id) || null; },
-  sellerName(id){ return U.cleanText((U.sellerById(id)||{}).name || ""); },
-  productName(id){ return U.cleanText((U.productById(id)||{}).name || ""); },
+  sellerName(id){ return (U.sellerById(id)||{}).name || ""; },
+  productName(id){ return (U.productById(id)||{}).name || ""; },
   reviewName(k){ return (REVIEW_TYPES.find(x=>x.k===k)||{}).n || k; },
   shortReviewType(val){ const s=String(val||''); return s.length>4 ? s.slice(0,4) : s; },
   badgeReview(status){
@@ -3336,9 +3568,9 @@ function renderSellers(){
     const cmSummary = `文:${U.money(s.commission.TEXT)} 图:${U.money(s.commission.IMAGE)} 视:${U.money(s.commission.VIDEO)} 免:${U.money(s.commission.FREE)} FB:${U.money(s.commission.FREE_FB)} 点:${U.money(s.commission.STAR)}`;
     return `<tr>
       <td class="mono">${esc(s.id)}</td>
-      <td>${esc(U.cleanText(s.name))}</td>
-      <td>${esc(U.cleanText(s.contact||""))}</td>
-      <td>${esc(U.cleanText(s.remark||""))}</td>
+      <td>${esc(s.name)}</td>
+      <td>${esc(s.contact||"")}</td>
+      <td>${esc(s.remark||"")}</td>
       <td class="small">${esc(fxSummary)}</td>
       <td class="small">${esc(cmSummary)}</td>
       <td class="right">
@@ -3346,7 +3578,7 @@ function renderSellers(){
         <button class="btn danger" onclick="Actions.deleteSeller('${esc(s.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
 
   $("sellerRows").innerHTML = rows || `<tr><td colspan="7" class="small">暂无卖家</td></tr>`;
 
@@ -3378,9 +3610,9 @@ function renderProducts(){
   const list = (S.products||[]).filter(p=>{
     if(!q) return true;
     const sname = U.sellerName(p.sellerId).toLowerCase();
-    return (U.cleanText(p.name||"").toLowerCase().includes(q)) ||
-           (U.cleanText(p.asin||"").toLowerCase().includes(q)) ||
-           (U.cleanText(p.market||"").toLowerCase().includes(q)) ||
+    return (p.name||"").toLowerCase().includes(q) ||
+           (p.asin||"").toLowerCase().includes(q) ||
+           (p.market||"").toLowerCase().includes(q) ||
            sname.includes(q);
   });
 
@@ -3394,11 +3626,11 @@ function renderProducts(){
 
   const rows = pageList.map(p=>{
     return `<tr>
-      <td>${esc(U.cleanText(p.name))}</td>
-      <td class="mono">${esc(U.cleanText(p.asin||""))}</td>
-      <td>${esc(U.cleanText(p.market||""))}</td>
+      <td>${esc(p.name)}</td>
+      <td class="mono">${esc(p.asin||"")}</td>
+      <td>${esc(p.market||"")}</td>
       <td>${esc(p.market?U.marketToCurrency(p.market):"")}</td>
-      <td>${esc(U.cleanText(U.sellerName(p.sellerId)))}</td>
+      <td>${esc(U.sellerName(p.sellerId))}</td>
       <td>${esc(U.reviewName(p.reviewType))}</td>
       <td class="right">${esc(U.money(p.discount||0))}</td>
       <td class="right">
@@ -3407,7 +3639,7 @@ function renderProducts(){
         <button class="btn danger" onclick="Actions.deleteProduct('${esc(p.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
 
   $("productRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无产品</td></tr>`;
 
@@ -3454,7 +3686,7 @@ function filteredOrders(){
     if(cs==="SETTLED" && !o.commission.settled) return false;
 
     if(qraw){
-      const d = U.orderDisplay(o); const hay = [o.orderId,o.note,o.asin,d.sellerName,o.market,d.productName,d.asin].join("\n").toLowerCase();
+      const hay = [o.orderId,o.note,o.asin,U.sellerName(o.sellerId||""),o.market, U.productName(o.productId||"")].join("\n").toLowerCase();
       if(!hay.includes(qraw)) return false;
     }
     return true;
@@ -3593,7 +3825,7 @@ function renderOrders(){
   const matchQ = (o)=>{
     if(!q) return true;
     const sName = (sellerMap.get(o.sellerId)?.name||"").toLowerCase();
-    const pName = (U.orderDisplay(o, sellerMap, productMap).productName||"").toLowerCase();
+    const pName = (productMap.get(o.productId)?.name||o.title||"").toLowerCase();
     return String(o.orderId||"").toLowerCase().includes(q)
       || String(o.asin||"").toLowerCase().includes(q)
       || sName.includes(q)
@@ -3667,10 +3899,9 @@ function renderOrders(){
     const frag = document.createDocumentFragment();
     for(let k=0; k<chunkSize && idx<pageItems.length; k++, idx++){
       const o = pageItems[idx];
-      const d = U.orderDisplay(o, sellerMap, productMap);
-      const sellerName = d.sellerName;
-      const pName = d.productName;
-      const asinDisp = d.asin || d.asinField;
+      const sellerName = sellerMap.get(o.sellerId)?.name || "";
+      const pObj = productMap.get(o.productId);
+      const pName = (pObj && pObj.name) ? pObj.name : (o.title||"");
       const pCny = (o.principal && (o.principal.amountCny||0)) || 0;
       const cm = (o.commission && (o.commission.amountCny||0)) || 0;
       const pSett = (o.principal && o.principal.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
@@ -3683,9 +3914,9 @@ function renderOrders(){
         <td>${esc(U.dateMD(o.date))}</td>
         <td class="mono">${esc(o.orderId)}</td>
         <td>${esc(sellerName)}</td>
-        <td>${esc(U.cleanText(o.market||""))}</td>
+        <td>${esc(o.market||"")}</td>
         <td>${esc(pName)}</td>
-        <td class="mono">${esc(asinDisp||"")}</td>
+        <td class="mono">${esc(o.asin||"")}</td>
         <td>${U.badgeReview(o.review && o.review.status)}</td>
         <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
         <td class="right">${esc(U.money(o.amount||0))}</td>
@@ -3739,8 +3970,8 @@ function exportOrdersCsv(){
     const principalCny = principalOrigV * fx;
     const cm = commissionShould(o);
     return [
-      o.orderId, o.date, (U.orderDisplay(o).sellerName), o.market, (U.orderDisplay(o).productName || o.note || ""),
-      (U.orderDisplay(o).asin || U.orderDisplay(o).asinField || ""),
+      o.orderId, o.date, U.sellerName(o.sellerId), o.market, U.productName(o.productId||"") || o.note || "",
+      o.asin || "",
       U.money(o.amount||0), U.money(o.discount||0), U.money(principalOrigV),
       fx, U.money(principalCny),
       o.review.status, o.review.doneType || "", U.money(cm),
@@ -3749,7 +3980,7 @@ function exportOrdersCsv(){
       o.note||""
     ].map(U.csvEscape);
   });
-  const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\\n");
+  const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\n");
   U.download("orders_filtered_"+U.today()+".csv", csv, "text/csv");
 }
 
@@ -3763,7 +3994,7 @@ function buildBatchCSV(batch){
     U.money(l.commissionShould), U.money(l.commissionSettle),
     batch.batchId, batch.date, batch.type
   ].map(U.csvEscape).join(","));
-  return [headers.map(U.csvEscape).join(","), ...rows].join("\\n");
+  return [headers.map(U.csvEscape).join(","), ...rows].join("\n");
 }
 function renderBatches(){
   const rows = (S.batches||[]).map(b=>{
@@ -3782,7 +4013,7 @@ function renderBatches(){
         <button class="btn danger" onclick="Actions.deleteBatch('${esc(b.id)}')">删除回滚</button>
       </td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
   $("batchRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无批次</td></tr>`;
 }
 
@@ -4761,7 +4992,7 @@ function renderSettleRows(){
       </td>
       <td class="right mono">= ${esc(U.money(pVal + cVal))}</td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
 
   $("settleRows").innerHTML = rows || `<tr><td colspan="10" class="small">无可结算订单</td></tr>`;
   $("settleTotal").textContent = U.money(total);
@@ -5023,7 +5254,7 @@ function __escCsv(v){
 }
 function __toCsv(rows, headers){
   const head = headers.map(__escCsv).join(",");
-  const body = rows.map(r=> headers.map(h=>__escCsv(r[h])).join(",")).join("\\n");
+  const body = rows.map(r=> headers.map(h=>__escCsv(r[h])).join(",")).join("\n");
   return head + "\n" + body;
 }
 function __parseCSV(text){
@@ -5562,7 +5793,7 @@ const IO = {
     // 若存在重复，弹出确认：是否仍要添加这些重复行？
     let allowDup = true;
     if(dupLines.length){
-      const preview = dupLines.slice(0,10).join("\\n") + (dupLines.length>10 ? `
+      const preview = dupLines.slice(0,10).join("\n") + (dupLines.length>10 ? `
 ...（共 ${dupLines.length} 条）` : "");
       allowDup = confirm(`检测到产品列表里存在重复项（同卖家+同产品名+同ASIN）。
 
@@ -5692,7 +5923,7 @@ $("btnHardReset").onclick = async ()=>{
 
   const failed = results.filter(r=>!r.ok);
   if(failed.length){
-    alert("彻底重置完成（部分库可能被占用未删除）：\n\n失败项：\n" + failed.map(f=>`${f.name}: ${f.err}`).join("\\n") + "\n\n请关闭同域名下的其它标签页后刷新再点一次。");
+    alert("彻底重置完成（部分库可能被占用未删除）：\n\n失败项：\n" + failed.map(f=>`${f.name}: ${f.err}`).join("\n") + "\n\n请关闭同域名下的其它标签页后刷新再点一次。");
   }else{
     alert("彻底重置完成：已清空所有本地数据。页面将刷新。");
   }
@@ -6046,21 +6277,6 @@ $("btnHardReset").onclick = async ()=>{
 
 
 /* ===================== Render All ===================== */
-
-function postRenderCleanup(){
-  try{
-    // 去掉 UI 上出现的字面 "\n"（来自导入文本中带反斜杠n）
-    const nodes = document.querySelectorAll("td,th,div,span");
-    for(const el of nodes){
-      if(!el || !el.firstChild) continue;
-      const t = el.textContent;
-      if(typeof t === "string" && t.indexOf("\\n")>=0){
-        el.textContent = t.replace(/\\n/g," ").replace(/\s+/g," ").trim();
-      }
-    }
-  }catch(e){}
-}
-
 function renderAll(){
   renderSelects();
   renderSellerGrids();
@@ -6073,7 +6289,6 @@ function renderAll(){
   renderBatches();
   renderPayout();
   updateProductPreview();
-  postRenderCleanup();
 }
 
 /* ===================== Render Scheduler (perf) ===================== 
@@ -6397,7 +6612,7 @@ function payoutFilteredOrders(){
       const p = o.productId ? U.productById(o.productId) : null;
       const hay = [
         o.orderId||"", o.asin||"", p?.name||"", o.note||""
-      ].join("\\n").toLowerCase();
+      ].join("\n").toLowerCase();
       if(!hay.includes(q)) return false;
     }
     return true;
@@ -6454,7 +6669,7 @@ function renderPayout(){
       <td>${U.esc(o.review?.status||"")}</td>
       <td>${ps==="payout_pending" ? `<button type="button" class="btn sm" data-payout-view="${U.esc(o.id)}" data-payout-view="${o.id}">查看</button>` : `<button type="button" class="btn sm" data-payout-one="${U.esc(o.id)}" data-payout-single="${o.id}">单笔返款</button>`}</td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
 
   $("payoutRows").innerHTML = rows || `<tr><td colspan="99" class="muted">无符合条件的订单</td></tr>`;
 
@@ -6584,7 +6799,7 @@ function renderPayoutBatches(){
         <button class="btn sm danger" data-payout-del="${U.esc(b.id)}">删除回滚</button>
       </td>
     </tr>`;
-  }).join("\\n");
+  }).join("\n");
 
   $("payoutBatchRows").innerHTML = rows || `<tr><td colspan="6" class="muted">暂无返款批次</td></tr>`;
 
@@ -6691,7 +6906,7 @@ function openPayoutBatchDetail(batchId){
         <td class="mono right">${comm2.toFixed(2)}</td>
         <td class="mono right">${total2.toFixed(2)}</td>
       </tr>`;
-    }).join("\\n") || `<tr><td colspan="99" class="muted">无明细</td></tr>`;
+    }).join("\n") || `<tr><td colspan="99" class="muted">无明细</td></tr>`;
     if($("payoutBatchDetailRows")) $("payoutBatchDetailRows").innerHTML = rows;
 
     if($("payoutBatchDetailModal")) $("payoutBatchDetailModal").style.display = "";
@@ -6769,7 +6984,7 @@ function exportPayoutBatchCSV(batchId){
       ].map(U.csvEscape);
     });
 
-    const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\\n");
+    const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\n");
     U.download(`payout_batch_${String(b.id||"batch").replace(/[\\/:*?"<>|]+/g,"_")}_${U.today()}.csv`, csv, "text/csv");
   }catch(e){
     console.error(e);
@@ -8289,7 +8504,7 @@ const SettleDrafts = (()=> {
           <button class="btn small danger" data-act="del" data-id="${d.id}">删除</button>
         </td>
       </tr>`;
-    }).join("\\n");
+    }).join("\n");
   }
 
   async function openDraft(id){
@@ -8372,7 +8587,7 @@ const SettleDrafts = (()=> {
         principal_settle,commission_settle
       ]);
     });
-    const csv = rows.map(r=>r.map(U.csvEscape).join(",")).join("\\n");
+    const csv = rows.map(r=>r.map(U.csvEscape).join(",")).join("\n");
     U.download(`settle_draft_${batchId||id}.csv`, csv, "text/csv;charset=utf-8");
     showNotice("已导出CSV");
   }
@@ -8777,7 +8992,7 @@ if(typeof window.confirmPayoutModal !== "function"){
       if(typeof payoutModalRunPrecheck === "function"){
         payoutModalRunPrecheck();
         if(M.issues && M.issues.length){
-          alert("预检未通过：\n" + M.issues.slice(0,20).map(x=>`- ${x}`).join("\\n") + (M.issues.length>20?`\n…共 ${M.issues.length} 条`:""));
+          alert("预检未通过：\n" + M.issues.slice(0,20).map(x=>`- ${x}`).join("\n") + (M.issues.length>20?`\n…共 ${M.issues.length} 条`:""));
           return;
         }
       }
@@ -8963,7 +9178,7 @@ if(typeof window.exportPayoutModalCSV !== "function"){
         ].map(x=>`"${String(x).replaceAll('"','""')}"`);
         lines.push(vals.join(","));
       }
-      const csv = "\ufeff" + lines.join("\\n");
+      const csv = "\ufeff" + lines.join("\n");
       const fn = `payout_modal_${new Date().toISOString().slice(0,10)}.csv`;
       U.download(fn, csv, "text/csv");
     }catch(e){
@@ -10087,7 +10302,7 @@ What V30 does:
       try{ db.close(); }catch(e){}
     }
     if(!totalDbs) lines.push("\n未发现可打开的 IndexedDB 数据库（可能被浏览器策略限制）。");
-    alert(lines.join("\\n"));
+    alert(lines.join("\n"));
   }
 
   async function pickBestSplitDB(){
@@ -10514,66 +10729,7 @@ async function cloudStatusFixed(){
     }
   }
 
-  
-async function cloudViewLatest(){
-  const sb = (typeof window.getCloudClientOrNull==="function") ? window.getCloudClientOrNull() : null;
-  if(!sb){
-    if(typeof window.cloudPromptAndSave==="function") window.cloudPromptAndSave();
-    return;
-  }
-  const { client, cfg } = sb;
-  try{
-    const { data, error } = await client
-      .from("ops_cloud_snapshots")
-      .select("app_key,hash,updated_at,created_at,payload")
-      .eq("app_key", cfg.appKey)
-      .maybeSingle();
-    if(error) throw error;
-    if(!data){
-      alert("云端快照：未找到快照（app_key="+cfg.appKey+"）");
-      return;
-    }
-    const payload = data.payload || {};
-    const orders = Array.isArray(payload.orders) ? payload.orders : [];
-    const sellers = Array.isArray(payload.sellers) ? payload.sellers : [];
-    const products = Array.isArray(payload.products) ? payload.products : [];
-    const batches = Array.isArray(payload.batches) ? payload.batches : [];
-
-    const hint = [
-      "云端快照查看（ops_cloud_snapshots_v1 / payload）",
-      "app_key=" + (data.app_key||cfg.appKey||""),
-      "updated_at=" + (data.updated_at||""),
-      "counts: sellers=" + sellers.length + " products=" + products.length + " orders=" + orders.length + " batches=" + batches.length,
-      "",
-      "注意：本方案是“整包快照”，订单/卖家/产品都在 payload 字段里，不会出现在 ops_orders_v1 表。",
-      "在 Supabase Table Editor 打开 ops_cloud_snapshots_v1，点击右侧 payload 单元格即可查看完整 JSON。"
-    ].join("
-");
-
-    if(!orders.length){
-      alert(hint + "
-
-（orders 为空）");
-      return;
-    }
-    const kw = prompt(hint + "
-
-可选：输入订单号关键词（如 402-...）查看匹配订单；留空查看第一条。","") || "";
-    let found = orders[0];
-    const k = kw.trim();
-    if(k){
-      found = orders.find(o=> String(o.orderId||o.order_no||"").includes(k)) || orders[0];
-    }
-    alert(hint + "
-
---- 订单样例（仅展示一条）---
-" + JSON.stringify(found, null, 2));
-  }catch(e){
-    console.error(e);
-    alert("云端查看失败：" + (e && e.message ? e.message : String(e)));
-  }
-}
-async function cloudPushFixed(){
+  async function cloudPushFixed(){
     const sb = (typeof window.getCloudClientOrNull==="function") ? window.getCloudClientOrNull() : null;
     if(!sb){
       if(typeof window.cloudPromptAndSave==="function") window.cloudPromptAndSave();
@@ -12684,7 +12840,7 @@ async function cloudPushFixed(){
       lines.push("PATCH5=ON");
       lines.push("app_key="+res.appKey);
       lines.push("云端订单="+res.count);
-      show(lines.join("\\n"));
+      show(lines.join("\n"));
       log("[PATCH5] ordersCloudStatus", res);
       return res;
     }catch(e){
@@ -13246,7 +13402,6 @@ async function cloudPushFixed(){
    - Writes to IndexedDB ops_v642_main/kv/main_state_v1 via saveNow()
 ================================================================================== */
 (function(){
-  try{ if(window.__DISABLE_ORDERS_MASTER_SYNC__){ console.warn('[ORDERS_MASTER_SYNC_V2] disabled'); return; } }catch(_e){}
   function ui(msg){ try{ (window.uiToast||window.toast||window.uiAlert||alert)(msg);}catch(e){ try{alert(msg);}catch(_){ } } }
   function log(){ try{ console.log.apply(console, arguments);}catch(e){} }
 
@@ -14017,7 +14172,7 @@ async function cloudPushFixed(){
       "ops_sellers_v1="+cnt(a),
       "ops_products_v1="+cnt(b),
       "ops_orders_v2="+cnt(c),
-    ].join("\\n");
+    ].join("\n");
     _alert(msg);
   }
 
@@ -14186,7 +14341,7 @@ async function cloudPushFixed(){
       "产品 upsert="+productUpserted,
       "订单 upsert="+orderUpserted,
       (skipped.length ? ("跳过订单="+skipped.length+"（控制台查看前10条）") : "")
-    ].filter(Boolean).join("\\n");
+    ].filter(Boolean).join("\n");
     console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
     _alert(msg);
   }
@@ -14471,41 +14626,11 @@ async function cloudPushFixed(){
       };
 
       var row = buildRow(cfg.app_key, snap);
-      var localHash = String(row.hash||"");
-      // diff: no changes -> skip
-      try{
-        var lastPushHash = localStorage.getItem(LS_LAST_PUSH_HASH) || "";
-        if(!opts.force && localHash && lastPushHash && localHash === lastPushHash){
-          alertMsg("无需推送：本地数据未变化（hash="+localHash+"）。");
-          return;
-        }
-      }catch(_e){}
-      // conflict protection: cloud changed since last pull
-      try{
-        if(!opts.force){
-          var head = await restHeadMeta(cfg);
-          var lastPullHash = localStorage.getItem(LS_LAST_PULL_HASH) || "";
-          var lastPullAt = localStorage.getItem(LS_LAST_PULL_AT) || "";
-          if(head && head.hash && lastPullHash && head.hash !== lastPullHash){
-            // if cloud newer than our last pull, block
-            if(!lastPullAt || (head.updated_at && new Date(head.updated_at).getTime() > new Date(lastPullAt).getTime())){
-              alertMsg(`已阻止推送：云端存在更新且你尚未拉取。
-
-云端hash=${head.hash}
-本地上次拉取hash=${lastPullHash}
-
-请先点“云端拉取”同步后再推送；如确认要覆盖云端，请点“强制推送”。`);
-              return;
-            }
-          }
-        }
-      }catch(e){ log("conflict check skipped", e); }
       var url = base + "/rest/v1/ops_cloud_snapshots_v1?on_conflict=app_key";
       log("push start", {src:snap.src, sellers:sellers, products:products, orders:orders, batches:batches});
       try{
         var data = await restFetch(url, { method:"POST", headers: headers, body: JSON.stringify([row]) });
-        alertMsg(["云端推送成功。","卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches,"来源="+snap.src,"hash="+(row.hash||"")].join("\n"));
-try{ localStorage.setItem(LS_LAST_PUSH_HASH, String(row.hash||"")); localStorage.setItem(LS_LAST_PUSH_AT, new Date().toISOString()); }catch(_e){}
+        alertMsg("云端推送成功。\n卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"\n来源="+snap.src);
         log("push ok", data);
       }catch(e){
         alertMsg("云端推送失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14562,8 +14687,7 @@ try{ localStorage.setItem(LS_LAST_PUSH_HASH, String(row.hash||"")); localStorage
         var orders = Array.isArray(payload.orders)? payload.orders.length : 0;
         var batches = Array.isArray(payload.batches)? payload.batches.length : 0;
 
-        alertMsg(["云端拉取成功。","卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches,"updated_at="+(r0.updated_at||""),"hash="+(r0.hash||"")].join("\n"));
-try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.setItem(LS_LAST_PULL_AT, String(r0.updated_at||new Date().toISOString())); }catch(_e){}
+        alertMsg("云端拉取成功。\n卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"\nupdated_at="+(r0.updated_at||""));
         log("pull ok", {sellers:sellers, products:products, orders:orders, batches:batches, updated_at:r0.updated_at});
       }catch(e){
         alertMsg("云端拉取失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14651,11 +14775,6 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
   const TABLE = "ops_cloud_snapshots_v1";
   const LS_STATE_KEY = "ops_rebuild_v6_4_2_state";
   const IDB_KEY = "main_state_v1";
-  const LS_LAST_PUSH_HASH = "OPS_SNAP_LAST_PUSH_HASH_V1";
-  const LS_LAST_PUSH_AT = "OPS_SNAP_LAST_PUSH_AT_V1";
-  const LS_LAST_PULL_HASH = "OPS_SNAP_LAST_PULL_HASH_V1";
-  const LS_LAST_PULL_AT = "OPS_SNAP_LAST_PULL_AT_V1";
-  const LS_AUTOPUSH = "OPS_SNAP_AUTOPUSH_V1";
 
   function log(){ try{ console.log.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
   function warn(){ try{ console.warn.apply(console, [TAG].concat([].slice.call(arguments))); }catch(_e){} }
@@ -14709,37 +14828,6 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
       "Prefer": "resolution=merge-duplicates,return=representation"
     };
   }
-
-
-  function getAutoPushEnabled(){
-    try{
-      const v = localStorage.getItem(LS_AUTOPUSH);
-      if(v===null || v===undefined || v==='') return true; // default ON
-      return v === '1' || v === 'true';
-    }catch(_e){}
-    return true;
-  }
-  function setAutoPushEnabled(on){
-    try{ localStorage.setItem(LS_AUTOPUSH, on ? '1':'0'); }catch(_e){}
-    try{
-      if(window.UI) window.UI.autoPush = !!on;
-    }catch(_e){}
-    try{
-      const b = document.getElementById('btnAutoPushToggle');
-      if(b) b.textContent = '自动推送：' + (on?'开':'关');
-    }catch(_e){}
-  }
-
-  async function restHeadMeta(cfg){
-    const base = restUrl(cfg.url, 'rest/v1/'+TABLE);
-    const u = base + '?select=app_key,updated_at,hash&app_key=eq.' + encodeURIComponent(cfg.app_key) + '&order=updated_at.desc&limit=1';
-    const r = await fetch(u, { method:'GET', headers: hdr(cfg.anon) });
-    const t = await r.text();
-    if(!r.ok) throw new Error('head_meta_failed '+r.status+': '+t);
-    const arr = JSON.parse(t||'[]');
-    return (arr && arr[0]) ? arr[0] : null;
-  }
-
 
   async function restSelect(cfg){
     const u = restUrl(cfg.url, "rest/v1/" + TABLE + "?select=*&app_key=eq." + encodeURIComponent(cfg.app_key));
@@ -14862,7 +14950,7 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
       cloudRow ? ("云端 hash: " + (cloudRow.hash||"")) : "",
       cloudRow ? ("云端 updated_at: " + (cloudRow.updated_at||"")) : "",
       cloudRow ? ("云端统计：卖家"+cc.sellers+" 产品"+cc.products+" 订单"+cc.orders+" 批次"+cc.batches) : ""
-    ].filter(Boolean).join("\\n");
+    ].filter(Boolean).join("\n");
     uiAlert(lines);
   }
 
@@ -14994,64 +15082,6 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
   }else{
     bindAll();
   }
-
-
-  // AutoPush toggle bind + polling-based change detection (stable for single-file system)
-  function bindAutoPush(){
-    const b = document.getElementById('btnAutoPushToggle');
-    if(!b) return;
-    // init label
-    setAutoPushEnabled(getAutoPushEnabled());
-    bindOne(b, ()=>{
-      const next = !getAutoPushEnabled();
-      setAutoPushEnabled(next);
-      uiAlert('自动推送已' + (next?'开启':'关闭') + '。');
-    });
-  }
-
-  // Poll local snapshot hash; if changed and autopush enabled, push snapshot (safe + debounced)
-  let __lastObservedHash = null;
-  let __pollTimer = null;
-  let __debounce = null;
-  async function pollAndMaybePush(){
-    try{
-      if(!getAutoPushEnabled()) return;
-      const cfg = getCfg();
-      if(!cfg.url || !cfg.anon || !cfg.app_key) return;
-      const snap = await getLocalSnapshot();
-      const row = buildRow(cfg.app_key, snap);
-      const h = String(row.hash||'');
-      if(!h) return;
-      if(__lastObservedHash === null){
-        __lastObservedHash = h;
-        return;
-      }
-      if(h !== __lastObservedHash){
-        __lastObservedHash = h;
-        if(__debounce) return;
-        __debounce = setTimeout(async ()=>{
-          __debounce = null;
-          try{
-            await cloudPushREST({force:false, reason:'auto'});
-            log('autopush ok');
-          }catch(e){
-            warn('autopush failed', e);
-          }
-        }, 1500);
-      }
-    }catch(e){ /* ignore */ }
-  }
-  function startAutoPushPoll(){
-    try{
-      if(__pollTimer) clearInterval(__pollTimer);
-      __pollTimer = setInterval(pollAndMaybePush, 5000);
-      // kick once
-      setTimeout(pollAndMaybePush, 800);
-    }catch(_e){}
-  }
-
-  bindAutoPush();
-  startAutoPushPoll();
 
   log("installed. Table="+TABLE);
 })();
@@ -15303,560 +15333,6 @@ try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.
   }, true);
 
   console.log(TAG, 'installed. table=', SNAP_TABLE, 'local=', DB_NAME + '/' + STORE_NAME + '/' + KEY_NAME);
-})();
-</script>
-
-
-<script>
-/**
- * TABLE MODE SYNC (Cloud Main DB)
- * - Push/Pull sellers/products/orders via Supabase REST tables
- * - Keeps snapshot ops_cloud_snapshots_v1 as backup (optional after successful push)
- * Assumes unique indexes already exist:
- *   ops_sellers_v1(app_key,seller_key)
- *   ops_products_v1(app_key,product_key)
- *   ops_orders_v1(app_key,order_key)
- */
-(function(){
-  const TAG='[TABLE_SYNC_V1]';
-  try{ if(window.__DISABLE_TABLE_SYNC__){ console.warn(TAG,'disabled'); return; } }catch(_e){}
-
-  const T_SELLERS='ops_sellers_v1';
-  const T_PRODUCTS='ops_products_v1';
-  const T_ORDERS='ops_orders_v1';
-  const SNAP_TABLE='ops_cloud_snapshots_v1';
-
-  function pickCfg(){
-    const ls = window.localStorage || {};
-    return {
-      url: ls.getItem('SUPABASE_URL') || ls.getItem('supabase_url') || ls.getItem('sb_url') || '',
-      anon: ls.getItem('SUPABASE_ANON_KEY') || ls.getItem('supabase_anon') || ls.getItem('sb_anon') || '',
-      app: ls.getItem('APP_KEY') || ls.getItem('app_key') || ls.getItem('APP') || 'dalemy',
-    };
-  }
-  function needCfg(cfg){
-    if(!cfg.url) cfg.url = prompt('请输入 Supabase URL（形如 https://xxx.supabase.co ）') || '';
-    if(!cfg.anon) cfg.anon = prompt('请输入 Supabase anon key') || '';
-    if(!cfg.app) cfg.app = prompt('请输入 app_key（例如 dalemy）') || 'dalemy';
-    try{
-      localStorage.setItem('SUPABASE_URL', cfg.url);
-      localStorage.setItem('SUPABASE_ANON_KEY', cfg.anon);
-      localStorage.setItem('APP_KEY', cfg.app);
-    }catch(e){}
-    return cfg;
-  }
-  function hdr(cfg){
-    return {
-      'apikey': cfg.anon,
-      'Authorization': 'Bearer ' + cfg.anon,
-      'Content-Type': 'application/json'
-    };
-  }
-  function base(cfg){ return cfg.url.replace(/\/$/,''); }
-
-  async function restUpsert(cfg, table, rows, onConflict){
-    if(!rows || !rows.length) return {count:0};
-    const url = base(cfg) + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + encodeURIComponent(onConflict)) : '');
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: Object.assign(hdr(cfg), {
-        'Prefer': 'resolution=merge-duplicates,return=minimal'
-      }),
-      body: JSON.stringify(rows)
-    });
-    const t = await r.text();
-    if(!r.ok) throw new Error('upsert_failed ' + table + ' ' + r.status + ': ' + t);
-    return {count: rows.length};
-  }
-
-  async function restSelectAll(cfg, table, cols){
-    // 注意：大数据量可能需要分页；此处先支持 limit+offset 自动翻页
-    const pageSize = 1000;
-    let offset = 0;
-    let out = [];
-    while(true){
-      const url = base(cfg) + '/rest/v1/' + table
-        + '?select=' + encodeURIComponent(cols || '*')
-        + '&app_key=eq.' + encodeURIComponent(cfg.app)
-        + '&limit=' + pageSize
-        + '&offset=' + offset;
-      const r = await fetch(url, { method:'GET', headers: hdr(cfg) });
-      const t = await r.text();
-      if(!r.ok) throw new Error('select_failed ' + table + ' ' + r.status + ': ' + t);
-      const arr = JSON.parse(t || '[]');
-      out = out.concat(arr);
-      if(arr.length < pageSize) break;
-      offset += pageSize;
-      // 简单防护，避免极端情况下死循环
-      if(offset > 200000) break;
-    }
-    return out;
-  }
-
-  // ----- Local IDB read/write: ops_v642_main / kv / main_state_v1 -----
-  function openDBExact(name){
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(name);
-      req.onupgradeneeded = () => reject(new Error('db_missing_or_schema_changed:' + name));
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('open_failed'));
-    });
-  }
-  function idbGet(db, storeName, key){
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName,'readonly');
-      const st = tx.objectStore(storeName);
-      const req = st.get(key);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('get_failed'));
-    });
-  }
-  function idbPut(db, storeName, key, value){
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(storeName,'readwrite');
-      const st = tx.objectStore(storeName);
-      const req = st.put({key, value});
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error || new Error('put_failed'));
-      tx.onerror = () => reject(tx.error || new Error('tx_failed'));
-      tx.oncomplete = () => resolve(true);
-    });
-  }
-  function normalizeState(v){
-    const obj = v?.value ? v.value : v;
-    const S = obj && typeof obj === 'object' ? obj : {};
-    return {
-      sellers: Array.isArray(S.sellers) ? S.sellers : [],
-      products: Array.isArray(S.products) ? S.products : [],
-      orders: Array.isArray(S.orders) ? S.orders : [],
-      batches: Array.isArray(S.batches) ? S.batches : []
-    };
-  }
-  async function readLocalMainState(){
-    const db = await openDBExact('ops_v642_main');
-    const raw = await idbGet(db,'kv','main_state_v1');
-    try{ db.close(); }catch(e){}
-    const st = normalizeState(raw);
-    return st;
-  }
-  async function writeLocalMainState(payload){
-    const db = await openDBExact('ops_v642_main');
-    await idbPut(db,'kv','main_state_v1', payload);
-    try{ db.close(); }catch(e){}
-    // mirror for debug
-    try{
-      if(!window.S) window.S = {};
-      window.S.sellers = payload.sellers||[];
-      window.S.products = payload.products||[];
-      window.S.orders = payload.orders||[];
-      window.S.batches = payload.batches||[];
-    }catch(e){}
-    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(payload)); }catch(e){}
-  }
-
-  function pickSellerName(s){
-    return s?.seller_name || s?.name || s?.title || s?.sellerName || s?.seller || '';
-  }
-  function pickSellerKey(s){
-    // 优先本地 id，其次 seller_key，否则退化为规范化 name（不推荐但可用）
-    return (s?.id || s?.seller_id || s?.seller_key || pickSellerName(s) || '').toString();
-  }
-  function pickProductKey(p){
-    // 优先本地 id，其次 asin_key/asinKey，其次 market|asin|name
-    const mk = (p?.id || p?.product_id || p?.product_key || p?.asin_key || p?.asinKey || '').toString();
-    if(mk) return mk;
-    const market = (p?.market || p?.Market || '').toString();
-    const asin = (p?.asin || p?.ASIN || '').toString();
-    const name = (p?.product_name || p?.name || p?.title || '').toString();
-    return [market, asin, name].join('|');
-  }
-  function pickOrderKey(o){
-    // 规则：seller_key|order_no|asin|product_key
-    const sellerKey = (o?.seller_key || o?.sellerId || o?.seller_id || o?.seller || o?.seller_name || o?.sellerName || '').toString();
-    const orderNo = (o?.order_no || o?.orderNo || o?.order || '').toString();
-    const asin = ((o?.asin || o?.ASIN || '') || '').toString();
-    const productKey = (o?.product_key || o?.productId || o?.product_id || '').toString();
-    return [sellerKey, orderNo, asin, productKey].join('|');
-  }
-
-  function chunk(arr, n){
-    const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out;
-  }
-
-  async function tablePush(){
-    const cfg = needCfg(pickCfg());
-    const st = await readLocalMainState();
-
-    // build rows
-    const sellerRows = (st.sellers||[]).map(s => ({
-      app_key: cfg.app,
-      seller_key: pickSellerKey(s),
-      seller_name: pickSellerName(s),
-      note: s, // jsonb
-      updated_at: new Date().toISOString()
-    })).filter(r=>r.seller_key);
-
-    const productRows = (st.products||[]).map(p => {
-      const market = (p?.market || p?.Market || '').toString();
-      const asin = ((p?.asin || p?.ASIN || '') || '').toString();
-      const name = (p?.product_name || p?.name || p?.title || '').toString();
-      const review_req = (p?.review_req || p?.reviewType || p?.review || '').toString();
-      const discount = (p?.discount ?? p?.off ?? null);
-      const buyer_commission_cny = (p?.buyer_commission_cny ?? p?.buyerFeeCny ?? p?.buyer_fee_cny ?? null);
-      const seller_key = (p?.seller_key || p?.sellerId || p?.seller_id || '').toString() || null;
-      return {
-        app_key: cfg.app,
-        product_key: pickProductKey(p),
-        seller_key,
-        market,
-        asin,
-        asin_key: (p?.asin_key || p?.asinKey || null),
-        product_name: name,
-        review_req,
-        discount: (typeof discount==='number'?discount:discount),
-        buyer_commission_cny: (typeof buyer_commission_cny==='number'?buyer_commission_cny:buyer_commission_cny),
-        remark: (p?.remark || p?.note || '') ? String(p.remark || p.note || '') : null,
-        updated_at: new Date().toISOString()
-      };
-    }).filter(r=>r.product_key);
-
-    const orderRows = (st.orders||[]).map(o => {
-      const market = (o?.market || o?.Market || '').toString();
-      const asin = ((o?.asin || o?.ASIN || '') || '').toString();
-      const product_name = (o?.product_name || o?.product || o?.name || '').toString();
-      const seller_name = (o?.seller_name || o?.seller || o?.sellerName || '').toString();
-      const order_no = (o?.order_no || o?.orderNo || o?.order || '').toString();
-      const pay_status = (o?.pay_status || o?.principalStatus || o?.payStatus || '').toString() || null;
-      const review_status = (o?.review_status || o?.reviewStatus || '').toString() || null;
-      const payout_status = (o?.payout_status || o?.payoutStatus || '').toString() || null;
-      const review_req = (o?.review_req || o?.reviewType || o?.review || '').toString() || null;
-      const unit_price = (o?.unit_price ?? o?.price ?? null);
-      const fx_rate = (o?.fx_rate ?? o?.fx ?? null);
-      const seller_key = (o?.seller_key || o?.sellerId || o?.seller_id || '').toString() || (seller_name || null);
-      const product_key = (o?.product_key || o?.productId || o?.product_id || '').toString() || null;
-      const order_key = (o?.order_key || pickOrderKey({ ...o, seller_key, product_key })) || null;
-      return {
-        app_key: cfg.app,
-        order_key,
-        seller_key,
-        product_key,
-        order_no,
-        seller_name,
-        market,
-        asin,
-        product_name,
-        pay_status,
-        review_status,
-        payout_status,
-        pay_screenshot_url: o?.pay_screenshot_url || null,
-        review_screenshot_url: o?.review_screenshot_url || null,
-        payout_screenshot_url: o?.payout_screenshot_url || null,
-        review_link: o?.review_link || null,
-        note: (o?.note || o?.remark || null),
-        review_req,
-        unit_price,
-        fx_rate,
-        updated_at: new Date().toISOString()
-      };
-    }).filter(r=>r.order_key && r.order_no);
-
-    // batch upsert
-    const logs=[];
-    console.log(TAG,'push start', {sellers:sellerRows.length, products:productRows.length, orders:orderRows.length});
-
-    // sellers
-    for(const part of chunk(sellerRows, 300)){
-      await restUpsert(cfg, T_SELLERS, part, 'app_key,seller_key');
-    }
-    // products
-    for(const part of chunk(productRows, 300)){
-      await restUpsert(cfg, T_PRODUCTS, part, 'app_key,product_key');
-    }
-    // orders
-    for(const part of chunk(orderRows, 200)){
-      await restUpsert(cfg, T_ORDERS, part, 'app_key,order_key');
-    }
-
-    // optional snapshot backup (best effort)
-    try{
-      if(typeof window.cloudPushSnapshot === 'function'){
-        await window.cloudPushSnapshot(true);
-      }else if(typeof window.cloudPushForce === 'function'){
-        await window.cloudPushForce();
-      }
-    }catch(e){
-      console.warn(TAG,'snapshot backup skipped:', e.message);
-    }
-
-    alert(
-      '主库推送成功（表模式）\\n' +
-      `sellers=${sellerRows.length} products=${productRows.length} orders=${orderRows.length}\\n` +
-      '已写入：ops_sellers_v1 / ops_products_v1 / ops_orders_v1\\n' +
-      '（已尝试写一份快照备份）'
-    );
-  }
-
-  async function tablePull(){
-    const cfg = needCfg(pickCfg());
-    console.log(TAG,'pull start');
-    const sellers = await restSelectAll(cfg, T_SELLERS, '*');
-    const products = await restSelectAll(cfg, T_PRODUCTS, '*');
-    const orders = await restSelectAll(cfg, T_ORDERS, '*');
-
-    // reconstruct local-ish objects (best effort)
-    const localSellers = sellers.map(r => {
-      const raw = (r.note && typeof r.note==='object') ? r.note : {};
-      return Object.assign({}, raw, {
-        id: raw.id || r.seller_key,
-        seller_key: r.seller_key,
-        name: raw.name || r.seller_name,
-        seller_name: r.seller_name
-      });
-    });
-
-    const localProducts = products.map(r => {
-      // remark is text; keep row fields
-      return {
-        id: r.product_key,
-        product_key: r.product_key,
-        seller_key: r.seller_key || null,
-        market: r.market || '',
-        asin: r.asin || '',
-        asin_key: r.asin_key || null,
-        product_name: r.product_name || '',
-        review_req: r.review_req || '',
-        discount: r.discount,
-        buyer_commission_cny: r.buyer_commission_cny,
-        remark: r.remark || ''
-      };
-    });
-
-    const localOrders = orders.map(r => {
-      return {
-        id: r.order_key,
-        order_key: r.order_key,
-        seller_key: r.seller_key || null,
-        product_key: r.product_key || null,
-        order_no: r.order_no,
-        seller_name: r.seller_name,
-        market: r.market,
-        asin: r.asin || '',
-        product_name: r.product_name || '',
-        pay_status: r.pay_status,
-        review_status: r.review_status,
-        payout_status: r.payout_status,
-        review_req: r.review_req,
-        unit_price: r.unit_price,
-        fx_rate: r.fx_rate,
-        note: r.note || null,
-        pay_screenshot_url: r.pay_screenshot_url || null,
-        review_screenshot_url: r.review_screenshot_url || null,
-        payout_screenshot_url: r.payout_screenshot_url || null,
-        review_link: r.review_link || null
-      };
-    });
-
-    const payload = {
-      sellers: localSellers,
-      products: localProducts,
-      orders: localOrders,
-      batches: []
-    };
-
-    await writeLocalMainState(payload);
-
-    alert(
-      '主库拉取成功（表模式）\\n' +
-      `sellers=${localSellers.length} products=${localProducts.length} orders=${localOrders.length} batches=0\\n` +
-      '已写回：ops_v642_main/kv/main_state_v1\\n' +
-      '点击确定后将自动刷新页面。'
-    );
-    try{ location.reload(); }catch(e){}
-  }
-
-  // expose
-  window.cloudPushMain = tablePush;
-  window.cloudPullMain = tablePull;
-
-  // make default buttons use main table mode
-  window.cloudPush = tablePush;
-  window.cloudPull = tablePull;
-
-  // keep snapshot access if exists
-  if(window.cloudPushForce && !window.cloudPushSnapshot){
-    window.cloudPushSnapshot = window.cloudPushForce;
-  }
-
-  // takeover UI clicks (capture)
-  function matchBtn(t){
-    t = (t || '').replace(/\s+/g,'');
-    if(!t) return null;
-    // default buttons -> main
-    if(t.includes('云端推送')) return 'push_main';
-    if(t.includes('云端拉取')) return 'pull_main';
-    // keep force push as snapshot force (safety)
-    if(t.includes('强制推送')) return 'push_snapshot_force';
-    // status stays snapshot (it already reads snapshot counts)
-    if(t.includes('云端状态')) return 'status';
-    return null;
-  }
-
-  document.addEventListener('click', function(ev){
-    const el = ev.target && (ev.target.closest ? ev.target.closest('button,a,input[type="button"]') : ev.target);
-    if(!el) return;
-    const key = matchBtn(el.innerText || el.value || '');
-    if(!key) return;
-
-    // We only takeover push/pull; let others run
-    if(key==='push_main' || key==='pull_main' || key==='push_snapshot_force'){
-      ev.preventDefault();
-      ev.stopPropagation();
-      if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-    }
-
-    console.log(TAG,'takeover click =>', key);
-
-    if(key==='push_main') return tablePush().catch(e=>alert('主库推送失败：'+e.message));
-    if(key==='pull_main') return tablePull().catch(e=>alert('主库拉取失败：'+e.message));
-    if(key==='push_snapshot_force' && typeof window.cloudPushSnapshot === 'function'){
-      return window.cloudPushSnapshot(true).catch(e=>alert('强制推送失败：'+e.message));
-    }
-  }, true);
-
-  console.log(TAG,'installed. main tables=', {T_SELLERS,T_PRODUCTS,T_ORDERS});
-})();
-</script>
-<script>
-/**
- * SAFE DISPLAY PATCH (no-HTML injection)
- * Goals:
- * 1) Prevent "Invalid or unexpected token" caused by injecting raw JSON/text into JS/HTML.
- * 2) Clean literal "\n" and real newlines in UI text nodes (sellers/products lists).
- * 3) Keep existing snapshot REST push/pull working (do not touch your sync logic).
- */
-(function(){
-  'use strict';
-
-  // ---------- 0) Helpers ----------
-  function toStr(v){ return (v === null || v === undefined) ? '' : String(v); }
-
-  // Clean both real newlines and the two-character sequence "\n"
-  function cleanNL(s){
-    s = toStr(s);
-    // Replace literal backslash-n
-    s = s.replace(/\\n+/g, ' ');
-    // Replace real newline characters
-    s = s.replace(/\r?\n+/g, ' ');
-    // Collapse whitespace
-    s = s.replace(/\s{2,}/g, ' ').trim();
-    return s;
-  }
-
-  // Safe text setter (never innerHTML)
-  function setText(el, v){
-    if(!el) return;
-    el.textContent = cleanNL(v);
-  }
-
-  // ---------- 1) Global UI text cleanup (MutationObserver) ----------
-  // This fixes sellers/products pages showing "\n" in cells.
-  function scrubNodeText(root){
-    if(!root) return;
-    // Only touch text nodes inside common containers to reduce cost
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node){
-          const t = node.nodeValue;
-          if(!t) return NodeFilter.FILTER_REJECT;
-          if(t.indexOf('\\n') >= 0 || t.indexOf('\n') >= 0 || t.indexOf('\r') >= 0) {
-            return NodeFilter.FILTER_ACCEPT;
-          }
-          return NodeFilter.FILTER_REJECT;
-        }
-      }
-    );
-    const touched = [];
-    while(walker.nextNode()){
-      touched.push(walker.currentNode);
-    }
-    for(const n of touched){
-      n.nodeValue = cleanNL(n.nodeValue);
-    }
-  }
-
-  // Run once at start (after DOM ready)
-  function initScrubber(){
-    try { scrubNodeText(document.body); } catch(e) {}
-    const obs = new MutationObserver((muts)=>{
-      for(const m of muts){
-        if(m.type === 'characterData'){
-          try { m.target.nodeValue = cleanNL(m.target.nodeValue); } catch(e) {}
-        } else if(m.addedNodes && m.addedNodes.length){
-          for(const n of m.addedNodes){
-            try { scrubNodeText(n); } catch(e) {}
-          }
-        }
-      }
-    });
-    obs.observe(document.body, {subtree:true, childList:true, characterData:true});
-  }
-
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', initScrubber);
-  } else {
-    initScrubber();
-  }
-
-  // ---------- 2) Harden "cloud view" / "payload view" if exists ----------
-  // If previous code exposes window.cloudView / window.viewCloudPayload etc, we wrap it to avoid innerHTML usage.
-  // We do NOT parse or render huge JSON. Only show counts safely.
-  function safeShowPayloadSummary(payload){
-    try{
-      const sellers = Array.isArray(payload && payload.sellers) ? payload.sellers.length : 0;
-      const products = Array.isArray(payload && payload.products) ? payload.products.length : 0;
-      const orders = Array.isArray(payload && payload.orders) ? payload.orders.length : 0;
-      const batches = Array.isArray(payload && payload.batches) ? payload.batches.length : 0;
-
-      const msg =
-        '云端快照摘要（安全显示，不渲染原文）\\n' +
-        'sellers=' + sellers + ' products=' + products + ' orders=' + orders + ' batches=' + batches;
-
-      alert(msg);
-    }catch(e){
-      alert('云端快照摘要：读取失败（请看控制台）');
-      console.error('[SAFE_PATCH] safeShowPayloadSummary failed', e);
-    }
-  }
-
-  // If you have a function that returns payload, you can call window.safeShowPayloadSummary(payload)
-  window.safeShowPayloadSummary = safeShowPayloadSummary;
-
-  // ---------- 3) Guard against accidental HTML injection helpers ----------
-  // If some code uses a global "html()" or "setHTML()", block it by redefining to safe behavior.
-  // (Only if such functions exist; we won't break other code.)
-  try{
-    if(typeof window.setHTML === 'function'){
-      const old = window.setHTML;
-      window.setHTML = function(el, html){
-        // fallback to textContent to avoid parsing HTML with untrusted content
-        try { setText(el, html); } catch(e) {}
-        console.warn('[SAFE_PATCH] setHTML was overridden to safe textContent');
-        // keep old reference accessible if needed
-        window.__old_setHTML = old;
-      };
-    }
-  }catch(e){}
-
-  // ---------- 4) Optional: expose a quick checker ----------
-  window.__SAFE_PATCH_CHECK__ = function(){
-    const sample = 'a\\\\n\\\\n b\\n c';
-    console.log('[SAFE_PATCH] cleanNL sample =>', cleanNL(sample));
-    return true;
-  };
-
-  console.log('[SAFE_PATCH] installed: newline scrubber + safe payload summary');
 })();
 </script>
 
