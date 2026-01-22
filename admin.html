@@ -15070,29 +15070,24 @@ async function cloudStatusFixed(){
 </script>
 <script>
 /**
- * SNAPSHOT REST FORCE TAKEOVER (final)
- * 目标：无论页面里还有多少 PATCH/归档/SDK 同步逻辑，
- *      “云端推送/强制推送/云端拉取/云端状态” 四个按钮最终都只走快照表 ops_cloud_snapshots_v1。
+ * SNAPSHOT FORCE (IndexedDB-aware)
+ * 目标：云端按钮永远只走 ops_cloud_snapshots_v1，并且本地数据优先从 IndexedDB 读 main_state_v1（不依赖 window.S / localStorage）
  */
 (function(){
   const SNAP_TABLE = 'ops_cloud_snapshots_v1';
-  const TAG = '[SNAPSHOT_FORCE]';
+  const TAG = '[SNAPSHOT_FORCE_IDB]';
 
+  // ---------- Supabase cfg ----------
   function pickCfg(){
-    // 兼容各种版本的存储键（尽量自动找到）
     const ls = window.localStorage || {};
     const cfg = {
       url: ls.getItem('SUPABASE_URL') || ls.getItem('supabase_url') || ls.getItem('sb_url') || '',
       anon: ls.getItem('SUPABASE_ANON_KEY') || ls.getItem('supabase_anon') || ls.getItem('sb_anon') || '',
       app: ls.getItem('APP_KEY') || ls.getItem('app_key') || ls.getItem('APP') || 'dalemy',
     };
-
-    // 有些版本把配置挂在 window 上（尽量兜底）
-    if(!cfg.url && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.url) cfg.url = window.__CLOUD_CFG__.url;
-    if(!cfg.anon && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.anon) cfg.anon = window.__CLOUD_CFG__.anon;
-    if((!cfg.app || cfg.app==='dalemy') && window.__CLOUD_CFG__ && window.__CLOUD_CFG__.app) cfg.app = window.__CLOUD_CFG__.app;
-
-    // 如果还拿不到，就提示用户输入（只在真正调用时触发）
+    if(!cfg.url && window.__CLOUD_CFG__?.url) cfg.url = window.__CLOUD_CFG__.url;
+    if(!cfg.anon && window.__CLOUD_CFG__?.anon) cfg.anon = window.__CLOUD_CFG__.anon;
+    if((!cfg.app || cfg.app==='dalemy') && window.__CLOUD_CFG__?.app) cfg.app = window.__CLOUD_CFG__.app;
     return cfg;
   }
 
@@ -15100,7 +15095,6 @@ async function cloudStatusFixed(){
     if(!cfg.url) cfg.url = prompt('请输入 Supabase URL（形如 https://xxx.supabase.co ）') || '';
     if(!cfg.anon) cfg.anon = prompt('请输入 Supabase anon key') || '';
     if(!cfg.app) cfg.app = prompt('请输入 app_key（例如 dalemy）') || 'dalemy';
-    // 保存回 localStorage，后续不再弹
     try{
       localStorage.setItem('SUPABASE_URL', cfg.url);
       localStorage.setItem('SUPABASE_ANON_KEY', cfg.anon);
@@ -15141,43 +15135,151 @@ async function cloudStatusFixed(){
     return t ? JSON.parse(t) : [];
   }
 
-  function getLocalState(){
-    // 尽最大可能从 window.S / localStorage 取到状态；不在这里强依赖 IndexedDB
-    let S = null;
-    if(window.S && typeof window.S === 'object') S = window.S;
+  // ---------- IndexedDB helpers ----------
+  function openExistingDB(name){
+    return new Promise((resolve, reject) => {
+      let created = false;
+      const req = indexedDB.open(name);
+      req.onupgradeneeded = () => { created = true; }; // 表示原本不存在，会触发升级（我们不想创建空库）
+      req.onsuccess = () => {
+        const db = req.result;
+        if(created){
+          // 关闭并拒绝，避免意外创建新 DB
+          try{ db.close(); }catch(e){}
+          reject(new Error('db_not_exist:' + name));
+          return;
+        }
+        resolve(db);
+      };
+      req.onerror = () => reject(req.error || new Error('open_failed:' + name));
+    });
+  }
 
-    // 如果 window.S 为空，有些版本用 localStorage 快照
+  function idbGet(db, storeName, key){
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const st = tx.objectStore(storeName);
+      const req = st.get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('get_failed'));
+    });
+  }
+
+  function normalizeState(v){
+    // 兼容多种存储结构：{key,value:{...}} / {value:{...}} / 直接 {...}
+    const obj = v?.value ? v.value : v;
+    const S = obj && typeof obj === 'object' ? obj : {};
+    return {
+      sellers: Array.isArray(S.sellers) ? S.sellers : [],
+      products: Array.isArray(S.products) ? S.products : [],
+      orders: Array.isArray(S.orders) ? S.orders : [],
+      batches: Array.isArray(S.batches) ? S.batches : []
+    };
+  }
+
+  async function readLocalStateFromIDB(){
+    // 按你项目常见命名做多候选探测（命中一个即可）
+    const dbCandidates = [
+      'ops_v642_main',
+      'ops_v6_4_2_main',
+      'ops_rebuild_v6_4_2',
+      'ops_main',
+      'ops_v642',
+      'ops'
+    ];
+    const keyCandidates = [
+      'main_state_v1',
+      'ops_rebuild_v6_4_2_state',
+      'state',
+      'MAIN_STATE'
+    ];
+
+    for(const dbName of dbCandidates){
+      let db;
+      try{
+        db = await openExistingDB(dbName);
+      }catch(e){
+        continue;
+      }
+      try{
+        const stores = Array.from(db.objectStoreNames || []);
+        const storeCandidates = [];
+        if(stores.includes('kv')) storeCandidates.push('kv');
+        if(stores.includes('store')) storeCandidates.push('store');
+        if(stores.includes('state')) storeCandidates.push('state');
+        // 兜底：用第一个 store
+        if(storeCandidates.length === 0 && stores.length > 0) storeCandidates.push(stores[0]);
+
+        for(const stName of storeCandidates){
+          for(const k of keyCandidates){
+            try{
+              const v = await idbGet(db, stName, k);
+              if(v && (v.value || v.sellers || v.orders || v.products || v.batches)){
+                const S = normalizeState(v);
+                try{ db.close(); }catch(e){}
+                return { source:`idb:${dbName}/${stName}/${k}`, state:S };
+              }
+            }catch(e){}
+          }
+        }
+      } finally {
+        try{ db.close(); }catch(e){}
+      }
+    }
+    return null;
+  }
+
+  function readLocalStateFallback(){
+    // 兜底：如果某些版本确实有 window.S 或 localStorage 镜像
+    let S = null;
+    if(window.S && typeof window.S === 'object') S = normalizeState(window.S);
     if(!S){
       const raw = localStorage.getItem('ops_rebuild_v6_4_2_state') || localStorage.getItem('main_state_v1') || '';
       if(raw){
-        try{ S = JSON.parse(raw); }catch(e){}
+        try{ S = normalizeState(JSON.parse(raw)); }catch(e){}
       }
     }
-    // 兜底结构
-    S = S || {};
-    S.sellers = Array.isArray(S.sellers) ? S.sellers : [];
-    S.products = Array.isArray(S.products) ? S.products : [];
-    S.orders = Array.isArray(S.orders) ? S.orders : [];
-    S.batches = Array.isArray(S.batches) ? S.batches : [];
-    return S;
+    S = S || { sellers:[], products:[], orders:[], batches:[] };
+    return { source:'fallback', state:S };
   }
 
-  function writeLocalState(payload){
-    // 只做“尽力写回”，避免破坏原有结构
+  function writeLocalMirror(payload){
+    // 给后续同步/排错一个镜像（可选但强烈建议）
+    try{ localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(payload)); }catch(e){}
     try{
-      if(window.S && typeof window.S === 'object'){
-        window.S.sellers = payload.sellers || [];
-        window.S.products = payload.products || [];
-        window.S.orders = payload.orders || [];
-        window.S.batches = payload.batches || [];
-      }
-    }catch(e){}
-
-    try{
-      localStorage.setItem('ops_rebuild_v6_4_2_state', JSON.stringify(payload));
+      if(!window.S) window.S = {};
+      window.S.sellers = payload.sellers || [];
+      window.S.products = payload.products || [];
+      window.S.orders = payload.orders || [];
+      window.S.batches = payload.batches || [];
     }catch(e){}
   }
 
+  async function getLocalState(){
+    const hit = await readLocalStateFromIDB();
+    if(hit){
+      console.log(TAG, 'local state loaded from', hit.source, {
+        sellers: hit.state.sellers.length,
+        products: hit.state.products.length,
+        orders: hit.state.orders.length,
+        batches: hit.state.batches.length
+      });
+      // 写镜像，便于你后续用 S.orders.length 检查
+      writeLocalMirror(hit.state);
+      return hit;
+    }
+    const fb = readLocalStateFallback();
+    console.log(TAG, 'local state fallback', fb.source, {
+      sellers: fb.state.sellers.length,
+      products: fb.state.products.length,
+      orders: fb.state.orders.length,
+      batches: fb.state.batches.length
+    });
+    writeLocalMirror(fb.state);
+    return fb;
+  }
+
+  // ---------- Actions ----------
   async function snapshotStatus(){
     const cfg = needCfg(pickCfg());
     const row = await restSelect(cfg);
@@ -15199,12 +15301,12 @@ async function cloudStatusFixed(){
 
   async function snapshotPush(force){
     const cfg = needCfg(pickCfg());
-    const local = getLocalState();
+    const localHit = await getLocalState();
+    const local = localHit.state;
 
     const total = local.sellers.length + local.products.length + local.orders.length + local.batches.length;
     const cloud = await restSelect(cfg);
 
-    // 安全策略：本地全空且云端非空时，默认拦截（避免误清空）
     if(!force && total === 0 && cloud && cloud.payload){
       alert('已阻止推送：本地数据全为空，云端已有数据。若确认要覆盖为空，请点【强制推送】。');
       return;
@@ -15222,7 +15324,11 @@ async function cloudStatusFixed(){
     };
 
     await restUpsert(cfg, row);
-    alert(`推送成功：已写入快照表 ${SNAP_TABLE}\napp_key=${cfg.app}\n本地：sellers=${local.sellers.length} products=${local.products.length} orders=${local.orders.length} batches=${local.batches.length}`);
+    alert(
+      `推送成功：已写入快照表 ${SNAP_TABLE}\napp_key=${cfg.app}\n` +
+      `来源：${localHit.source}\n` +
+      `本地：sellers=${local.sellers.length} products=${local.products.length} orders=${local.orders.length} batches=${local.batches.length}`
+    );
   }
 
   async function snapshotPull(){
@@ -15239,17 +15345,24 @@ async function cloudStatusFixed(){
       orders: Array.isArray(p.orders) ? p.orders : [],
       batches: Array.isArray(p.batches) ? p.batches : []
     };
-    writeLocalState(payload);
-    alert(`拉取成功：已写回本地\nsellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n（如列表未刷新，请手动刷新页面）`);
+
+    // 写回本地镜像（你当前页面内部 IDB 写回逻辑较复杂，这里先保证“可验证”）
+    writeLocalMirror(payload);
+
+    alert(
+      `拉取成功：已写回本地镜像（window.S + localStorage）\n` +
+      `sellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n` +
+      `（如列表未刷新，请手动刷新页面）`
+    );
   }
 
-  // 1) 强制覆盖全局函数（无论前面怎么定义）
+  // 1) 强制覆盖全局入口
   window.cloudStatus = snapshotStatus;
   window.cloudPull = snapshotPull;
   window.cloudPush = function(){ return snapshotPush(false); };
   window.cloudPushForce = function(){ return snapshotPush(true); };
 
-  // 2) 捕获阶段接管按钮点击，阻断 PATCH7 / orders 归档等所有后续 onclick
+  // 2) 捕获阶段接管按钮点击，阻断其它补丁
   function matchBtn(t){
     t = (t || '').replace(/\s+/g,'');
     if(!t) return null;
@@ -15266,7 +15379,6 @@ async function cloudStatusFixed(){
     const key = matchBtn(el.innerText || el.value || '');
     if(!key) return;
 
-    // 彻底阻断其它补丁
     ev.preventDefault();
     ev.stopPropagation();
     if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
@@ -15282,6 +15394,7 @@ async function cloudStatusFixed(){
   console.log(TAG, 'installed. table=', SNAP_TABLE);
 })();
 </script>
+
 
 </body>
 </html>
