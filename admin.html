@@ -1195,6 +1195,21 @@ async function restInsertIgnore(cfg, table, onConflict, rows){
   return true;
 }
 
+
+async function restUpsertMerge(cfg, table, onConflict, rows){
+  const base = cfg.url.replace(/\/+$/,'');
+  const url = `${base}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`;
+  const r = await fetch(url, {
+    method:'POST',
+    headers: { ...restHeaders(cfg.anon), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(rows)
+  });
+  const text = await r.text();
+  if(!r.ok) throw new Error(`rest_upsert_merge_failed ${r.status} ${text.slice(0,200)}`);
+  return { ok:true };
+}
+
+
 async function restPatchOne(cfg, table, whereQuery, patchBody){
   const base = cfg.url.replace(/\/+$/,'');
   const url = `${base}/rest/v1/${table}?${whereQuery}`;
@@ -1209,42 +1224,43 @@ async function restPatchOne(cfg, table, whereQuery, patchBody){
 }
 
 function _mapOrderToMainRow(cfg, o){
-  const sellerId = String(o.sellerId||"").trim();
-  const orderId = String(o.orderId||"").trim();
+  // Business key: (app_key, seller_name, order_no) — do NOT derive unstable keys.
+  const seller_name = String(o.sellerId||"").trim();
+  const order_no = String(o.orderId||"").trim();
+  if(!seller_name || !order_no) return null;
+
   const asin = String(o.asin||"").trim();
-  const seller_key = _normKey(sellerId);
-  const order_key = _normKey(orderId);
-  const asin_key = _normKey(asin);
   const review_status = (o.review && o.review.status) ? String(o.review.status) : "PENDING";
   const review_link = (o.review && o.review.link) ? String(o.review.link) : null;
   const pay_status = (o.principal && o.principal.settled) ? "已收款" : "未收款";
   const payout_status = (o.commission && o.commission.settled) ? "已返佣" : "未返佣";
+
+  // product_name: prefer product library name, else title, else asin
+  let product_name = "";
+  try{
+    const pid = o.productId || null;
+    const p = pid ? (S.products||[]).find(x=>String(x.id)===String(pid)) : null;
+    product_name = (p && p.name) ? String(p.name) : (o.title ? String(o.title) : "");
+  }catch(e){ product_name = (o.title ? String(o.title) : ""); }
+  if(!product_name) product_name = asin || null;
+
   return {
     app_key: cfg.app,
-    order_no: orderId,
-    seller_name: sellerId,
+    seller_name,
+    order_no,
+
     market: String(o.market||"").trim() || null,
     asin: asin || null,
-    product_name: (function(){
-      // 优先：产品库名称；否则用标题/备注；再否则用 asin
-      const pid = o.productId || null;
-      const p = pid ? (S.products||[]).find(x=>String(x.id)===String(pid)) : null;
-      return (p && (p.name||p.title)) ? String(p.name||p.title) :
-             (o.title ? String(o.title) : (o.note ? String(o.note) : (asin||null)));
-    })(),
+    product_name: product_name ? String(product_name).trim() : null,
+
     pay_status,
     review_status,
     payout_status,
     review_link,
-    // 归档表允许字段以外的更新会被拦截，但插入时写入是允许的：尽量完整写入
-    note: (o.note ? String(o.note) : (o.title ? String(o.title) : "")) || null,
-    unit_price: (typeof o.amount==='number' ? o.amount : U.toNum(o.amount)),
-    fx_rate: (o.fxOverride!=null ? U.toNum(o.fxOverride) : (o.principal && o.principal.fx!=null ? U.toNum(o.principal.fx) : null)),
-    review_req: o.reviewReq ? String(o.reviewReq) : null,
-    order_key,
-    seller_key,
-    product_key: (o.productId ? String(o.productId) : null),
-    asin_key: asin_key || ""
+
+    pay_screenshot_url: o.pay_screenshot_url || o.payScreenshotUrl || null,
+    review_screenshot_url: o.review_screenshot_url || o.reviewScreenshotUrl || null,
+    payout_screenshot_url: o.payout_screenshot_url || o.payoutScreenshotUrl || null
   };
 }
 
@@ -1268,79 +1284,36 @@ async function mainOrdersPush(opts){
 
   try{
     const cfg = getCloudCfg();
-    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ if(!__silent) alert("请先完成云端设置（Supabase）"); return; }
+    if(!cfg || !cfg.url || !cfg.anon || !cfg.app){ if(!__silent) alert("请先完成云端设置（Supabase）"); return { ok:false, reason:"no_cfg" }; }
+
     const state = await getLocalSnapshotPreferIDB();
     const orders = (state && state.orders) ? state.orders : (S.orders||[]);
-    if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return; }
+    if(!orders || !orders.length){ showNotice("主表推送（订单）","本地订单为空，已跳过。"); return { ok:true, skipped:true }; }
 
     const rows = [];
     for(const o of orders){
-      if(!o) continue;
-      const sellerId = String(o.sellerId||"").trim();
-      const orderId = String(o.orderId||"").trim();
-      if(!sellerId || !orderId) continue;
-      rows.push(_mapOrderToMainRow(cfg, o));
+      const row = _mapOrderToMainRow(cfg, o);
+      if(row) rows.push(row);
     }
+    if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
 
-    const onConflict = "app_key,seller_key,order_key,asin_key";
+    // IMPORTANT: business unique key
+    const onConflict = "app_key,seller_name,order_no";
+
     const batch = 500;
     let sent = 0;
     for(let i=0;i<rows.length;i+=batch){
       const chunk = rows.slice(i, i+batch);
-      await restInsertIgnore(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
+      await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
       sent += chunk.length;
     }
 
-    // 同步“允许更新”的状态/凭证字段：仅对状态非默认的订单做 PATCH（避免大量请求）
-    const toPatch = [];
-    for(const o of orders){
-      if(!o) continue;
-      const sellerId = String(o.sellerId||"").trim();
-      const orderId = String(o.orderId||"").trim();
-      if(!sellerId || !orderId) continue;
-      const sig = _statusSig(o);
-      const key = `OPS_MAIN_STATUS_SIG__${cfg.app}__${_normKey(sellerId)}__${_normKey(orderId)}__${_normKey(o.asin||"")}`;
-      const prev = localStorage.getItem(key);
-      const hasSignal = (sig !== "0|0|PENDING||0|0|0");
-      if(hasSignal && sig !== prev){
-        toPatch.push({ o, key, sig });
-      }
-    }
-
-    const limit = 6;
-    let idx = 0, okN = 0, failN = 0;
-    async function worker(){
-      while(idx < toPatch.length){
-        const cur = toPatch[idx++]; 
-        const o = cur.o;
-        const seller_key = _normKey(o.sellerId);
-        const order_key = _normKey(o.orderId);
-        const asin_key = "";
-        const whereQ = `app_key=eq.${encodeURIComponent(cfg.app)}&seller_key=eq.${encodeURIComponent(seller_key)}&order_key=eq.${encodeURIComponent(order_key)}&asin_key=eq.${encodeURIComponent(asin_key)}`;
-        const patchBody = {
-          pay_status: (o.principal && o.principal.settled) ? "已收款" : "未收款",
-          review_status: (o.review && o.review.status) ? String(o.review.status) : "PENDING",
-          payout_status: (o.commission && o.commission.settled) ? "已返佣" : "未返佣",
-          review_link: (o.review && o.review.link) ? String(o.review.link) : null,
-          pay_screenshot_url: o.pay_screenshot_url || o.payScreenshotUrl || null,
-          review_screenshot_url: o.review_screenshot_url || o.reviewScreenshotUrl || null,
-          payout_screenshot_url: o.payout_screenshot_url || o.payoutScreenshotUrl || null
-        };
-        try{
-          await restPatchOne(cfg, MAIN_ORDERS_TABLE, whereQ, patchBody);
-          localStorage.setItem(cur.key, cur.sig);
-          okN++;
-        }catch(e){
-          failN++;
-        }
-      }
-    }
-    const workers = Array.from({length: Math.min(limit, toPatch.length||0)}, ()=>worker());
-    if(workers.length) await Promise.all(workers);
-
-    if(!__silent) showNotice("主表推送（订单）", `完成：尝试写入=${sent}（重复自动跳过）；状态同步=${okN} 成功 / ${failN} 失败`); return { ok:true, sent, okN, failN };
+    showNotice("主表推送（订单）", `推送完成：尝试写入=${sent}（按业务键合并，不会产生重复）`);
+    return { ok:true, sent };
   }catch(e){
-    if(!__silent) alert("主表推送失败：\n" + (e && e.message ? e.message : String(e))); else console.warn("主表推送失败", e); return { ok:false, error:(e && e.message ? e.message : String(e)) };
+    const msg = (e && e.message ? e.message : String(e));
+    if(!__silent) alert("主表推送失败：\n" + msg);
+    return { ok:false, error: msg };
   }
 }
 
@@ -1389,7 +1362,15 @@ const limit = 1000;
       const state = await getLocalSnapshotPreferIDB();
       const st = state || { sellers: S.sellers||[], products: S.products||[], orders: S.orders||[], batches: S.batches||[] };
       st.orders = Array.isArray(st.orders) ? st.orders.slice() : [];
-      const byKey = new Map(st.orders.map(x=>[x.key, x]));
+      const byKey = new Map();
+      // Normalize local order keys to business key (seller_name + order_no), and dedupe in-place
+      for(const x of st.orders){
+        if(!x) continue;
+        const nk = U.orderKey(x.sellerId, x.orderId, x.asin);
+        x.key = nk;
+        const ex = byKey.get(nk);
+        if(!ex) byKey.set(nk, x);
+      }
       for(const row of arr){
         const orderId = String(row.order_no||"").trim();
         const sellerId = String(row.seller_name||"").trim();
@@ -3186,7 +3167,7 @@ const U = {
     return ids;
   }
 
-  ,orderKey:(sellerId,orderId,asin)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}::${(asin||'').trim()}`
+  ,orderKey:(sellerId,orderId,asin)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}`
 };
 
 // money formatter helper used by payout UI (Fix6b)
