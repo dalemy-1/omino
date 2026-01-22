@@ -1715,28 +1715,64 @@ function scheduleAutoPushMain(reason){
   }catch(e){}
 }
 
+async function __resolveSupabaseClientOnce(){
+  try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
+  try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
+  try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
+  try{ if(typeof ensureSupabase==='function'){ const c = await ensureSupabase(); if(c && typeof c.from==='function') return c; } }catch(e){}
+  return null;
+}
+
+async function waitSupabaseClientReady(timeoutMs){
+  timeoutMs = Number(timeoutMs || 30000);
+  const t0 = Date.now();
+  while(Date.now() - t0 < timeoutMs){
+    const c = await __resolveSupabaseClientOnce();
+    if(c) return c;
+    await new Promise(r=>setTimeout(r, 500));
+  }
+  return null;
+}
+
 function startAutoPullMain(){
   try{
     const enabled = _getBoolLS(OPS_MAIN_AUTO_PULL_KEY, true);
     const ms = Number(localStorage.getItem(OPS_MAIN_AUTO_PULL_MS_KEY) || "15000");
     if(__autoPullTimer) clearInterval(__autoPullTimer);
     if(!enabled) return;
-    __autoPullTimer = setInterval(async ()=>{
-      if(__autoPullBusy) return;
-      if(document.hidden) return;
-      __autoPullBusy = true;
-      try{
-        await mainOrdersPullV2({ silent:true, maxPages: 2 });
-      }catch(e){
-        console.warn("[AUTO-PULL-MAIN] failed", e);
-      }finally{
-        __autoPullBusy = false;
+
+    // Delay starting the interval until Supabase client is ready.
+    (async ()=>{
+      const sb = await waitSupabaseClientReady(30000);
+      if(!sb){
+        console.warn("[AUTO-PULL-MAIN] supabase not ready; will retry in 10s");
+        setTimeout(()=>{ try{ startAutoPullMain(); }catch(e){} }, 10000);
+        return;
       }
-    }, (isFinite(ms) && ms>=5000) ? ms : 15000);
+
+      __autoPullTimer = setInterval(async ()=>{
+        if(__autoPullBusy) return;
+        if(document.hidden) return;
+
+        // Extra guard: if client becomes unavailable, skip this tick instead of throwing.
+        const ok = await __resolveSupabaseClientOnce();
+        if(!ok) return;
+
+        __autoPullBusy = true;
+        try{
+          await mainOrdersPullV2({ silent:true, maxPages: 2 });
+        }catch(e){
+          console.warn("[AUTO-PULL-MAIN] failed", e);
+        }finally{
+          __autoPullBusy = false;
+        }
+      }, (isFinite(ms) && ms>=5000) ? ms : 15000);
+    })();
   }catch(e){}
 }
 
 // Hook into canonical snapshot writes + idbSet(main_state_v1)
+ + idbSet(main_state_v1)
 (function(){
   try{
     const __origWrite = (typeof _writeCanonicalSnapshot === "function") ? _writeCanonicalSnapshot : null;
