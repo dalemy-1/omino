@@ -1501,7 +1501,7 @@ const limit = 1000;
 async function mainOrdersPullV2(opts){
   opts = opts||{};
   // Resolve Supabase client (different builds expose different globals)
-  let sb = await (async ()=>{
+  /*resolver_removed*/ await (async ()=>{
     try{ if(window.supabase && typeof window.supabase.from==='function') return window.supabase; }catch(e){}
     try{ if(typeof supabase!=='undefined' && supabase && typeof supabase.from==='function') return supabase; }catch(e){}
     try{ if(typeof getClient==='function'){ const c = getClient(); if(c && typeof c.from==='function') return c; } }catch(e){}
