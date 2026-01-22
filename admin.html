@@ -1140,6 +1140,15 @@ async function cloudPull(opts){
 
 
 /* ===================== Main Orders (ops_orders_v1 · Archive Mode) ===================== */
+function restHeaders(anon){
+  return {
+    'apikey': anon,
+    'Authorization': 'Bearer ' + anon,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+}
+
 const MAIN_ORDERS_TABLE = "ops_orders_v1";
 const MAIN_LAST_ID_KEY_PREFIX = "OPS_MAIN_ORDERS_LAST_ID__";
 
