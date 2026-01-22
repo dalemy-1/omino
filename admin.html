@@ -1551,6 +1551,7 @@ async function mainOrdersPullV2(opts){
   if(!Array.isArray(base.products)) base.products = [];
   if(!Array.isArray(base.batches)) base.batches = [];
   if(!Array.isArray(base.orders)) base.orders = [];
+  const __priorOrderCount = base.orders.length;
 
   // Cursor: use stored cursor if exists
   let cur = (base.__cloud_orders_cursor && typeof base.__cloud_orders_cursor === 'object') ? base.__cloud_orders_cursor : null;
@@ -1629,7 +1630,21 @@ async function mainOrdersPullV2(opts){
     }
   }
 
-  base.orders = Array.from(map.values());
+  const __newOrders = Array.from(map.values());
+  // HARD GUARD: never wipe local orders on pull/merge (protect against app_key mismatch or empty pull)
+  if(__priorOrderCount>0 && __newOrders.length===0){
+    try{
+      if(__before){
+        if(typeof S!=='undefined') S = __before;
+        window.S = __before;
+      }
+    }catch(e){}
+    try{ alert('主表拉取保护：检测到合并结果为 0（可能是 app_key 不匹配/拉取条件错误）。已回滚本地数据，未执行清空。
+
+请检查：云端设置中的 app_key 是否为 dalemy，并重试。'); }catch(e){}
+    return {error:'merge_would_wipe_local'};
+  }
+  base.orders = __newOrders;
 
   // Rebind runtime state for renderers that use module-level S
   try{ if(typeof S!=='undefined') S = base; }catch(e){}
