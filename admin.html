@@ -1297,13 +1297,44 @@ async function mainOrdersPush(opts){
     }
     if(!rows.length){ showNotice("主表推送（订单）","无可推送订单（卖家/订单号为空），已跳过。"); return { ok:true, skipped:true }; }
 
+    
+    function __dedupMainRows(arr){
+      const by = new Map();
+      const score = (r)=>{
+        let s=0;
+        const has=(v)=>v!==undefined && v!==null && String(v).trim()!=='';
+        if(has(r.pay_status)) s+=2;
+        if(has(r.review_status)) s+=2;
+        if(has(r.payout_status)) s+=2;
+        if(has(r.review_link)) s+=1;
+        if(has(r.asin)) s+=1;
+        if(has(r.product_name)) s+=1;
+        // prefer newer
+        const t = Date.parse(r.updated_at||'') || 0;
+        return s*1000000000000 + t;
+      };
+      for(const r of arr){
+        const k = `${r.app_key||''}||${(r.seller_name||'').trim()}||${(r.order_no||'').trim()}`;
+        const ex = by.get(k);
+        if(!ex){ by.set(k,r); continue; }
+        if(score(r) > score(ex)) by.set(k,r);
+      }
+      const out = Array.from(by.values());
+      const dropped = arr.length - out.length;
+      if(dropped>0) console.warn("[MAIN_ORDERS_PUSH] dropped duplicates in payload:", dropped);
+      return out;
+    }
+
     // IMPORTANT: business unique key
     const onConflict = "app_key,seller_name,order_no";
 
+    const rows2 = __dedupMainRows(rows);
+
+
     const batch = 500;
     let sent = 0;
-    for(let i=0;i<rows.length;i+=batch){
-      const chunk = rows.slice(i, i+batch);
+    for(let i=0;i<rows2.length;i+=batch){
+      const chunk = rows2.slice(i, i+batch);
       await restUpsertMerge(cfg, MAIN_ORDERS_TABLE, onConflict, chunk);
       sent += chunk.length;
     }
@@ -1327,6 +1358,7 @@ async function __saveLocalMainStateSafe(st){
   try{ if(typeof persist==='function'){ persist(); return true; } }catch(e){}
   return false;
 }
+try{ window.__saveLocalMainStateSafe = __saveLocalMainStateSafe; }catch(e){}
 
 async function mainOrdersPull(opts){
   opts = opts || {};
@@ -1428,7 +1460,7 @@ const limit = 1000;
         }
       }
 
-      await saveLocalState(st, "main_orders_pull");
+      await __saveLocalMainStateSafe(st, "main_orders_pull");
       S = st;
       render();
 
@@ -3178,7 +3210,7 @@ const U = {
     return ids;
   }
 
-  ,orderKey:(sellerId,orderId,asin)=>`${(sellerId||'').trim()}::${(orderId||'').trim()}`
+  ,orderKey:(sellerLike,orderLike)=>{const ord=(orderLike||"").trim();let s=(sellerLike||"").trim();const isUuid=(v)=>/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);if(isUuid(s) && typeof S!=="undefined" && S && Array.isArray(S.sellers)){const hit=S.sellers.find(x=>String(x.id||"").trim()===s);if(hit && hit.name) s=String(hit.name).trim();}return `${s}::${ord}`;}
 };
 
 // money formatter helper used by payout UI (Fix6b)
@@ -5509,6 +5541,7 @@ function __mapCommissionStatus(v){
   if(["已收","已返佣","已结算","SETTLED","settled"].includes(s)) return true;
   return false;
 }
+try{ window.__saveLocalMainStateSafe = __saveLocalMainStateSafe; }catch(e){}
 
 async function importOrdersCsvFile(file){
   const txt = await __readFileTextSmart(file);
