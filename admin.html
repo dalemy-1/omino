@@ -14780,7 +14780,39 @@ function bind(){
       settings: st.settings && typeof st.settings==="object" ? st.settings : {},
       seq: st.seq && typeof st.seq==="object" ? st.seq : {}
     };
-    return out;
+    
+    // Normalize order field naming (snake_case <-> camelCase) to keep UI stable across cloud pull/push
+    try{
+      out.orders = (out.orders||[]).map((o)=>{
+        if(!o || typeof o!=='object') return o;
+        const x = { ...o };
+        // seller
+        if(x.sellerName==null && x.seller_name!=null) x.sellerName = x.seller_name;
+        if(x.seller_name==null && x.sellerName!=null) x.seller_name = x.sellerName;
+        // order no
+        if(x.orderNo==null && x.order_no!=null) x.orderNo = x.order_no;
+        if(x.order_no==null && x.orderNo!=null) x.order_no = x.orderNo;
+        // product
+        if(x.productName==null && x.product_name!=null) x.productName = x.product_name;
+        if(x.product_name==null && x.productName!=null) x.product_name = x.productName;
+        // item key
+        if(x.itemKey==null && x.item_key!=null) x.itemKey = x.item_key;
+        if(x.item_key==null && x.itemKey!=null) x.item_key = x.itemKey;
+        // asin
+        if(x.asin==null && x.ASIN!=null) x.asin = x.ASIN;
+        // market
+        if(x.market==null && x.Market!=null) x.market = x.Market;
+        // review/pay/payout status
+        if(x.reviewStatus==null && x.review_status!=null) x.reviewStatus = x.review_status;
+        if(x.review_status==null && x.reviewStatus!=null) x.review_status = x.reviewStatus;
+        if(x.payStatus==null && x.pay_status!=null) x.payStatus = x.pay_status;
+        if(x.pay_status==null && x.payStatus!=null) x.pay_status = x.payStatus;
+        if(x.payoutStatus==null && x.payout_status!=null) x.payoutStatus = x.payout_status;
+        if(x.payout_status==null && x.payoutStatus!=null) x.payout_status = x.payoutStatus;
+        return x;
+      });
+    }catch(e){}
+return out;
   }
 
   async function loadLocalMainState(){
@@ -14791,14 +14823,7 @@ function bind(){
         return { state: normalizeState(v), source: "idb:"+IDB_DB+"/"+IDB_STORE+"/"+IDB_KEY };
       }
     }catch(e){}
-    // 2) Fallback: existing helper if present
-    try{
-      if(typeof window.getLocalSnapshotPreferIDB === "function"){
-        const r = await window.getLocalSnapshotPreferIDB();
-        const st = r && (r.data||r.state||r);
-        if(st && typeof st === "object") return { state: normalizeState(st), source: (r&&r.source)||"helper" };
-      }
-    }catch(e){}
+    // 2) (disabled) helper fallback removed to avoid overwriting with empty snapshot state
     // 3) Fallback: localStorage
     try{
       const raw = localStorage.getItem(LS_KEY);
