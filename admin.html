@@ -444,6 +444,7 @@ function getCloudCfg(){
       if(!o.app_key) o.app_key = ak;
       if(!o.appKey) o.appKey = ak;
     }
+    if(!o.app) o.app = ak;
 
     // Fill url/anon if missing
     if(!o.url) o.url = first(urlKeys);
@@ -472,6 +473,7 @@ function setCloudCfg(cfg){
       o.app_key = ak;
       o.appKey = ak;
     }
+    o.app = ak;
     localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify(o));
   }catch(e){}
 }
@@ -485,7 +487,7 @@ function cloudPromptAndSave(){
   const appKey = prompt("请输入 app_key（用于区分不同系统/不同数据集，例如：ops_v9）", cur.appKey || "ops_v9");
   if(appKey === null) return;
   const _ak = String(appKey||"").trim();
-  const cfg = { url: String(url||"").trim(), anon: String(anon||"").trim(), appKey: _ak, app_key: _ak };
+  const cfg = { url: String(url||"").trim(), anon: String(anon||"").trim(), appKey: _ak, app_key: _ak, app: _ak };
   setCloudCfg(cfg);
   if(typeof toast === "function") toast("已保存云端设置");
   else alert("已保存云端设置");
@@ -570,6 +572,7 @@ function getCloudCfgOrNull(){
   // 统一补齐字段，后续模块可直接使用
   cfg.appKey = ak;
   cfg.app_key = ak;
+  cfg.app = ak;
   return cfg;
 }
 
