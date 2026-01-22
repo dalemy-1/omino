@@ -2681,6 +2681,14 @@ const U = {
   money(v){ return U.num(v).toFixed(2); },
   esc(v){ const s=String(v??''); return s.replace(/[&<>"']/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); },
   escAttr(v){ return U.esc(v); },
+  cleanText(v){
+    if(v==null) return '';
+    let s=String(v);
+    // remove literal \\n and real newlines
+    s=s.replace(/\\n/g,' ').replace(/\r?\n/g,' ');
+    s=s.replace(/\s+/g,' ').trim();
+    return s;
+  },
   marketToCurrency(m){ return (MARKETS.find(x=>x.m===m)||{}).c || ""; },
   marketToFxKey(m){
     if(m==="US") return "usd";
@@ -2691,8 +2699,8 @@ const U = {
   },
   sellerById(id){ return S.sellers.find(x=>x.id===id) || null; },
   productById(id){ return S.products.find(x=>x.id===id) || null; },
-  sellerName(id){ return (U.sellerById(id)||{}).name || ""; },
-  productName(id){ return (U.productById(id)||{}).name || ""; },
+  sellerName(id){ return U.cleanText((U.sellerById(id)||{}).name || ""); },
+  productName(id){ return U.cleanText((U.productById(id)||{}).name || ""); },
   reviewName(k){ return (REVIEW_TYPES.find(x=>x.k===k)||{}).n || k; },
   shortReviewType(val){ const s=String(val||''); return s.length>4 ? s.slice(0,4) : s; },
   badgeReview(status){
@@ -3286,9 +3294,9 @@ function renderSellers(){
     const cmSummary = `文:${U.money(s.commission.TEXT)} 图:${U.money(s.commission.IMAGE)} 视:${U.money(s.commission.VIDEO)} 免:${U.money(s.commission.FREE)} FB:${U.money(s.commission.FREE_FB)} 点:${U.money(s.commission.STAR)}`;
     return `<tr>
       <td class="mono">${esc(s.id)}</td>
-      <td>${esc(s.name)}</td>
-      <td>${esc(s.contact||"")}</td>
-      <td>${esc(s.remark||"")}</td>
+      <td>${esc(U.cleanText(s.name))}</td>
+      <td>${esc(U.cleanText(s.contact||""))}</td>
+      <td>${esc(U.cleanText(s.remark||""))}</td>
       <td class="small">${esc(fxSummary)}</td>
       <td class="small">${esc(cmSummary)}</td>
       <td class="right">
@@ -3328,9 +3336,9 @@ function renderProducts(){
   const list = (S.products||[]).filter(p=>{
     if(!q) return true;
     const sname = U.sellerName(p.sellerId).toLowerCase();
-    return (p.name||"").toLowerCase().includes(q) ||
-           (p.asin||"").toLowerCase().includes(q) ||
-           (p.market||"").toLowerCase().includes(q) ||
+    return (U.cleanText(p.name||"").toLowerCase().includes(q)) ||
+           (U.cleanText(p.asin||"").toLowerCase().includes(q)) ||
+           (U.cleanText(p.market||"").toLowerCase().includes(q)) ||
            sname.includes(q);
   });
 
@@ -3344,11 +3352,11 @@ function renderProducts(){
 
   const rows = pageList.map(p=>{
     return `<tr>
-      <td>${esc(p.name)}</td>
-      <td class="mono">${esc(p.asin||"")}</td>
-      <td>${esc(p.market||"")}</td>
+      <td>${esc(U.cleanText(p.name))}</td>
+      <td class="mono">${esc(U.cleanText(p.asin||""))}</td>
+      <td>${esc(U.cleanText(p.market||""))}</td>
       <td>${esc(p.market?U.marketToCurrency(p.market):"")}</td>
-      <td>${esc(U.sellerName(p.sellerId))}</td>
+      <td>${esc(U.cleanText(U.sellerName(p.sellerId)))}</td>
       <td>${esc(U.reviewName(p.reviewType))}</td>
       <td class="right">${esc(U.money(p.discount||0))}</td>
       <td class="right">
@@ -3617,9 +3625,9 @@ function renderOrders(){
     const frag = document.createDocumentFragment();
     for(let k=0; k<chunkSize && idx<pageItems.length; k++, idx++){
       const o = pageItems[idx];
-      const sellerName = sellerMap.get(o.sellerId)?.name || "";
+      const sellerName = U.cleanText(sellerMap.get(o.sellerId)?.name || "");
       const pObj = productMap.get(o.productId);
-      const pName = (pObj && pObj.name) ? pObj.name : (o.title||"");
+      const pName = U.cleanText((pObj && pObj.name) ? pObj.name : (o.title||""));
       const pCny = (o.principal && (o.principal.amountCny||0)) || 0;
       const cm = (o.commission && (o.commission.amountCny||0)) || 0;
       const pSett = (o.principal && o.principal.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
@@ -3632,9 +3640,9 @@ function renderOrders(){
         <td>${esc(U.dateMD(o.date))}</td>
         <td class="mono">${esc(o.orderId)}</td>
         <td>${esc(sellerName)}</td>
-        <td>${esc(o.market||"")}</td>
+        <td>${esc(U.cleanText(o.market||""))}</td>
         <td>${esc(pName)}</td>
-        <td class="mono">${esc(o.asin||"")}</td>
+        <td class="mono">${esc(U.cleanText(o.asin||""))}</td>
         <td>${U.badgeReview(o.review && o.review.status)}</td>
         <td>${esc(U.reviewName(o.reviewReq||"TEXT"))}</td>
         <td class="right">${esc(U.money(o.amount||0))}</td>
