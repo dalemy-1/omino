@@ -15014,28 +15014,79 @@ async function cloudStatusFixed(){
   }
 
   async function snapshotPull(){
-    const cfg = loadCloudCfg();
-    if(!cfg.app) return toast('请先在云端设置里保存 app_key / url / anon');
-    try{
-      const rows = await snapshotSelect(cfg);
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-      if(!row || !row.payload){
-        return toast('云端拉取：云端快照为空（'+TABLE+'）');
-      }
-      const payload = row.payload;
-      await writeMainState(payload);
-      const c = countsOf(payload);
-      toast('云端拉取成功（快照 REST）\\n'+TABLE+'\\napp_key='+cfg.app+'\\n已写回本地：sellers='+c.sellers+' products='+c.products+' orders='+c.orders+' batches='+c.batches+'\\n将刷新页面以重渲染');
-      // best-effort re-render
-      try{
-        if(typeof window.render==='function'){ window.render(); return; }
-      }catch(e){}
-      try{ location.reload(); }catch(e){}
-    }catch(e){
-      log('pull failed', e);
-      toast('云端拉取失败：'+(e && e.message ? e.message : e));
-    }
+  const cfg = needCfg(pickCfg());
+  const row = await restSelect(cfg);
+  if(!row || !row.payload){
+    alert(`云端拉取：云端无快照（${SNAP_TABLE}）`);
+    return;
   }
+  const p = row.payload || {};
+  const payload = {
+    sellers: Array.isArray(p.sellers) ? p.sellers : [],
+    products: Array.isArray(p.products) ? p.products : [],
+    orders: Array.isArray(p.orders) ? p.orders : [],
+    batches: Array.isArray(p.batches) ? p.batches : []
+  };
+
+  // 1) 写镜像（便于排查）
+  writeLocalMirror(payload);
+
+  // 2) 写回 IndexedDB 主库（权威）
+  //    目标：ops_v642_main / kv / main_state_v1  （与你推送来源一致）
+  const DB_NAME = 'ops_v642_main';
+  const STORE = 'kv';
+  const KEY = 'main_state_v1';
+
+  function openDBExact(name){
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(name);
+      req.onupgradeneeded = () => {
+        // 不允许在这里创建结构，避免误伤
+        reject(new Error('IndexedDB 结构不匹配或库不存在：' + name));
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('open_failed'));
+    });
+  }
+
+  function idbPut(db, storeName, key, value){
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const st = tx.objectStore(storeName);
+      // 兼容你现有的 kv 结构：多数版本存 { key, value }
+      const obj = { key, value };
+      const req = st.put(obj);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error || new Error('put_failed'));
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error || new Error('tx_failed'));
+    });
+  }
+
+  let wrote = false;
+  try{
+    const db = await openDBExact(DB_NAME);
+    await idbPut(db, STORE, KEY, payload);
+    try{ db.close(); }catch(e){}
+    wrote = true;
+  }catch(e){
+    alert('拉取成功，但写回本地主库失败：' + e.message + '\n请把这条提示截图发我，我会做兼容写回。');
+    return;
+  }
+
+  // 3) 尝试触发系统刷新（如果原系统有对应方法）
+  try{
+    if(typeof window.loadState === 'function') await window.loadState();
+    if(typeof window.render === 'function') window.render();
+  }catch(e){}
+
+  alert(
+    `拉取成功：已写回本地主库（IndexedDB）+ 镜像\n` +
+    `sellers=${payload.sellers.length} products=${payload.products.length} orders=${payload.orders.length} batches=${payload.batches.length}\n` +
+    (wrote ? '已写入：ops_v642_main/kv/main_state_v1\n' : '') +
+    `如页面未自动刷新，请手动刷新一次。`
+  );
+}
 
   // hard override globals used by buttons
   window.cloudStatus = snapshotStatus;
