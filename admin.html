@@ -16068,34 +16068,47 @@ return out;
 </script>
 
 <script>
-/* === PATCH V12.2.9 PERSIST_GUARD + FIELD_MAP === */
+
+/* === PATCH V12.3.0 PERSIST_GUARD(IDB Shadow) + FIELD_MAP ===
+   Fix:
+   1) 页面“主表拉取后卡死/假死”主要来自 localStorage JSON.stringify(大对象) 阻塞主线程。
+      => 改为 IndexedDB shadow（结构化克隆，不做 stringify），且后台异步写入。
+   2) 刷新后 orders 变 0：当启动流程把主状态覆盖为空时，用 shadow 自动恢复一次。
+   3) 订单字段 snake_case / camelCase 混用：补齐双向字段，避免列表列错乱。
+*/
 (function(){
-  function safeJsonParse(s){ try{return JSON.parse(s);}catch(e){return null;} }
-  function getCfg(){ try{ return (typeof getCloudCfg==='function') ? getCloudCfg() : null; }catch(e){ return null; } }
-  function getAppKey(){
-    const c=getCfg();
-    return (c && (c.app||c.app_key)) ? (c.app||c.app_key) : (localStorage.getItem('OPS_APP_KEY_V1')||'dalemy');
-  }
-  function goodKey(){ return 'OPS_LAST_GOOD_MAIN_STATE_V1__' + getAppKey(); }
+  const SHADOW_DB = 'ops_v642_main';
+  const SHADOW_STORE = 'kv';
+  const SHADOW_KEY = '__last_good_shadow_v1';
+
+  function safeJsonParse(s){ try{return JSON.parse(s);}catch(_){return null;} }
 
   function ensureOrderFields(o){
     if(!o || typeof o!=='object') return o;
-    if(o.seller_name==null && o.sellerName!=null) o.seller_name=o.sellerName;
-    if(o.sellerName==null && o.seller_name!=null) o.sellerName=o.seller_name;
-    if(o.order_no==null && o.orderNo!=null) o.order_no=o.orderNo;
+    // id/keys
     if(o.orderNo==null && o.order_no!=null) o.orderNo=o.order_no;
-    if(o.item_key==null && o.itemKey!=null) o.item_key=o.itemKey;
+    if(o.order_no==null && o.orderNo!=null) o.order_no=o.orderNo;
+    if(o.sellerName==null && o.seller_name!=null) o.sellerName=o.seller_name;
+    if(o.seller_name==null && o.sellerName!=null) o.seller_name=o.sellerName;
     if(o.itemKey==null && o.item_key!=null) o.itemKey=o.item_key;
-    if(o.product_name==null && o.productName!=null) o.product_name=o.productName;
+    if(o.item_key==null && o.itemKey!=null) o.item_key=o.itemKey;
+
     if(o.productName==null && o.product_name!=null) o.productName=o.product_name;
+    if(o.product_name==null && o.productName!=null) o.product_name=o.productName;
+
     if(o.asin==null && o.ASIN!=null) o.asin=o.ASIN;
     if(o.market==null && o.Market!=null) o.market=o.Market;
+
+    // statuses
     if(o.review_status==null && o.reviewStatus!=null) o.review_status=o.reviewStatus;
     if(o.reviewStatus==null && o.review_status!=null) o.reviewStatus=o.review_status;
+
     if(o.pay_status==null && o.payStatus!=null) o.pay_status=o.payStatus;
     if(o.payStatus==null && o.pay_status!=null) o.payStatus=o.pay_status;
+
     if(o.payout_status==null && o.payoutStatus!=null) o.payout_status=o.payoutStatus;
     if(o.payoutStatus==null && o.payout_status!=null) o.payoutStatus=o.payout_status;
+
     return o;
   }
 
@@ -16109,15 +16122,61 @@ return out;
     return st;
   }
 
-  function saveGoodState(st){
-    try{
-      const n=normalizeState(st);
-      localStorage.setItem(goodKey(), JSON.stringify({ts:Date.now(), state:n}));
-    }catch(e){}
+  function openShadowDB(){
+    return new Promise((resolve, reject)=>{
+      try{
+        const req = indexedDB.open(SHADOW_DB);
+        req.onerror = ()=>reject(req.error || new Error('indexedDB.open failed'));
+        req.onsuccess = ()=> resolve(req.result);
+      }catch(e){ reject(e); }
+    });
   }
-  function loadGoodState(){
-    const obj=safeJsonParse(localStorage.getItem(goodKey()));
-    return (obj && obj.state) ? normalizeState(obj.state) : null;
+  async function idbGet(key){
+    const db = await openShadowDB();
+    return new Promise((resolve, reject)=>{
+      try{
+        const tx = db.transaction([SHADOW_STORE], 'readonly');
+        const st = tx.objectStore(SHADOW_STORE);
+        const r = st.get(key);
+        r.onsuccess = ()=> resolve(r.result || null);
+        r.onerror = ()=> reject(r.error || new Error('idb get failed'));
+      }catch(e){ reject(e); }
+    });
+  }
+  async function idbPut(rec){
+    const db = await openShadowDB();
+    return new Promise((resolve, reject)=>{
+      try{
+        const tx = db.transaction([SHADOW_STORE], 'readwrite');
+        const st = tx.objectStore(SHADOW_STORE);
+        const r = st.put(rec);
+        r.onsuccess = ()=> resolve(true);
+        r.onerror = ()=> reject(r.error || new Error('idb put failed'));
+      }catch(e){ reject(e); }
+    });
+  }
+
+  let _shadowSaveTimer = 0;
+  function scheduleShadowSave(st){
+    // 去抖：避免频繁写入，且不阻塞主线程
+    try{ if(_shadowSaveTimer) clearTimeout(_shadowSaveTimer); }catch(e){}
+    _shadowSaveTimer = setTimeout(async ()=>{
+      try{
+        const n = normalizeState(st);
+        if(!n || !n.orders || !n.orders.length) return;
+        await idbPut({ key: SHADOW_KEY, value: n, updated_at: new Date().toISOString() });
+      }catch(e){
+        // ignore
+      }
+    }, 300);
+  }
+
+  async function loadShadow(){
+    try{
+      const rec = await idbGet(SHADOW_KEY);
+      const v = rec && rec.value ? rec.value : null;
+      return v ? normalizeState(v) : null;
+    }catch(e){ return null; }
   }
 
   function wrapSaver(){
@@ -16128,32 +16187,13 @@ return out;
       const res = await fn(st);
       try{
         const cur = (st && typeof st==='object') ? st : (window.S||window.state||null);
-        if(cur && cur.orders) saveGoodState(cur);
+        if(cur && cur.orders) scheduleShadowSave(cur);
       }catch(e){}
       return res;
     };
     wrapped.__persistGuardWrapped = true;
     try{ window.__saveLocalMainStateSafe = wrapped; }catch(e){}
     try{ window.saveLocalMainState = wrapped; }catch(e){}
-  }
-
-  function bootRestore(){
-    setTimeout(function(){
-      try{
-        const cur = window.S || window.state || {};
-        const curOrders = (cur && Array.isArray(cur.orders)) ? cur.orders.length : 0;
-        if(curOrders===0){
-          const backup = loadGoodState();
-          if(backup && backup.orders && backup.orders.length>0){
-            window.S = backup; window.state = backup;
-            try{ S = backup; }catch(e){}
-            try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
-            try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(e){}
-            console.warn('[PERSIST_GUARD] restored state from last-good shadow:', backup.orders.length);
-          }
-        }
-      }catch(e){}
-    }, 1200);
   }
 
   function wrapShowNotice(){
@@ -16164,7 +16204,7 @@ return out;
       try{
         if(String(title||'').indexOf('主表拉取')>=0 || String(title||'').indexOf('主表推送')>=0){
           const cur = window.S || window.state;
-          if(cur && cur.orders) saveGoodState(cur);
+          if(cur && cur.orders) scheduleShadowSave(cur);
         }
       }catch(e){}
       return r;
@@ -16173,7 +16213,27 @@ return out;
     window.showNotice = wrapped;
   }
 
+  function bootRestore(){
+    setTimeout(async function(){
+      try{
+        const cur = window.S || window.state || {};
+        const curOrders = (cur && Array.isArray(cur.orders)) ? cur.orders.length : 0;
+        if(curOrders===0){
+          const backup = await loadShadow();
+          if(backup && backup.orders && backup.orders.length>0){
+            window.S = backup; window.state = backup;
+            try{ S = backup; }catch(e){}
+            try{ if(typeof renderAll==='function') renderAll(); }catch(e){}
+            try{ if(typeof window.renderAll==='function') window.renderAll(); }catch(e){}
+            console.warn('[PERSIST_GUARD] restored state from IDB shadow:', backup.orders.length);
+          }
+        }
+      }catch(e){}
+    }, 1200);
+  }
+
   wrapSaver(); wrapShowNotice(); bootRestore();
+
   let tries=0;
   const it=setInterval(function(){
     wrapSaver(); wrapShowNotice();
