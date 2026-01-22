@@ -3296,7 +3296,7 @@ function renderSellers(){
         <button class="btn danger" onclick="Actions.deleteSeller('${esc(s.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
 
   $("sellerRows").innerHTML = rows || `<tr><td colspan="7" class="small">暂无卖家</td></tr>`;
 
@@ -3357,7 +3357,7 @@ function renderProducts(){
         <button class="btn danger" onclick="Actions.deleteProduct('${esc(p.id)}')">删除</button>
       </td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
 
   $("productRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无产品</td></tr>`;
 
@@ -3404,7 +3404,7 @@ function filteredOrders(){
     if(cs==="SETTLED" && !o.commission.settled) return false;
 
     if(qraw){
-      const hay = [o.orderId,o.note,o.asin,U.sellerName(o.sellerId||""),o.market, U.productName(o.productId||"")].join("\n").toLowerCase();
+      const hay = [o.orderId,o.note,o.asin,U.sellerName(o.sellerId||""),o.market, U.productName(o.productId||"")].join("\\n").toLowerCase();
       if(!hay.includes(qraw)) return false;
     }
     return true;
@@ -3698,7 +3698,7 @@ function exportOrdersCsv(){
       o.note||""
     ].map(U.csvEscape);
   });
-  const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\n");
+  const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\\n");
   U.download("orders_filtered_"+U.today()+".csv", csv, "text/csv");
 }
 
@@ -3712,7 +3712,7 @@ function buildBatchCSV(batch){
     U.money(l.commissionShould), U.money(l.commissionSettle),
     batch.batchId, batch.date, batch.type
   ].map(U.csvEscape).join(","));
-  return [headers.map(U.csvEscape).join(","), ...rows].join("\n");
+  return [headers.map(U.csvEscape).join(","), ...rows].join("\\n");
 }
 function renderBatches(){
   const rows = (S.batches||[]).map(b=>{
@@ -3731,7 +3731,7 @@ function renderBatches(){
         <button class="btn danger" onclick="Actions.deleteBatch('${esc(b.id)}')">删除回滚</button>
       </td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
   $("batchRows").innerHTML = rows || `<tr><td colspan="8" class="small">暂无批次</td></tr>`;
 }
 
@@ -4710,7 +4710,7 @@ function renderSettleRows(){
       </td>
       <td class="right mono">= ${esc(U.money(pVal + cVal))}</td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
 
   $("settleRows").innerHTML = rows || `<tr><td colspan="10" class="small">无可结算订单</td></tr>`;
   $("settleTotal").textContent = U.money(total);
@@ -4972,7 +4972,7 @@ function __escCsv(v){
 }
 function __toCsv(rows, headers){
   const head = headers.map(__escCsv).join(",");
-  const body = rows.map(r=> headers.map(h=>__escCsv(r[h])).join(",")).join("\n");
+  const body = rows.map(r=> headers.map(h=>__escCsv(r[h])).join(",")).join("\\n");
   return head + "\n" + body;
 }
 function __parseCSV(text){
@@ -5511,7 +5511,7 @@ const IO = {
     // 若存在重复，弹出确认：是否仍要添加这些重复行？
     let allowDup = true;
     if(dupLines.length){
-      const preview = dupLines.slice(0,10).join("\n") + (dupLines.length>10 ? `
+      const preview = dupLines.slice(0,10).join("\\n") + (dupLines.length>10 ? `
 ...（共 ${dupLines.length} 条）` : "");
       allowDup = confirm(`检测到产品列表里存在重复项（同卖家+同产品名+同ASIN）。
 
@@ -5641,7 +5641,7 @@ $("btnHardReset").onclick = async ()=>{
 
   const failed = results.filter(r=>!r.ok);
   if(failed.length){
-    alert("彻底重置完成（部分库可能被占用未删除）：\n\n失败项：\n" + failed.map(f=>`${f.name}: ${f.err}`).join("\n") + "\n\n请关闭同域名下的其它标签页后刷新再点一次。");
+    alert("彻底重置完成（部分库可能被占用未删除）：\n\n失败项：\n" + failed.map(f=>`${f.name}: ${f.err}`).join("\\n") + "\n\n请关闭同域名下的其它标签页后刷新再点一次。");
   }else{
     alert("彻底重置完成：已清空所有本地数据。页面将刷新。");
   }
@@ -6330,7 +6330,7 @@ function payoutFilteredOrders(){
       const p = o.productId ? U.productById(o.productId) : null;
       const hay = [
         o.orderId||"", o.asin||"", p?.name||"", o.note||""
-      ].join("\n").toLowerCase();
+      ].join("\\n").toLowerCase();
       if(!hay.includes(q)) return false;
     }
     return true;
@@ -6387,7 +6387,7 @@ function renderPayout(){
       <td>${U.esc(o.review?.status||"")}</td>
       <td>${ps==="payout_pending" ? `<button type="button" class="btn sm" data-payout-view="${U.esc(o.id)}" data-payout-view="${o.id}">查看</button>` : `<button type="button" class="btn sm" data-payout-one="${U.esc(o.id)}" data-payout-single="${o.id}">单笔返款</button>`}</td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
 
   $("payoutRows").innerHTML = rows || `<tr><td colspan="99" class="muted">无符合条件的订单</td></tr>`;
 
@@ -6517,7 +6517,7 @@ function renderPayoutBatches(){
         <button class="btn sm danger" data-payout-del="${U.esc(b.id)}">删除回滚</button>
       </td>
     </tr>`;
-  }).join("\n");
+  }).join("\\n");
 
   $("payoutBatchRows").innerHTML = rows || `<tr><td colspan="6" class="muted">暂无返款批次</td></tr>`;
 
@@ -6624,7 +6624,7 @@ function openPayoutBatchDetail(batchId){
         <td class="mono right">${comm2.toFixed(2)}</td>
         <td class="mono right">${total2.toFixed(2)}</td>
       </tr>`;
-    }).join("\n") || `<tr><td colspan="99" class="muted">无明细</td></tr>`;
+    }).join("\\n") || `<tr><td colspan="99" class="muted">无明细</td></tr>`;
     if($("payoutBatchDetailRows")) $("payoutBatchDetailRows").innerHTML = rows;
 
     if($("payoutBatchDetailModal")) $("payoutBatchDetailModal").style.display = "";
@@ -6702,7 +6702,7 @@ function exportPayoutBatchCSV(batchId){
       ].map(U.csvEscape);
     });
 
-    const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\n");
+    const csv = [headers.map(U.csvEscape).join(","), ...rows.map(r=>r.join(","))].join("\\n");
     U.download(`payout_batch_${String(b.id||"batch").replace(/[\\/:*?"<>|]+/g,"_")}_${U.today()}.csv`, csv, "text/csv");
   }catch(e){
     console.error(e);
@@ -8222,7 +8222,7 @@ const SettleDrafts = (()=> {
           <button class="btn small danger" data-act="del" data-id="${d.id}">删除</button>
         </td>
       </tr>`;
-    }).join("\n");
+    }).join("\\n");
   }
 
   async function openDraft(id){
@@ -8305,7 +8305,7 @@ const SettleDrafts = (()=> {
         principal_settle,commission_settle
       ]);
     });
-    const csv = rows.map(r=>r.map(U.csvEscape).join(",")).join("\n");
+    const csv = rows.map(r=>r.map(U.csvEscape).join(",")).join("\\n");
     U.download(`settle_draft_${batchId||id}.csv`, csv, "text/csv;charset=utf-8");
     showNotice("已导出CSV");
   }
@@ -8710,7 +8710,7 @@ if(typeof window.confirmPayoutModal !== "function"){
       if(typeof payoutModalRunPrecheck === "function"){
         payoutModalRunPrecheck();
         if(M.issues && M.issues.length){
-          alert("预检未通过：\n" + M.issues.slice(0,20).map(x=>`- ${x}`).join("\n") + (M.issues.length>20?`\n…共 ${M.issues.length} 条`:""));
+          alert("预检未通过：\n" + M.issues.slice(0,20).map(x=>`- ${x}`).join("\\n") + (M.issues.length>20?`\n…共 ${M.issues.length} 条`:""));
           return;
         }
       }
@@ -8896,7 +8896,7 @@ if(typeof window.exportPayoutModalCSV !== "function"){
         ].map(x=>`"${String(x).replaceAll('"','""')}"`);
         lines.push(vals.join(","));
       }
-      const csv = "\ufeff" + lines.join("\n");
+      const csv = "\ufeff" + lines.join("\\n");
       const fn = `payout_modal_${new Date().toISOString().slice(0,10)}.csv`;
       U.download(fn, csv, "text/csv");
     }catch(e){
@@ -10020,7 +10020,7 @@ What V30 does:
       try{ db.close(); }catch(e){}
     }
     if(!totalDbs) lines.push("\n未发现可打开的 IndexedDB 数据库（可能被浏览器策略限制）。");
-    alert(lines.join("\n"));
+    alert(lines.join("\\n"));
   }
 
   async function pickBestSplitDB(){
@@ -12558,7 +12558,7 @@ async function cloudStatusFixed(){
       lines.push("PATCH5=ON");
       lines.push("app_key="+res.appKey);
       lines.push("云端订单="+res.count);
-      show(lines.join("\n"));
+      show(lines.join("\\n"));
       log("[PATCH5] ordersCloudStatus", res);
       return res;
     }catch(e){
@@ -13891,7 +13891,7 @@ async function cloudStatusFixed(){
       "ops_sellers_v1="+cnt(a),
       "ops_products_v1="+cnt(b),
       "ops_orders_v2="+cnt(c),
-    ].join("\n");
+    ].join("\\n");
     _alert(msg);
   }
 
@@ -14060,7 +14060,7 @@ async function cloudStatusFixed(){
       "产品 upsert="+productUpserted,
       "订单 upsert="+orderUpserted,
       (skipped.length ? ("跳过订单="+skipped.length+"（控制台查看前10条）") : "")
-    ].filter(Boolean).join("\n");
+    ].filter(Boolean).join("\\n");
     console.log("[V7.7] push skipped sample:", skipped.slice(0,10));
     _alert(msg);
   }
@@ -14363,12 +14363,12 @@ async function cloudStatusFixed(){
           if(head && head.hash && lastPullHash && head.hash !== lastPullHash){
             // if cloud newer than our last pull, block
             if(!lastPullAt || (head.updated_at && new Date(head.updated_at).getTime() > new Date(lastPullAt).getTime())){
-              alertMsg("已阻止推送：云端存在更新且你尚未拉取。
+              alertMsg(`已阻止推送：云端存在更新且你尚未拉取。
 
-云端hash="+head.hash+"
-本地上次拉取hash="+lastPullHash+"
+云端hash=${head.hash}
+本地上次拉取hash=${lastPullHash}
 
-请先点“云端拉取”同步后再推送；如确认要覆盖云端，请点“强制推送”。");
+请先点“云端拉取”同步后再推送；如确认要覆盖云端，请点“强制推送”。`);
               return;
             }
           }
@@ -14378,11 +14378,8 @@ async function cloudStatusFixed(){
       log("push start", {src:snap.src, sellers:sellers, products:products, orders:orders, batches:batches});
       try{
         var data = await restFetch(url, { method:"POST", headers: headers, body: JSON.stringify([row]) });
-        alertMsg("云端推送成功。
-卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"
-来源="+snap.src+"
-hash="+(row.hash||""));
-        try{ localStorage.setItem(LS_LAST_PUSH_HASH, String(row.hash||"")); localStorage.setItem(LS_LAST_PUSH_AT, new Date().toISOString()); }catch(_e){}
+        alertMsg(["云端推送成功。","卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches,"来源="+snap.src,"hash="+(row.hash||"")].join("\n"));
+try{ localStorage.setItem(LS_LAST_PUSH_HASH, String(row.hash||"")); localStorage.setItem(LS_LAST_PUSH_AT, new Date().toISOString()); }catch(_e){}
         log("push ok", data);
       }catch(e){
         alertMsg("云端推送失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14439,11 +14436,8 @@ hash="+(row.hash||""));
         var orders = Array.isArray(payload.orders)? payload.orders.length : 0;
         var batches = Array.isArray(payload.batches)? payload.batches.length : 0;
 
-        alertMsg("云端拉取成功。
-卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches+"
-updated_at="+(r0.updated_at||"")+"
-hash="+(r0.hash||""));
-        try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.setItem(LS_LAST_PULL_AT, String(r0.updated_at||new Date().toISOString())); }catch(_e){}
+        alertMsg(["云端拉取成功。","卖家="+sellers+" 产品="+products+" 订单="+orders+" 批次="+batches,"updated_at="+(r0.updated_at||""),"hash="+(r0.hash||"")].join("\n"));
+try{ localStorage.setItem(LS_LAST_PULL_HASH, String(r0.hash||"")); localStorage.setItem(LS_LAST_PULL_AT, String(r0.updated_at||new Date().toISOString())); }catch(_e){}
         log("pull ok", {sellers:sellers, products:products, orders:orders, batches:batches, updated_at:r0.updated_at});
       }catch(e){
         alertMsg("云端拉取失败：HTTP "+(e.status||"")+"\n"+(e.payload?JSON.stringify(e.payload).slice(0,800): (e.message||e)));
@@ -14588,7 +14582,6 @@ hash="+(r0.hash||""));
       "Accept": "application/json",
       "Prefer": "resolution=merge-duplicates,return=representation"
     };
-  }
   }
 
 
@@ -14743,7 +14736,7 @@ hash="+(r0.hash||""));
       cloudRow ? ("云端 hash: " + (cloudRow.hash||"")) : "",
       cloudRow ? ("云端 updated_at: " + (cloudRow.updated_at||"")) : "",
       cloudRow ? ("云端统计：卖家"+cc.sellers+" 产品"+cc.products+" 订单"+cc.orders+" 批次"+cc.batches) : ""
-    ].filter(Boolean).join("\n");
+    ].filter(Boolean).join("\\n");
     uiAlert(lines);
   }
 
