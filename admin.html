@@ -1256,7 +1256,7 @@ async function restPatchOne(cfg, table, whereQuery, patchBody){
 function _mapOrderToMainRow(cfg, o){
   // Business key: (app_key, seller_name, order_no, item_key)
   const seller_name = String(o.sellerId||"").trim();
-  const order_no = String(o.orderId||"").trim();
+  const order_no = String(getOid(o)||"").trim();
   if(!seller_name || !order_no) return null;
 
   const asin = String(o.asin||"").trim();
@@ -4341,11 +4341,18 @@ function renderOrders(){
   const productMap = new Map((S.products||[]).map(p=>[p.id, p]));
   const selected = UI.selectedOrderIds || new Set();
 
+  const getOid = (o)=> (o && (o.orderId||o.order_no||o.orderNo||o.order_id||o.orderIdRaw||o.order||o.orderNoRaw)) || "";
+  const getSellerNameInline = (o)=>{
+    const byId = sellerMap.get(o && o.sellerId);
+    if(byId && byId.name) return byId.name;
+    return (o && (o.seller_name||o.sellerName||o.seller||"")) || "";
+  };
+
   const matchQ = (o)=>{
     if(!q) return true;
     const sName = (sellerMap.get(o.sellerId)?.name||"").toLowerCase();
     const pName = (productMap.get(o.productId)?.name||o.title||"").toLowerCase();
-    return String(o.orderId||"").toLowerCase().includes(q)
+    return String(getOid(o)||"").toLowerCase().includes(q)
       || String(o.asin||"").toLowerCase().includes(q)
       || sName.includes(q)
       || pName.includes(q);
@@ -4418,20 +4425,21 @@ function renderOrders(){
     const frag = document.createDocumentFragment();
     for(let k=0; k<chunkSize && idx<pageItems.length; k++, idx++){
       const o = pageItems[idx];
-      const sellerName = sellerMap.get(o.sellerId)?.name || "";
+            const sellerName = getSellerNameInline(o);
       const pObj = productMap.get(o.productId);
       const pName = (pObj && pObj.name) ? pObj.name : (o.title||"");
       const pCny = (o.principal && (o.principal.amountCny||0)) || 0;
       const cm = (o.commission && (o.commission.amountCny||0)) || 0;
       const pSett = (o.principal && o.principal.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
       const cSett = (o.commission && o.commission.settled) ? `<span class="badge ok">已结算</span>` : `<span class="badge">待结算</span>`;
-      const checked = selected.has(o.orderId) ? "checked" : "";
+            const oid = String(getOid(o)||"");
+      const checked = selected.has(oid) ? "checked" : "";
 
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td><input type="checkbox" data-oid="${esc(o.orderId)}" ${checked} onchange="Actions.toggleSelect('${esc(o.orderId)}')"/></td>
+        <td><input type="checkbox" data-oid="${esc(oid)}" ${checked} onchange="Actions.toggleSelect('${esc(oid)}')"/></td>
         <td>${esc(U.dateMD(o.date))}</td>
-        <td class="mono">${esc(o.orderId)}</td>
+        <td class="mono">${esc(oid)}</td>
         <td>${esc(sellerName)}</td>
         <td>${esc(o.market||"")}</td>
         <td>${esc(pName)}</td>
